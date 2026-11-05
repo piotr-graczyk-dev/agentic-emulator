@@ -286,14 +286,17 @@ func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
 
 // MARK: - Accessibility bridge repair
 
-// CoreSimulatorBridge (inside the simulator) answers accessibility requests. If SpringBoard is
-// killed and relaunched while the bridge runs (seen on a heavily loaded host: the boot watchdog
-// SIGKILLs a slow SpringBoard), the bridge keeps a stale handle to the old SpringBoard and
-// returns no frontmost application forever. Restarting the bridge fixes it. agemu does that
-// only after accessibility has failed for 15 s while SpringBoard is running, at most every 30 s.
+// CoreSimulatorBridge (inside the simulator) answers accessibility requests. After a boot it
+// regularly fails to find SpringBoard ("no frontmost application", for any client) until it
+// is restarted; in one case it stayed that way for 10 minutes. The same happens when
+// SpringBoard is killed and relaunched while the bridge runs. Restarting the bridge fixes it.
+// agemu restarts it when accessibility still fails although SpringBoard has been running for
+// 3 s, at most every 20 s, and logs it.
 let bridgeLock = NSLock()
 var axFailingSince: [String: Date] = [:]
 var bridgeRestartedAt: [String: Date] = [:]
+var springboardSeen: [String: (pid: Int, at: Date)] = [:]
+var springboardCheckedAt: [String: Date] = [:]
 
 func noteAXResult(_ d: AGDevice, ok: Bool) {
     bridgeLock.lock()
@@ -307,16 +310,32 @@ func noteAXResult(_ d: AGDevice, ok: Bool) {
 
 @discardableResult
 func repairBridgeIfStuck(_ d: AGDevice) -> Bool {
+    let now = Date()
     bridgeLock.lock()
     let since = axFailingSince[d.udid]
     let last = bridgeRestartedAt[d.udid]
+    let checked = springboardCheckedAt[d.udid]
     bridgeLock.unlock()
-    guard let since, Date().timeIntervalSince(since) > 15 else { return false }
-    if let last, Date().timeIntervalSince(last) < 30 { return false }
-    guard let apps = try? runningApps(d), apps.contains(where: { ($0["bundleId"] as? String) == "com.apple.springboard" }) else {
-        return false  // still booting: nothing to repair yet
+    guard let since, now.timeIntervalSince(since) > 2 else { return false }
+    if let last, now.timeIntervalSince(last) < 20 { return false }
+    if let checked, now.timeIntervalSince(checked) < 1 { return false }
+    // Is SpringBoard up, and since when? (launchctl inside the simulator, ~0.3 s)
+    let apps = (try? runningApps(d)) ?? []
+    let sbPid = apps.first(where: { ($0["bundleId"] as? String) == "com.apple.springboard" })?["pid"] as? Int
+    bridgeLock.lock()
+    springboardCheckedAt[d.udid] = Date()
+    guard let sbPid else {
+        springboardSeen[d.udid] = nil
+        bridgeLock.unlock()
+        return false  // still booting
     }
-    log("\(d.udid): accessibility has returned no frontmost app for \(Int(Date().timeIntervalSince(since))) s with SpringBoard running; restarting CoreSimulatorBridge")
+    if springboardSeen[d.udid]?.pid != sbPid {
+        springboardSeen[d.udid] = (sbPid, Date())
+    }
+    let upFor = Date().timeIntervalSince(springboardSeen[d.udid]!.at)
+    bridgeLock.unlock()
+    guard upFor >= 3 else { return false }
+    log("\(d.udid): no frontmost app from accessibility for \(Int(now.timeIntervalSince(since))) s while SpringBoard (pid \(sbPid)) runs; restarting CoreSimulatorBridge")
     _ = try? d.spawnCapture("bin/launchctl", arguments: ["kickstart", "-k", "system/com.apple.CoreSimulator.bridge"], timeout: 15)
     bridgeLock.lock()
     bridgeRestartedAt[d.udid] = Date()
@@ -355,17 +374,13 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
     let deadline = start.addingTimeInterval(timeoutMs / 1000)
     var bootedAt: Double = -1
     var lastError = "not booted"
-    // A device that boots now gets app accessibility switched on once it is up; an already
-    // booted one is only fixed lazily (see readTree), to keep `boot` instant.
-    var needAXSwitch = d.state != 3
+    // App accessibility is switched on lazily (see readTree), never during boot: writing the
+    // preference and posting the accessibility notifications while SpringBoard starts left
+    // CoreSimulatorBridge unable to find the frontmost app until it was restarted.
     while Date() < deadline {
         if d.state == 3 {
             if bootedAt < 0 { bootedAt = Date().timeIntervalSince(start) * 1000 }
             do {
-                if needAXSwitch {
-                    try ensureAppAccessibility(d, force: true)
-                    needAXSwitch = false
-                }
                 try d.prepareHID()
                 let surface = try d.framebuffer()
                 let front: [String: Any]
