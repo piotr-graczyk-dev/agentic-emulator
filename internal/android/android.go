@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,6 +111,11 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		return nil, nil, err
 	}
 	a := &agentClient{serial: r.serial()}
+	// First contact with this emulator from this daemon: make sure our agent version runs.
+	if _, err := ensureAgent(ctx, a, logf); err != nil {
+		e.Close()
+		return nil, nil, err
+	}
 	d.mu.Lock()
 	if d.emu != nil {
 		d.emu.Close()
@@ -367,10 +373,8 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		}
 	}
 
-	d.mu.Lock()
-	d.booting = true
-	d.mu.Unlock()
-	defer func() { d.mu.Lock(); d.booting = false; d.mu.Unlock() }()
+	d.setBooting(true)
+	defer d.setBooting(false)
 
 	loadBaseline := !opts.Cold && a.hasBaseline()
 	if err := d.launch(ctx, a, loadBaseline); err != nil {
@@ -401,7 +405,14 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if _, err := d.refreshDisplay(ctx); err != nil {
 		return api.Device{}, err
 	}
+	d.setBooting(false)
 	return b.device(id)
+}
+
+func (d *device) setBooting(v bool) {
+	d.mu.Lock()
+	d.booting = v
+	d.mu.Unlock()
 }
 
 func (d *device) refreshDisplay(ctx context.Context) (displayInfo, error) {
@@ -508,15 +519,15 @@ func (d *device) checkGuest(ctx context.Context) {
 	d.mu.Lock()
 	serial := d.run.serial()
 	d.mu.Unlock()
-	out, err := adbShellOK(ctx, serial, "getprop ro.config.low_ram; head -1 /proc/meminfo")
+	lowram, err := adbShellOK(ctx, serial, "getprop ro.config.low_ram")
 	if err != nil {
 		return
 	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "true" {
+	mem, _ := adbShellOK(ctx, serial, "head -1 /proc/meminfo")
+	if strings.TrimSpace(lowram) == "true" {
 		logf("%s: WARNING ro.config.low_ram=true (the emulator's -lowram flag changed guest behaviour); set AGEMU_ANDROID_RAM_MB=4096", d.name)
 	}
-	logf("%s: guest %s", d.name, strings.Join(strings.Fields(strings.Join(lines[1:], " ")), " "))
+	logf("%s: guest %s, ro.config.low_ram=%q", d.name, strings.Join(strings.Fields(mem), " "), strings.TrimSpace(lowram))
 }
 
 // makeBaseline brings a freshly cold-booted device to a settled home screen and saves
@@ -531,7 +542,9 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
 	// Let boot-time work (launcher, package scans) finish so a restored device is quiet.
 	time.Sleep(settle)
-	_ = e.key(ctx, evdevKeys["home"])
+	d.warmUpKeyboard(ctx, e, a)
+	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
+	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
 	t := time.Now()
 	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -549,6 +562,80 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	logf("%s: saved %s in %v", d.name, baselineSnapshot, time.Since(t).Round(time.Millisecond))
 	a.Close()
 	return nil
+}
+
+// warmUpKeyboard shows the soft keyboard once before the baseline is taken. The emulator's
+// virtio touchscreen advertises stylus support, so on first use Gboard opens a one-time
+// "Try out your stylus" sheet that steals focus from the text field. Without this, that sheet
+// would come back after every reset. Best effort: any failure only means no warm-up.
+func (d *device) warmUpKeyboard(ctx context.Context, e *emuClient, a *agentClient) {
+	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	defer cancel()
+	tree := func() *api.UITree {
+		var raw rawTree
+		if a.call(ctx, map[string]any{"cmd": "tree"}, &raw) != nil {
+			return nil
+		}
+		return mapTree(&raw)
+	}
+	find := func(pred func(*api.Element) bool, timeout time.Duration) *api.Element {
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if t := tree(); t != nil {
+				var hit *api.Element
+				t.Walk(func(el *api.Element) {
+					if hit == nil && el.Frame.W > 0 && el.Frame.H > 0 && pred(el) {
+						hit = el
+					}
+				})
+				if hit != nil {
+					return hit
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return nil
+	}
+	tapEl := func(el *api.Element) {
+		di, err := a.display(ctx)
+		if err != nil {
+			return
+		}
+		m := newScreenMap(di.W, di.H, di.PhysW, di.PhysH)
+		px, py := m.toPhysical(el.Frame.Center())
+		_ = e.touch(ctx, px, py, 1)
+		_ = e.touch(ctx, px, py, 0)
+	}
+	stylusSheet := func(el *api.Element) bool { return strings.Contains(strings.ToLower(el.Text), "try out your stylus") }
+	if err := a.call(ctx, map[string]any{"cmd": "launch", "pkg": "com.android.settings"}, nil); err != nil {
+		logf("%s: keyboard warm-up skipped: %v", d.name, err)
+		return
+	}
+	bar := find(func(el *api.Element) bool {
+		return strings.HasSuffix(el.ID, "/search_action_bar") || el.Text == "Search Settings" || el.Text == "Search settings"
+	}, 8*time.Second)
+	if bar == nil {
+		logf("%s: keyboard warm-up skipped: no settings search bar", d.name)
+		return
+	}
+	tapEl(bar)
+	if find(func(el *api.Element) bool { return el.Role == "textfield" && el.Focused }, 8*time.Second) == nil {
+		logf("%s: keyboard warm-up: no focused text field", d.name)
+	}
+	_ = a.call(ctx, map[string]any{"cmd": "text", "text": "a"}, nil)
+	if sheet := find(stylusSheet, 6*time.Second); sheet != nil {
+		if c := find(func(el *api.Element) bool { return el.Text == "Cancel" && el.Clickable }, 3*time.Second); c != nil {
+			tapEl(c)
+			logf("%s: dismissed Gboard's one-time stylus sheet", d.name)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["back"]}, nil)
+		time.Sleep(200 * time.Millisecond)
+	}
+	for _, p := range []string{"com.android.settings", "com.google.android.settings.intelligence"} {
+		_ = a.call(ctx, map[string]any{"cmd": "stop", "pkg": p}, nil)
+	}
 }
 
 func (b *Backend) Shutdown(ctx context.Context, id string) error {
@@ -868,34 +955,31 @@ func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, duration
 	return e.touch(ctx, bx, by, 0)
 }
 
-func asciiPrintable(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-// TypeText types into the focused field. ASCII goes through the emulator's keyboard
-// (gRPC sendKey text: real key events from the virtual hardware keyboard); other text
-// (non-ASCII, emoji) is injected by the on-device agent, which waits until it is handled.
+// TypeText types into the focused field. A phone AVD has no keyboard device (hw.keyboard=no,
+// so the soft keyboard behaves as on a real phone), which leaves the emulator's gRPC sendKey
+// nothing to drive; the on-device agent injects the key events instead (like
+// `adb shell input text`, including non-ASCII) and returns once the app has handled them.
 func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
 	d, err := b.devFor(id)
 	if err != nil {
 		return err
 	}
-	e, a, err := d.conn(ctx)
+	_, a, err := d.conn(ctx)
 	if err != nil {
 		return err
 	}
 	if text == "" {
 		return nil
 	}
-	if asciiPrintable(text) && env("AGEMU_ANDROID_TEXT", "grpc") == "grpc" {
-		return e.text(ctx, text)
-	}
 	return a.call(ctx, map[string]any{"cmd": "text", "text": text}, nil)
+}
+
+// Android KeyEvent key codes for the named keys.
+var keyCodes = map[string]int{
+	"home": 3, "back": 4, "enter": 66, "return": 66, "delete": 67, "backspace": 67,
+	"tab": 61, "escape": 111, "esc": 111, "volumeup": 24, "volumedown": 25,
+	"lock": 26, "power": 26, "menu": 82, "recents": 187, "appswitch": 187,
+	"up": 19, "down": 20, "left": 21, "right": 22, "space": 62, "forwarddelete": 112, "search": 84,
 }
 
 func (b *Backend) Key(ctx context.Context, id string, key string) error {
@@ -903,19 +987,20 @@ func (b *Backend) Key(ctx context.Context, id string, key string) error {
 	if err != nil {
 		return err
 	}
-	code, ok := evdevKeys[strings.ToLower(key)]
+	code, ok := keyCodes[strings.ToLower(key)]
 	if !ok {
-		names := make([]string, 0, len(evdevKeys))
-		for k := range evdevKeys {
+		names := make([]string, 0, len(keyCodes))
+		for k := range keyCodes {
 			names = append(names, k)
 		}
+		sort.Strings(names)
 		return fmt.Errorf("unknown key %q (have: %s)", key, strings.Join(names, ", "))
 	}
-	e, _, err := d.conn(ctx)
+	_, a, err := d.conn(ctx)
 	if err != nil {
 		return err
 	}
-	return e.key(ctx, code)
+	return a.call(ctx, map[string]any{"cmd": "key", "code": code}, nil)
 }
 
 // ------------------------------------------------------------------ apps

@@ -85,24 +85,6 @@ func (e *emuClient) touch(ctx context.Context, x, y, pressure int) error {
 	return err
 }
 
-// evdev key codes; Android's Generic.kl maps them to HOME, BACK, ...
-var evdevKeys = map[string]int32{
-	"home": 172, "back": 158, "enter": 28, "return": 28, "delete": 14, "backspace": 14,
-	"tab": 15, "escape": 1, "esc": 1, "volumeup": 115, "volumedown": 114, "lock": 116, "power": 116,
-	"menu": 139, "recents": 580, "appswitch": 580, "up": 103, "down": 108, "left": 105, "right": 106,
-	"space": 57, "forwarddelete": 111,
-}
-
-func (e *emuClient) key(ctx context.Context, code int32) error {
-	_, err := e.ctl.SendKey(ctx, &emupb.KeyboardEvent{CodeType: emupb.KeyboardEvent_Evdev, EventType: emupb.KeyboardEvent_keypress, KeyCode: code})
-	return err
-}
-
-func (e *emuClient) text(ctx context.Context, s string) error {
-	_, err := e.ctl.SendKey(ctx, &emupb.KeyboardEvent{Text: s})
-	return err
-}
-
 func (e *emuClient) shutdown(ctx context.Context) error {
 	_, err := e.ctl.SetVmState(ctx, &emupb.VmRunState{State: emupb.VmRunState_SHUTDOWN})
 	return err

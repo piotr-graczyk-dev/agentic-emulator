@@ -192,9 +192,20 @@ public final class Agent {
                 injectText(req.getString("text"));
                 sb.append("true");
                 return;
+            case "key":
+                injectKey(req.getInt("code"));
+                sb.append("true");
+                return;
             case "fg":
                 str(sb, foreground());
                 return;
+            case "cleartasks": {
+                // Remove recent tasks (what swiping everything away in Overview does).
+                Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+                atm.getClass().getMethod("removeAllVisibleRecentTasks").invoke(atm);
+                sb.append("true");
+                return;
+            }
             case "exit":
                 sb.append("true");
                 new Thread(new Runnable() {
@@ -257,14 +268,39 @@ public final class Agent {
         } else {
             c.getMethod("setForcedDisplayDensityForUser", int.class, int.class, int.class).invoke(wm, 0, density, USER_CURRENT);
         }
-        long deadline = SystemClock.uptimeMillis() + 5000;
-        while (SystemClock.uptimeMillis() < deadline) {
+        long t0 = SystemClock.uptimeMillis();
+        while (SystemClock.uptimeMillis() - t0 < 5000) {
             Object di = displayInfo();
             if (intField(di, "logicalWidth") == w && intField(di, "logicalHeight") == h
                     && intField(di, "logicalDensityDpi") == density) break;
             SystemClock.sleep(5);
         }
-        if (settleMs > 0) idle(150, settleMs); // let apps relayout / relaunch for the new configuration
+        if (settleMs <= 0) return;
+        // Apps relaunch / relayout for the new configuration. Wait until the foreground app's
+        // window covers the new display and exposes content again, then for a quiet period.
+        long t1 = SystemClock.uptimeMillis();
+        while (SystemClock.uptimeMillis() - t1 < settleMs) {
+            if (fgWindowFits(w, h)) break;
+            SystemClock.sleep(10);
+        }
+        long left = settleMs - (SystemClock.uptimeMillis() - t1);
+        idle(300, Math.max(500, left));
+    }
+
+    static boolean fgWindowFits(int w, int h) {
+        try {
+            for (AccessibilityWindowInfo win : ua.getWindows()) {
+                if (win.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(win.isActive() || win.isFocused())) continue;
+                Rect b = new Rect();
+                win.getBoundsInScreen(b);
+                AccessibilityNodeInfo r = win.getRoot();
+                if (r == null || r.getChildCount() == 0) return false;
+                Rect rb = new Rect();
+                r.getBoundsInScreen(rb);
+                return b.width() == w && b.height() == h && rb.width() == w && rb.height() == h;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     static boolean idle(long quietMs, long timeoutMs) {
@@ -408,8 +444,28 @@ public final class Agent {
         int result = wr.getClass().getField("result").getInt(wr);
         long total = wr.getClass().getField("totalTime").getLong(wr);
         if (result < 0) throw new IllegalStateException("start failed, result " + result + " for " + cn.flattenToShortString());
+        // `am start -W` returns at the first drawn frame; agents read the accessibility tree next,
+        // so also wait until the app's window is the active one and exposes content.
+        long t0 = SystemClock.uptimeMillis();
+        boolean ready = false;
+        while (!ready && SystemClock.uptimeMillis() - t0 < 3000) {
+            ready = appWindowReady(cn.getPackageName());
+            if (!ready) SystemClock.sleep(5);
+        }
         sb.append("{\"component\":"); str(sb, cn.flattenToShortString());
-        sb.append(",\"result\":").append(result).append(",\"totalTime\":").append(total).append('}');
+        sb.append(",\"result\":").append(result).append(",\"totalTime\":").append(total);
+        sb.append(",\"a11yReadyMs\":").append(SystemClock.uptimeMillis() - t0).append(",\"a11yReady\":").append(ready).append('}');
+    }
+
+    static boolean appWindowReady(String pkg) {
+        try {
+            for (AccessibilityWindowInfo w : ua.getWindows()) {
+                if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(w.isActive() || w.isFocused())) continue;
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r != null && pkg.contentEquals(cs(r.getPackageName())) && r.getChildCount() > 0) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     static void forceStop(String pkg) throws Exception {
@@ -418,11 +474,25 @@ public final class Agent {
         am.getClass().getMethod("forceStopPackage", String.class, int.class).invoke(am, pkg, USER_CURRENT);
     }
 
-    // ---------------------------------------------------------------- input (text fallback)
+    // ---------------------------------------------------------------- input (keys / text)
+    //
+    // A phone AVD (hw.keyboard=no, like a real phone) has no keyboard device, so the emulator's
+    // gRPC sendKey has nothing to drive. Keys and text are injected here the way
+    // `adb shell input` does (virtual keyboard device), but synchronously: injectInputEvent(sync)
+    // returns after the focused app has handled the event.
+
+    static void injectKey(int code) {
+        long now = SystemClock.uptimeMillis();
+        KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
+        ua.injectInputEvent(down, false);
+        KeyEvent up = new KeyEvent(now, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
+        ua.injectInputEvent(up, true);
+    }
 
     /** Types text with virtual-keyboard key events (like `input text`); characters with no key use ACTION_MULTIPLE. */
     static void injectText(String text) {
         KeyCharacterMap kcm = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
+        List<KeyEvent> all = new ArrayList<>();
         int i = 0;
         while (i < text.length()) {
             int cp = text.codePointAt(i);
@@ -430,16 +500,17 @@ public final class Agent {
             i += Character.charCount(cp);
             KeyEvent[] evs = kcm.getEvents(ch.toCharArray());
             if (evs != null) {
-                for (KeyEvent e : evs) {
-                    KeyEvent k = KeyEvent.changeTimeRepeat(e, SystemClock.uptimeMillis(), 0);
-                    k.setSource(InputDevice.SOURCE_KEYBOARD);
-                    ua.injectInputEvent(k, true);
-                }
+                for (KeyEvent e : evs) all.add(e);
             } else {
-                KeyEvent k = new KeyEvent(SystemClock.uptimeMillis(), ch, KeyCharacterMap.VIRTUAL_KEYBOARD, 0);
-                k.setSource(InputDevice.SOURCE_KEYBOARD);
-                ua.injectInputEvent(k, true);
+                all.add(new KeyEvent(SystemClock.uptimeMillis(), ch, KeyCharacterMap.VIRTUAL_KEYBOARD, 0));
             }
+        }
+        // The input dispatcher keeps order; waiting for the last event means all were handled.
+        for (int k = 0; k < all.size(); k++) {
+            KeyEvent e = all.get(k);
+            KeyEvent ev = e.getAction() == KeyEvent.ACTION_MULTIPLE ? e : KeyEvent.changeTimeRepeat(e, SystemClock.uptimeMillis(), 0);
+            ev.setSource(InputDevice.SOURCE_KEYBOARD);
+            ua.injectInputEvent(ev, k == all.size() - 1);
         }
     }
 
