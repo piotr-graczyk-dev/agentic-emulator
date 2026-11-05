@@ -276,6 +276,28 @@ func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
     return tree
 }
 
+// MARK: - User apps
+
+// User-installed apps live in the device's data directory on the host
+// (Containers/Bundle/Application/<uuid>/<name>.app). Reading their Info.plists takes
+// milliseconds; -[SimDevice installedAppsWithError:] takes ~1-2 s.
+func userApps(_ d: AGDevice) -> [String] {
+    let root = URL(fileURLWithPath: d.dataPath).appendingPathComponent("Containers/Bundle/Application")
+    let fm = FileManager.default
+    var out: [String] = []
+    for container in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+        for item in (try? fm.contentsOfDirectory(at: container, includingPropertiesForKeys: nil)) ?? []
+        where item.pathExtension == "app" {
+            guard let data = try? Data(contentsOf: item.appendingPathComponent("Info.plist")),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let bundle = plist["CFBundleIdentifier"] as? String
+            else { continue }
+            out.append(bundle)
+        }
+    }
+    return out.sorted()
+}
+
 // MARK: - Readiness
 
 // Agent-ready: booted AND SpringBoard answers accessibility AND the framebuffer is readable.
@@ -418,6 +440,8 @@ func handle(_ req: [String: Any]) throws -> Any {
             ]
         }
         return out
+    case "userapps":
+        return userApps(try device(req))
     case "running":
         return try runningApps(try device(req))
     case "spawn":

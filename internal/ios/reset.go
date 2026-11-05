@@ -3,6 +3,7 @@ package ios
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -81,27 +82,24 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 		}
 	}()
 
-	var apps map[string]installedApp
-	if err := b.call(ctx, "apps", map[string]any{"udid": udid}, &apps); err != nil {
+	system, err := b.systemApps(ctx, d)
+	if err != nil {
 		wg.Wait()
 		return rep, err
 	}
-	bundles := make([]string, 0, len(apps))
-	for bundle := range apps {
-		bundles = append(bundles, bundle)
+	var user []string
+	if err := b.call(ctx, "userapps", map[string]any{"udid": udid}, &user); err != nil {
+		wg.Wait()
+		return rep, err
 	}
-	sort.Strings(bundles)
 	// Terminating an app that is not running fails in about a millisecond, so terminating
-	// everything is cheaper than asking launchctl what runs.
-	for _, bundle := range bundles {
+	// everything is cheaper than asking launchctl what runs (~0.5 s).
+	for _, bundle := range append(append([]string{}, system...), user...) {
 		if err := b.call(ctx, "terminate", map[string]any{"udid": udid, "bundleId": bundle}, nil); err == nil {
 			rep.Terminated++
 		}
 	}
-	for _, bundle := range bundles {
-		if apps[bundle].Type != "User" {
-			continue
-		}
+	for _, bundle := range user {
 		if err := b.call(ctx, "uninstall", map[string]any{"udid": udid, "bundleId": bundle}, nil); err != nil {
 			wg.Wait()
 			return rep, fmt.Errorf("reset: %w", err)
@@ -112,15 +110,48 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	delete(b.apps, udid)
 	b.mu.Unlock()
 
+	tCleanup := time.Since(start)
 	wg.Wait()
+	if d := time.Since(start) - tCleanup; d > 100*time.Millisecond {
+		log.Printf("ios reset %s: waited %.0f ms for simctl privacy/keychain/pbcopy", udid, ms(d))
+	}
 	if simctlErr != nil {
 		return rep, fmt.Errorf("reset: %w", simctlErr)
 	}
+	tApps := time.Since(start)
 	if err := b.goHome(ctx, udid); err != nil {
 		return rep, fmt.Errorf("reset: %w", err)
 	}
 	rep.Ms = float64(time.Since(start).Microseconds()) / 1000
+	log.Printf("ios reset %s: %.0f ms (apps+simctl %.0f ms, home %.0f ms), terminated %d, uninstalled %v",
+		udid, rep.Ms, ms(tApps), ms(time.Since(start)-tApps), rep.Terminated, rep.Uninstalled)
 	return rep, nil
+}
+
+// systemApps lists the runtime's built-in apps. They are fixed per runtime, so the slow
+// CoreSimulator query (~1-2 s) runs once per runtime.
+func (b *Backend) systemApps(ctx context.Context, d simDevice) ([]string, error) {
+	b.mu.Lock()
+	cached, ok := b.systemAppCache[d.Runtime]
+	b.mu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	var apps map[string]installedApp
+	if err := b.call(ctx, "apps", map[string]any{"udid": d.UDID}, &apps); err != nil {
+		return nil, err
+	}
+	var out []string
+	for bundle, a := range apps {
+		if a.Type != "User" {
+			out = append(out, bundle)
+		}
+	}
+	sort.Strings(out)
+	b.mu.Lock()
+	b.systemAppCache[d.Runtime] = out
+	b.mu.Unlock()
+	return out, nil
 }
 
 // goHome presses home and waits until SpringBoard is the frontmost application.
@@ -182,3 +213,5 @@ func (b *Backend) springboardPid(ctx context.Context, udid string, refresh bool)
 	}
 	return 0, fmt.Errorf("SpringBoard is not running on %s", udid)
 }
+
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }

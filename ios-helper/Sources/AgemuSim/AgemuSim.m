@@ -504,10 +504,12 @@ static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSIn
 
 - (BOOL)bootWithError:(NSError **)error
 {
+  [self resetConnections];
   @try {
     NSError *err = nil;
     // persist: keep the device booted after this process exits (as `simctl boot` does).
-    if (![self.device bootWithOptions:@{@"persist" : @YES} error:&err]) {
+    NSDictionary *options = @{@"persist" : @YES};
+    if (![self.device bootWithOptions:options error:&err]) {
       AG_FAIL(error, AGWrap(@"boot", err));
       return NO;
     }

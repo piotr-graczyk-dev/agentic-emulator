@@ -54,11 +54,13 @@ type Backend struct {
 	apps map[string]map[int]string
 	// springboard caches SpringBoard's pid per udid.
 	springboard map[string]int
+	// systemAppCache holds the built-in apps per runtime identifier.
+	systemAppCache map[string][]string
 }
 
 // New is cheap: the helper process starts on first use.
 func New() *Backend {
-	return &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, springboard: map[string]int{}}
+	return &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, springboard: map[string]int{}, systemAppCache: map[string][]string{}}
 }
 
 func (b *Backend) Platform() api.Platform { return api.IOS }
@@ -273,10 +275,13 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			return api.Device{}, err
 		}
 	}
-	if err := b.bootReady(ctx, d.UDID); err != nil {
-		return api.Device{}, err
+	if d.StateCode != stateBooted {
+		// Make room first, so the new boot never exceeds the limit.
+		if err := b.enforceMaxBooted(ctx, d.UDID, 1); err != nil {
+			return api.Device{}, err
+		}
 	}
-	if err := b.enforceMaxBooted(ctx, d.UDID); err != nil {
+	if err := b.bootReady(ctx, d.UDID); err != nil {
 		return api.Device{}, err
 	}
 	return b.describe(ctx, d.UDID)
@@ -295,7 +300,9 @@ func (b *Backend) bootReady(ctx context.Context, udid string) error {
 	if err := b.call(ctx, "boot", map[string]any{"udid": udid}, &d); err != nil {
 		return err
 	}
-	timeout := 180 * time.Second
+	// The first boot of a new or erased simulator migrates data and can take minutes on a
+	// busy host; later boots take seconds.
+	timeout := 10 * time.Minute
 	if dl, ok := ctx.Deadline(); ok {
 		timeout = time.Until(dl)
 	}
@@ -351,19 +358,24 @@ func maxBooted() int {
 }
 
 // enforceMaxBooted shuts down the least recently used booted agemu simulators (never keep,
-// never a non-agemu simulator) until at most maxBooted() are booted.
-func (b *Backend) enforceMaxBooted(ctx context.Context, keep string) error {
+// never a non-agemu simulator) until at most maxBooted()-reserve of them are booted besides
+// keep. Call it with reserve 1 before booting keep.
+func (b *Backend) enforceMaxBooted(ctx context.Context, keep string, reserve int) error {
 	ds, err := b.listSims(ctx)
 	if err != nil {
 		return err
 	}
 	var booted []simDevice
+	keepBooted := 0
 	for _, d := range ds {
 		if managed(d.Name) && (d.StateCode == stateBooted || d.StateCode == stateBooting) {
 			booted = append(booted, d)
+			if d.UDID == keep {
+				keepBooted = 1
+			}
 		}
 	}
-	limit := maxBooted()
+	limit := maxBooted() - reserve + keepBooted
 	if len(booted) <= limit {
 		return nil
 	}
@@ -408,10 +420,10 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 	b.mu.Lock()
 	b.lastUse[udid] = time.Now()
 	b.mu.Unlock()
-	if err := b.bootReady(ctx, udid); err != nil {
+	if err := b.enforceMaxBooted(ctx, udid, 1); err != nil {
 		return api.Device{}, err
 	}
-	if err := b.enforceMaxBooted(ctx, udid); err != nil {
+	if err := b.bootReady(ctx, udid); err != nil {
 		return api.Device{}, err
 	}
 	return b.describe(ctx, udid)

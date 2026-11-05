@@ -149,10 +149,14 @@ profile_size() {
 }
 for P in iphone-se-3 ipad-mini iphone-17-pro; do
   want=$(profile_size "$P")
-  expect "switch to profile $P" profile "$P"
+  if ! ag profile "$P"; then
+    bad "switch to profile $P"
+    continue
+  fi
+  ok "switch to profile $P"
   NID=$(json '["id"]')
   [[ "$(json '["profile"]')" == "$P" ]] && ok "device $(json '["name"]') has profile $P" || bad "profile: $LAST"
-  export AGEMU_DEVICE="$NID"
+  [[ -n "$NID" ]] && export AGEMU_DEVICE="$NID"
   expect "screenshot in $P" screenshot -o "$OUT/$P.png"
   got=$(png_size "$OUT/$P.png")
   [[ "$got" == "$want" ]] && ok "$P.png is $got (profile $want)" || bad "$P.png is $got, profile says $want"
@@ -174,6 +178,7 @@ for P in iphone-se-3 ipad-mini iphone-17-pro; do
 done
 
 step "reset and verify the clean state (agemu-iphone-17-pro)"
+export AGEMU_DEVICE="$ID"
 if [[ -n "$TESTAPP" ]]; then
   expect "install the test app (dirty state)" install "$TESTAPP"
   expect "launch the test app" launch dev.agemu.testapp
