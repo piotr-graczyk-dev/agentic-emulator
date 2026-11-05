@@ -79,7 +79,11 @@ agemu makes boot and reset fast with two honest techniques:
   then the least recently used one is shut down.
 - **Soft reset instead of erase.** `simctl erase` needs a shutdown, an erase and a full first
   boot (data migration). `agemu reset` cleans the running device instead:
-  1. terminates every app (system and user),
+  1. terminates every app (system and user). Terminating an app that is not running fails in
+     about a millisecond, so this is cheaper than asking launchctl what runs. The built-in app
+     list is fixed per runtime and cached (the CoreSimulator query takes 1-2 s); user apps are
+     found by reading `Containers/Bundle/Application/*/*.app/Info.plist` in the device's data
+     directory on the host,
   2. uninstalls every user-installed app, which deletes its data and app-group containers,
   3. resets privacy permissions (`simctl privacy reset all`), the keychain
      (`simctl keychain reset`) and the pasteboard,
@@ -136,7 +140,15 @@ BENCHMARK_PLACEHOLDER
   versions it loaded (`hello`).
 - **HID keyboard.** Typing uses a US hardware keyboard layout. While a hardware keyboard is in
   use iOS hides the software keyboard, as it does when you type on a Mac keyboard in
-  Simulator.app.
+  Simulator.app, and iOS's hardware-keyboard auto-capitalization (on by default) applies, so
+  `type hello` into an empty field with sentence capitalization can produce "Hello", exactly as
+  on a device with a keyboard.
+- **Disk.** Every simulator that has booted once costs 1-2 GB: on its first boot iOS stages
+  about 1 GB of Siri, text-to-speech and linguistic assets into
+  `data/private/var/MobileAsset` (`mobileassetd`; `simctl boot --disabledJob` does not stop it).
+  `xcrun simctl erase <udid>` (on a shut-down device) returns it to ~17 MB.
+- **First boot** of a new or erased simulator migrates data and took 1.5-3 minutes on this
+  (heavily loaded) host; agemu waits up to 10 minutes. Later boots take seconds.
 - **Launch time is the app's.** `agemu launch` makes the same CoreSimulator call as
   `simctl launch`; the call itself (FrontBoard starting the process) dominates, so it is not
   faster. What an app does after launch (Settings takes ~2 s to show its list on this host) is
