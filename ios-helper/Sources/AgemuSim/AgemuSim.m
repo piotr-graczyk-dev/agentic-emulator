@@ -410,6 +410,8 @@ static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSIn
 @property (nonatomic, strong, nullable) id hidClient;
 @property (nonatomic, strong) dispatch_group_t hidGroup;
 @property (nonatomic, strong, nullable) NSError *hidDeliveryError;
+// The boot the framebuffer / HID connections belong to (-[SimDevice lastBootedAt]).
+@property (nonatomic, strong, nullable) NSDate *connectedBoot;
 @end
 
 @implementation AGDevice
@@ -533,6 +535,44 @@ static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSIn
   } @catch (NSException *e) {
     AG_FAIL(error, AGExceptionError(@"shutdown", e));
     return NO;
+  }
+}
+
+- (NSDate *)currentBoot
+{
+  @try {
+    if ([self.device respondsToSelector:@selector(lastBootedAt)]) {
+      return [self.device lastBootedAt];
+    }
+  } @catch (NSException *e) {
+  }
+  return nil;
+}
+
+// A reboot by another tool (simctl, Xcode) kills the framebuffer and HID proxies without
+// telling us: the HID client then fails with "device disconnected" and a cached surface
+// would keep showing the last frame of the old boot. Reconnect when the boot changed.
+- (void)reconnectIfRebooted
+{
+  NSDate *boot = [self currentBoot];
+  BOOL stale = NO;
+  @synchronized(self) {
+    if (boot && self.connectedBoot && ![boot isEqualToDate:self.connectedBoot]) {
+      stale = YES;
+    }
+  }
+  if (stale) {
+    [self resetConnections];
+  }
+}
+
+- (void)noteConnected
+{
+  NSDate *boot = [self currentBoot];
+  @synchronized(self) {
+    if (boot) {
+      self.connectedBoot = boot;
+    }
   }
 }
 
@@ -739,6 +779,7 @@ static IOSurface *AGAsSurface(id candidate)
 
 - (IOSurface *)framebufferWithError:(NSError **)error
 {
+  [self reconnectIfRebooted];
   @synchronized(self) {
     if (self.surface) {
       return self.surface;
@@ -834,6 +875,7 @@ static IOSurface *AGAsSurface(id candidate)
         }
       }
       [self setLiveSurface:current];
+      [self noteConnected];
     } @catch (NSException *e) {
       err = AGExceptionError(@"framebuffer", e);
     }
@@ -869,6 +911,7 @@ static IOSurface *AGAsSurface(id candidate)
       return NO;
     }
     self.hidClient = client;
+    [self noteConnected];
     return YES;
   } @catch (NSException *e) {
     AG_FAIL(error, AGExceptionError(@"SimDeviceLegacyHIDClient init", e));
@@ -881,6 +924,7 @@ static IOSurface *AGAsSurface(id candidate)
   if (!AGLoadFrameworks(error)) {
     return NO;
   }
+  [self reconnectIfRebooted];
   __block BOOL ok = NO;
   __block NSError *err = nil;
   dispatch_sync(self.hidQueue, ^{
@@ -899,6 +943,7 @@ static IOSurface *AGAsSurface(id candidate)
     AG_FAIL(error, AGError(@"Indigo message builder returned NULL"));
     return NO;
   }
+  [self reconnectIfRebooted];
   __block BOOL ok = NO;
   __block NSError *err = nil;
   dispatch_sync(self.hidQueue, ^{
@@ -952,6 +997,10 @@ static IOSurface *AGAsSurface(id candidate)
     self.hidDeliveryError = nil;
   });
   if (delivery) {
+    // The client is bound to a dead connection (e.g. the device rebooted): reconnect next time.
+    dispatch_sync(self.hidQueue, ^{
+      self.hidClient = nil;
+    });
     AG_FAIL(error, AGWrap(@"HID delivery", delivery));
     return NO;
   }

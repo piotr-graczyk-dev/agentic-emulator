@@ -39,6 +39,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (id)deviceType;
 - (id)runtime;
 - (NSString *)dataPath;
+- (nullable NSDate *)lastBootedAt;
 - (nullable id)io;
 - (BOOL)bootWithOptions:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)shutdownWithError:(NSError **)error;

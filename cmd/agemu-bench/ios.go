@@ -329,7 +329,7 @@ func iosSuite(cfg Config) ([]Op, error) {
 			Daemon:   func() error { return b.call("boot", daemon.Params{}) },
 		},
 		{
-			Name: "boot (cold, from shutdown)", N: 2,
+			Name: "boot (cold from shutdown)", N: 2,
 			Before:   b.shutdown,
 			BaseDesc: "xcrun simctl boot + simctl bootstatus -b",
 			Baseline: func() error {
