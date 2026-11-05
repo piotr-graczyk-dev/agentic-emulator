@@ -1,42 +1,984 @@
-// Package android is the Android backend (stub; implemented in a follow-up step).
+// Package android is the Android backend of agemu.
+//
+// Devices are stock Android emulators (SDK QEMU + HVF) running the stock SDK system image.
+// agemu only replaces the control plane:
+//
+//   - emulator gRPC (EmulatorController / SnapshotService): framebuffer screenshots,
+//     touch, keys, text, snapshots, shutdown;
+//   - an on-device agent (android-agent/, app_process as the shell user) holding one
+//     UiAutomation connection: UI tree, launch/stop, display profile overrides;
+//   - the adb server's smart-socket protocol, spoken directly (no adb process per call).
+//
+// Device ids are "android:<avd-name>". Only AVDs named agemu-* are managed by default
+// (see managed in sdk.go), so agemu never touches other emulators on the machine.
 package android
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
 )
 
-type Backend struct{}
+type Backend struct {
+	mu   sync.Mutex
+	devs map[string]*device
+}
 
-func New() *Backend { return &Backend{} }
+// New is cheap: it spawns nothing and connects to nothing until a device is used.
+func New() *Backend { return &Backend{devs: map[string]*device{}} }
 
-func (b *Backend) Platform() api.Platform                         { return api.Android }
-func (b *Backend) List(ctx context.Context) ([]api.Device, error) { return nil, nil }
+func (b *Backend) Platform() api.Platform { return api.Android }
+
+type device struct {
+	name string
+	life sync.Mutex // serializes boot / shutdown / reset / profile
+
+	mu      sync.Mutex // guards the fields below
+	booting bool
+	run     runningEmu
+	emu     *emuClient
+	agent   *agentClient
+	disp    displayInfo // last known logical display
+	dispAt  time.Time
+	proc    *exec.Cmd // emulator we launched (reaped by a goroutine)
+}
+
+func logf(format string, args ...any) { log.Printf("android: "+format, args...) }
+
+func avdName(id string) (string, error) {
+	name, ok := strings.CutPrefix(id, string(api.Android)+":")
+	if !ok || name == "" {
+		return "", fmt.Errorf("not an android device id: %q", id)
+	}
+	if !managed(name) {
+		return "", fmt.Errorf("AVD %q is not managed by agemu (only %s* by default; set AGEMU_ANDROID_AVDS)", name, defaultAVDPrefix)
+	}
+	return name, nil
+}
+
+func (b *Backend) dev(name string) *device {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	d, ok := b.devs[name]
+	if !ok {
+		d = &device{name: name}
+		b.devs[name] = d
+	}
+	return d
+}
+
+func (b *Backend) devFor(id string) (*device, error) {
+	name, err := avdName(id)
+	if err != nil {
+		return nil, err
+	}
+	return b.dev(name), nil
+}
+
+// ------------------------------------------------------------------ connections
+
+// conn returns live clients for a running device, (re)connecting when the emulator changed.
+func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
+	d.mu.Lock()
+	if d.emu != nil && pidAlive(d.run.PID) && !isZombie(d) {
+		e, a := d.emu, d.agent
+		d.mu.Unlock()
+		return e, a, nil
+	}
+	d.mu.Unlock()
+	r, ok := findRunning(d.name)
+	if !ok {
+		d.drop()
+		return nil, nil, fmt.Errorf("device android:%s is not running (agemu boot android:%s)", d.name, d.name)
+	}
+	e, err := dialEmu(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	a := &agentClient{serial: r.serial()}
+	d.mu.Lock()
+	if d.emu != nil {
+		d.emu.Close()
+	}
+	if d.agent != nil {
+		d.agent.Close()
+	}
+	d.run, d.emu, d.agent, d.dispAt = r, e, a, time.Time{}
+	d.mu.Unlock()
+	return e, a, nil
+}
+
+// ready returns clients and makes sure the on-device agent runs (starting it if needed).
+func (d *device) ready(ctx context.Context) (*emuClient, *agentClient, error) {
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	p, perr := a.ping(pctx)
+	cancel()
+	if perr == nil && p.Version == agentVersion {
+		return e, a, nil
+	}
+	if _, err := ensureAgent(ctx, a, logf); err != nil {
+		return nil, nil, err
+	}
+	return e, a, nil
+}
+
+func isZombie(d *device) bool {
+	return d.proc != nil && d.proc.ProcessState != nil
+}
+
+func (d *device) drop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.emu != nil {
+		d.emu.Close()
+	}
+	if d.agent != nil {
+		d.agent.Close()
+	}
+	d.emu, d.agent, d.run, d.dispAt = nil, nil, runningEmu{}, time.Time{}
+}
+
+// display returns the logical display, refreshing it when older than maxAge.
+func (d *device) display(ctx context.Context, a *agentClient, maxAge time.Duration) (displayInfo, error) {
+	d.mu.Lock()
+	di, at := d.disp, d.dispAt
+	d.mu.Unlock()
+	if !at.IsZero() && time.Since(at) <= maxAge {
+		return di, nil
+	}
+	di, err := a.display(ctx)
+	if err != nil {
+		return di, err
+	}
+	d.setDisplay(di)
+	return di, nil
+}
+
+func (d *device) setDisplay(di displayInfo) {
+	d.mu.Lock()
+	d.disp, d.dispAt = di, time.Now()
+	d.mu.Unlock()
+}
+
+// ------------------------------------------------------------------ devices
+
+func (b *Backend) List(ctx context.Context) ([]api.Device, error) {
+	avds, err := listAVDs()
+	if err != nil {
+		return nil, err
+	}
+	run := map[string]runningEmu{}
+	for _, r := range runningEmulators() {
+		run[r.AVD] = r
+	}
+	out := []api.Device{}
+	for _, a := range avds {
+		out = append(out, b.describe(a, run))
+	}
+	return out, nil
+}
+
+func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
+	d := b.dev(a.Name)
+	dev := api.Device{ID: "android:" + a.Name, Name: a.Name, Platform: api.Android, State: "shutdown", OSVersion: a.osVersion()}
+	scr := api.Screen{Width: a.intCfg("hw.lcd.width"), Height: a.intCfg("hw.lcd.height"), Density: a.intCfg("hw.lcd.density")}
+	d.mu.Lock()
+	booting := d.booting
+	if !d.dispAt.IsZero() {
+		scr = api.Screen{Width: d.disp.W, Height: d.disp.H, Density: d.disp.Density}
+	}
+	d.mu.Unlock()
+	if _, ok := run[a.Name]; ok {
+		dev.State = "booted"
+	}
+	if booting {
+		dev.State = "booting"
+	}
+	dev.Screen = &scr
+	dev.Profile = profileName(scr)
+	return dev
+}
+
+func profileName(s api.Screen) string {
+	for _, p := range profiles.All(api.Android) {
+		if p.Width == s.Width && p.Height == s.Height && p.Density == s.Density {
+			return p.Name
+		}
+	}
+	if s.Width == 0 {
+		return ""
+	}
+	return profiles.Custom(s.Width, s.Height, s.Density).Name
+}
+
+func (b *Backend) device(id string) (api.Device, error) {
+	name, err := avdName(id)
+	if err != nil {
+		return api.Device{}, err
+	}
+	a, err := loadAVD(name)
+	if err != nil {
+		return api.Device{}, fmt.Errorf("unknown device %s: %w", id, err)
+	}
+	run := map[string]runningEmu{}
+	if r, ok := findRunning(name); ok {
+		run[name] = r
+	}
+	return b.describe(a, run), nil
+}
+
 func (b *Backend) Create(ctx context.Context, req api.CreateRequest) (api.Device, error) {
-	return api.Device{}, api.ErrNotImplemented
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return api.Device{}, errors.New("create needs a name")
+	}
+	if strings.ContainsAny(name, "/: ") {
+		return api.Device{}, fmt.Errorf("bad AVD name %q", name)
+	}
+	if !strings.HasPrefix(name, defaultAVDPrefix) {
+		name = defaultAVDPrefix + name
+	}
+	prof := profiles.Default(api.Android)
+	if req.Profile != "" {
+		p, err := profiles.Get(req.Profile)
+		if err != nil {
+			return api.Device{}, err
+		}
+		if p.Platform != api.Android {
+			return api.Device{}, fmt.Errorf("profile %s is not an android profile", p.Name)
+		}
+		prof = p
+	}
+	if _, err := createAVD(ctx, name, prof); err != nil {
+		return api.Device{}, err
+	}
+	return b.device("android:" + name)
 }
+
+// ------------------------------------------------------------------ boot / shutdown
+
+type ports struct{ console, grpc int }
+
+func canListen(port int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	l.Close()
+	return true
+}
+
+// allocPorts picks console/adb/gRPC ports that no running emulator uses (defaults 5580/5581/8580).
+func allocPorts() (ports, error) {
+	cbase := envInt("AGEMU_ANDROID_CONSOLE_PORT", 5580)
+	gbase := envInt("AGEMU_ANDROID_GRPC_PORT", 8580)
+	used := map[int]bool{}
+	for _, r := range runningEmulators() {
+		used[r.Console], used[r.ADBPort], used[r.GRPCPort] = true, true, true
+	}
+	for i := 0; i < 16; i++ {
+		c, g := cbase+2*i, gbase+i
+		if used[c] || used[c+1] || used[g] {
+			continue
+		}
+		if canListen(c) && canListen(c+1) && canListen(g) {
+			return ports{c, g}, nil
+		}
+	}
+	return ports{}, fmt.Errorf("no free emulator ports from %d / %d", cbase, gbase)
+}
+
+func logDir() string {
+	h := os.Getenv("AGEMU_HOME")
+	if h == "" {
+		home, _ := os.UserHomeDir()
+		h = filepath.Join(home, ".agemu")
+	}
+	return filepath.Join(h, "android")
+}
+
+// emulatorArgs builds the command line. Snapshot handling: agemu keeps one named snapshot
+// (the baseline) and never auto-saves (-no-snapshot-save), so snapshots do not pile up.
+func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
+	ram := a.intCfg("hw.ramSize")
+	if ram <= 0 {
+		ram = envInt("AGEMU_ANDROID_RAM_MB", defaultRAMMB)
+	}
+	args := []string{
+		"-avd", name, "-port", strconv.Itoa(p.console), "-grpc", strconv.Itoa(p.grpc),
+		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "host"),
+		"-memory", strconv.Itoa(ram), "-no-snapshot-save",
+	}
+	// Emulator 37 raises guest RAM to 4096 MB for API > 36 images; -lowram is the only switch
+	// that lifts this lower bound. On this emulator it does not set ro.config.low_ram in the
+	// guest (verified at boot, see checkGuest), so the device is a normal 2 GB phone.
+	if ram < 4096 {
+		args = append(args, "-lowram")
+	}
+	if loadBaseline {
+		args = append(args, "-snapshot", baselineSnapshot)
+	} else {
+		args = append(args, "-no-snapshot-load")
+	}
+	return args
+}
+
 func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (api.Device, error) {
-	return api.Device{}, api.ErrNotImplemented
+	d, err := b.devFor(id)
+	if err != nil {
+		return api.Device{}, err
+	}
+	d.life.Lock()
+	defer d.life.Unlock()
+	a, err := loadAVD(d.name)
+	if err != nil {
+		return api.Device{}, fmt.Errorf("unknown device %s: %w", id, err)
+	}
+	if _, ok := findRunning(d.name); ok {
+		if !opts.Cold {
+			if _, _, err := d.ready(ctx); err != nil {
+				return api.Device{}, err
+			}
+			if _, err := d.refreshDisplay(ctx); err != nil {
+				return api.Device{}, err
+			}
+			return b.device(id)
+		}
+		if err := d.shutdown(ctx); err != nil {
+			return api.Device{}, err
+		}
+	}
+
+	d.mu.Lock()
+	d.booting = true
+	d.mu.Unlock()
+	defer func() { d.mu.Lock(); d.booting = false; d.mu.Unlock() }()
+
+	loadBaseline := !opts.Cold && a.hasBaseline()
+	if err := d.launch(ctx, a, loadBaseline); err != nil {
+		return api.Device{}, err
+	}
+	if err := d.waitBooted(ctx, 180*time.Second); err != nil {
+		return api.Device{}, err
+	}
+	_, ag, err := d.conn(ctx)
+	if err != nil {
+		return api.Device{}, err
+	}
+	restarted, err := ensureAgent(ctx, ag, logf)
+	if err != nil {
+		return api.Device{}, err
+	}
+	if loadBaseline && restarted {
+		logf("%s: agent was not running after loading %s (snapshot not loaded or stale); retaking it", d.name, baselineSnapshot)
+	}
+	if !loadBaseline || restarted {
+		d.checkGuest(ctx)
+	}
+	if !a.hasBaseline() || (loadBaseline && restarted) {
+		if err := d.makeBaseline(ctx); err != nil {
+			return api.Device{}, fmt.Errorf("creating baseline snapshot: %w", err)
+		}
+	}
+	if _, err := d.refreshDisplay(ctx); err != nil {
+		return api.Device{}, err
+	}
+	return b.device(id)
 }
-func (b *Backend) Shutdown(ctx context.Context, id string) error { return api.ErrNotImplemented }
-func (b *Backend) Reset(ctx context.Context, id string) error    { return api.ErrNotImplemented }
+
+func (d *device) refreshDisplay(ctx context.Context) (displayInfo, error) {
+	_, a, err := d.conn(ctx)
+	if err != nil {
+		return displayInfo{}, err
+	}
+	return d.display(ctx, a, 0)
+}
+
+// launch starts the emulator detached from the daemon and waits for its gRPC endpoint.
+func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error {
+	p, err := allocPorts()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(logDir(), 0o755); err != nil {
+		return err
+	}
+	lf, err := os.OpenFile(filepath.Join(logDir(), d.name+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	args := emulatorArgs(d.name, p, a, loadBaseline)
+	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
+	cmd.Stdout, cmd.Stderr = lf, lf
+	cmd.Env = os.Environ()
+	if env("AGEMU_ANDROID_SNAPSHOT_COMPRESS", "") == "1" {
+		cmd.Env = append(cmd.Env, "ANDROID_SNAPSHOT_COMPRESS=1")
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
+	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.proc = cmd
+	d.mu.Unlock()
+	go func() { _ = cmd.Wait() }() // reap
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if r, ok := findRunning(d.name); ok && r.GRPCPort != 0 {
+			e, err := dialEmu(r)
+			if err != nil {
+				return err
+			}
+			if err := e.waitGRPC(ctx, time.Until(deadline)); err != nil {
+				e.Close()
+				return err
+			}
+			d.mu.Lock()
+			if d.emu != nil {
+				d.emu.Close()
+			}
+			if d.agent != nil {
+				d.agent.Close()
+			}
+			d.run, d.emu, d.agent, d.dispAt = r, e, &agentClient{serial: r.serial()}, time.Time{}
+			d.mu.Unlock()
+			return nil
+		}
+		if cmd.ProcessState != nil || !pidAlive(cmd.Process.Pid) {
+			return fmt.Errorf("emulator exited during startup; see %s", filepath.Join(logDir(), d.name+".log"))
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log"))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// waitBooted waits until adb sees the device and sys.boot_completed=1.
+func (d *device) waitBooted(ctx context.Context, timeout time.Duration) error {
+	d.mu.Lock()
+	serial := d.run.serial()
+	d.mu.Unlock()
+	deadline := time.Now().Add(timeout)
+	for {
+		c, cancel := context.WithTimeout(ctx, 2*time.Second)
+		out, err := adbShellOK(c, serial, "getprop sys.boot_completed")
+		cancel()
+		if err == nil && strings.TrimSpace(out) == "1" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not finish booting in %v (last: %v %q)", serial, timeout, err, strings.TrimSpace(out))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+// checkGuest logs guest properties that would make the device differ from a real phone.
+func (d *device) checkGuest(ctx context.Context) {
+	d.mu.Lock()
+	serial := d.run.serial()
+	d.mu.Unlock()
+	out, err := adbShellOK(ctx, serial, "getprop ro.config.low_ram; head -1 /proc/meminfo")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "true" {
+		logf("%s: WARNING ro.config.low_ram=true (the emulator's -lowram flag changed guest behaviour); set AGEMU_ANDROID_RAM_MB=4096", d.name)
+	}
+	logf("%s: guest %s", d.name, strings.Join(strings.Fields(strings.Join(lines[1:], " ")), " "))
+}
+
+// makeBaseline brings a freshly cold-booted device to a settled home screen and saves
+// the one snapshot agemu boots and resets from. The on-device agent is running when the
+// snapshot is taken, so every snapshot boot / reset is agent-ready immediately.
+func (d *device) makeBaseline(ctx context.Context) error {
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	settle := time.Duration(envInt("AGEMU_ANDROID_BASELINE_SETTLE_S", 20)) * time.Second
+	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
+	// Let boot-time work (launcher, package scans) finish so a restored device is quiet.
+	time.Sleep(settle)
+	_ = e.key(ctx, evdevKeys["home"])
+	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+	t := time.Now()
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if names, err := e.listSnapshots(sctx); err == nil {
+		for _, n := range names {
+			if n == baselineSnapshot {
+				_ = e.deleteSnapshot(sctx, n)
+			}
+		}
+	}
+	if err := e.saveSnapshot(sctx, baselineSnapshot); err != nil {
+		return err
+	}
+	logf("%s: saved %s in %v", d.name, baselineSnapshot, time.Since(t).Round(time.Millisecond))
+	a.Close()
+	return nil
+}
+
+func (b *Backend) Shutdown(ctx context.Context, id string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	d.life.Lock()
+	defer d.life.Unlock()
+	return d.shutdown(ctx)
+}
+
+func (d *device) shutdown(ctx context.Context) error {
+	r, ok := findRunning(d.name)
+	if !ok {
+		d.drop()
+		return nil
+	}
+	e, _, err := d.conn(ctx)
+	if err == nil {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err = e.shutdown(c)
+		cancel()
+	}
+	if err != nil {
+		logf("%s: gRPC shutdown failed (%v), sending SIGTERM", d.name, err)
+		_ = syscall.Kill(r.PID, syscall.SIGTERM)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for pidAlive(r.PID) && !d.reaped(r.PID) {
+		if time.Now().After(deadline) {
+			logf("%s: emulator pid %d still alive, SIGKILL", d.name, r.PID)
+			_ = syscall.Kill(r.PID, syscall.SIGKILL)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	d.drop()
+	// The emulator removes its discovery file on exit; a killed one may leave it behind.
+	if !pidAlive(r.PID) || d.reaped(r.PID) {
+		_ = os.Remove(filepath.Join(discoveryDir(), fmt.Sprintf("pid_%d.ini", r.PID)))
+	}
+	return nil
+}
+
+func (d *device) reaped(pid int) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.proc != nil && d.proc.Process != nil && d.proc.Process.Pid == pid && d.proc.ProcessState != nil
+}
+
+// Reset restores the baseline snapshot in the running emulator. The screen profile that
+// was active before the reset is re-applied, so an agent testing in a profile stays in it.
+func (b *Backend) Reset(ctx context.Context, id string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	d.life.Lock()
+	defer d.life.Unlock()
+	a, err := loadAVD(d.name)
+	if err != nil {
+		return err
+	}
+	if !a.hasBaseline() {
+		return fmt.Errorf("%s has no baseline snapshot yet (boot it once)", id)
+	}
+	e, ag, err := d.ready(ctx)
+	if err != nil {
+		return err
+	}
+	prev, _ := d.display(ctx, ag, 0)
+	if err := e.loadSnapshot(ctx, baselineSnapshot); err != nil {
+		return err
+	}
+	ag.Close() // the adb stream died with the old VM state
+	d.mu.Lock()
+	d.dispAt = time.Time{}
+	d.mu.Unlock()
+	if err := waitAgent(ctx, ag, 30*time.Second); err != nil {
+		return err
+	}
+	if prev.W > 0 && (prev.W != prev.PhysW || prev.H != prev.PhysH || prev.Density != prev.PhysDensity) {
+		var di displayInfo
+		if err := ag.call(ctx, map[string]any{"cmd": "profile", "w": prev.W, "h": prev.H, "density": prev.Density, "settleMs": 2000}, &di); err != nil {
+			return fmt.Errorf("re-applying profile after reset: %w", err)
+		}
+		d.setDisplay(di)
+	}
+	return nil
+}
+
+func waitAgent(ctx context.Context, a *agentClient, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		c, cancel := context.WithTimeout(ctx, time.Second)
+		p, err := a.ping(c)
+		cancel()
+		if err == nil {
+			if p.Version != agentVersion {
+				_, err = ensureAgent(ctx, a, logf)
+				return err
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("agent did not come back after snapshot load: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// ------------------------------------------------------------------ profiles
+
 func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api.Device, error) {
-	return api.Device{}, api.ErrNotImplemented
+	d, err := b.devFor(id)
+	if err != nil {
+		return api.Device{}, err
+	}
+	if p.Width <= 0 || p.Height <= 0 || p.Density <= 0 {
+		return api.Device{}, fmt.Errorf("bad profile size %dx%d@%d", p.Width, p.Height, p.Density)
+	}
+	if p.Width > 8192 || p.Height > 8192 || p.Density < 72 || p.Density > 1200 {
+		return api.Device{}, fmt.Errorf("profile %dx%d@%d out of range", p.Width, p.Height, p.Density)
+	}
+	d.life.Lock()
+	defer d.life.Unlock()
+	_, a, err := d.ready(ctx)
+	if err != nil {
+		return api.Device{}, err
+	}
+	var di displayInfo
+	if err := a.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di); err != nil {
+		return api.Device{}, err
+	}
+	d.setDisplay(di)
+	if di.W != p.Width || di.H != p.Height || di.Density != p.Density {
+		return api.Device{}, fmt.Errorf("display is %dx%d@%d after applying %s", di.W, di.H, di.Density, p.Name)
+	}
+	dev, err := b.device(id)
+	if err == nil && p.Name != "" && !strings.HasPrefix(p.Name, "custom-") {
+		dev.Profile = p.Name
+	}
+	return dev, err
 }
+
+// ------------------------------------------------------------------ screenshot / UI
+
 func (b *Backend) Screenshot(ctx context.Context, id string, o api.ScreenshotOptions) (api.Screenshot, error) {
-	return api.Screenshot{}, api.ErrNotImplemented
+	d, err := b.devFor(id)
+	if err != nil {
+		return api.Screenshot{}, err
+	}
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		return api.Screenshot{}, err
+	}
+	// Grab the framebuffer and refresh the logical display size concurrently.
+	var di displayInfo
+	var derr error
+	done := make(chan struct{})
+	go func() { di, derr = d.display(ctx, a, 0); close(done) }()
+	f, err := e.screenshot(ctx)
+	<-done
+	if err != nil {
+		return api.Screenshot{}, err
+	}
+	if derr != nil {
+		return api.Screenshot{}, derr
+	}
+	img := renderLogical(f, di)
+	if o.Scale > 0 && o.Scale < 1 {
+		img = resize(img, max(1, int(float64(img.W)*o.Scale+0.5)), max(1, int(float64(img.H)*o.Scale+0.5)))
+	}
+	var buf bytes.Buffer
+	format := strings.ToLower(o.Format)
+	switch format {
+	case "", "png":
+		format = "png"
+		err = encodePNG(&buf, img)
+	case "jpeg", "jpg":
+		format = "jpeg"
+		err = encodeJPEG(&buf, img)
+	default:
+		return api.Screenshot{}, fmt.Errorf("unsupported format %q (png|jpeg)", o.Format)
+	}
+	if err != nil {
+		return api.Screenshot{}, err
+	}
+	if o.Path == "" {
+		return api.Screenshot{}, errors.New("screenshot needs a path")
+	}
+	if err := os.WriteFile(o.Path, buf.Bytes(), 0o644); err != nil {
+		return api.Screenshot{}, err
+	}
+	return api.Screenshot{Path: o.Path, Width: img.W, Height: img.H, Format: format, Bytes: buf.Len()}, nil
 }
+
+// renderLogical turns the framebuffer into the logical display image (the profile's pixels).
+func renderLogical(f frame, di displayInfo) rgbaImage {
+	if di.W <= 0 || di.H <= 0 {
+		return rgbaImage{W: f.W, H: f.H, Pix: f.Pix}
+	}
+	m := newScreenMap(di.W, di.H, f.W, f.H)
+	if m.identity() {
+		return rgbaImage{W: f.W, H: f.H, Pix: f.Pix}
+	}
+	return resize(f.crop(m.R), di.W, di.H)
+}
+
 func (b *Backend) UITree(ctx context.Context, id string) (*api.UITree, error) {
-	return nil, api.ErrNotImplemented
+	d, err := b.devFor(id)
+	if err != nil {
+		return nil, err
+	}
+	_, a, err := d.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var raw rawTree
+	if err := a.call(ctx, map[string]any{"cmd": "tree"}, &raw); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	if d.disp.W != raw.W || d.disp.H != raw.H || d.disp.Density != raw.Density {
+		d.dispAt = time.Time{} // display changed behind our back; refresh on next use
+	}
+	d.mu.Unlock()
+	return mapTree(&raw), nil
 }
-func (b *Backend) Tap(ctx context.Context, id string, x, y int) error { return api.ErrNotImplemented }
-func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, ms int) error {
-	return api.ErrNotImplemented
+
+// ------------------------------------------------------------------ input
+
+// screen returns the current logical->framebuffer mapping (cached for a short time).
+func (d *device) screen(ctx context.Context, a *agentClient) (screenMap, error) {
+	di, err := d.display(ctx, a, 2*time.Second)
+	if err != nil {
+		return screenMap{}, err
+	}
+	return newScreenMap(di.W, di.H, di.PhysW, di.PhysH), nil
 }
-func (b *Backend) TypeText(ctx context.Context, id, text string) error { return api.ErrNotImplemented }
-func (b *Backend) Key(ctx context.Context, id, key string) error       { return api.ErrNotImplemented }
-func (b *Backend) Install(ctx context.Context, id, path string) error  { return api.ErrNotImplemented }
-func (b *Backend) Launch(ctx context.Context, id, app string) error    { return api.ErrNotImplemented }
-func (b *Backend) Terminate(ctx context.Context, id, app string) error { return api.ErrNotImplemented }
-func (b *Backend) Close() error                                        { return nil }
+
+func (b *Backend) inputDev(ctx context.Context, id string) (*emuClient, screenMap, error) {
+	d, err := b.devFor(id)
+	if err != nil {
+		return nil, screenMap{}, err
+	}
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		return nil, screenMap{}, err
+	}
+	m, err := d.screen(ctx, a)
+	return e, m, err
+}
+
+func checkPoint(m screenMap, x, y int) error {
+	if x < 0 || y < 0 || x >= m.LW || y >= m.LH {
+		return fmt.Errorf("point %d,%d is outside the %dx%d screen", x, y, m.LW, m.LH)
+	}
+	return nil
+}
+
+func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
+	e, m, err := b.inputDev(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := checkPoint(m, x, y); err != nil {
+		return err
+	}
+	px, py := m.toPhysical(x, y)
+	if err := e.touch(ctx, px, py, 1); err != nil {
+		return err
+	}
+	return e.touch(ctx, px, py, 0)
+}
+
+func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, durationMs int) error {
+	e, m, err := b.inputDev(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := checkPoint(m, x1, y1); err != nil {
+		return err
+	}
+	if err := checkPoint(m, x2, y2); err != nil {
+		return err
+	}
+	if durationMs < 0 {
+		durationMs = 0
+	}
+	// One move event per ~8 ms (120 Hz), like a finger on a real touchscreen.
+	steps := max(1, durationMs/8)
+	start := time.Now()
+	total := time.Duration(durationMs) * time.Millisecond
+	ax, ay := m.toPhysical(x1, y1)
+	if err := e.touch(ctx, ax, ay, 1); err != nil {
+		return err
+	}
+	for i := 1; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		lx := x1 + int(float64(x2-x1)*t+0.5)
+		ly := y1 + int(float64(y2-y1)*t+0.5)
+		px, py := m.toPhysical(lx, ly)
+		if wait := time.Duration(float64(total)*t) - time.Since(start); wait > 0 {
+			time.Sleep(wait)
+		}
+		if err := e.touch(ctx, px, py, 1); err != nil {
+			return err
+		}
+	}
+	bx, by := m.toPhysical(x2, y2)
+	return e.touch(ctx, bx, by, 0)
+}
+
+func asciiPrintable(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// TypeText types into the focused field. ASCII goes through the emulator's keyboard
+// (gRPC sendKey text: real key events from the virtual hardware keyboard); other text
+// (non-ASCII, emoji) is injected by the on-device agent, which waits until it is handled.
+func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	if text == "" {
+		return nil
+	}
+	if asciiPrintable(text) && env("AGEMU_ANDROID_TEXT", "grpc") == "grpc" {
+		return e.text(ctx, text)
+	}
+	return a.call(ctx, map[string]any{"cmd": "text", "text": text}, nil)
+}
+
+func (b *Backend) Key(ctx context.Context, id string, key string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	code, ok := evdevKeys[strings.ToLower(key)]
+	if !ok {
+		names := make([]string, 0, len(evdevKeys))
+		for k := range evdevKeys {
+			names = append(names, k)
+		}
+		return fmt.Errorf("unknown key %q (have: %s)", key, strings.Join(names, ", "))
+	}
+	e, _, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	return e.key(ctx, code)
+}
+
+// ------------------------------------------------------------------ apps
+
+func (b *Backend) Install(ctx context.Context, id, path string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	if _, _, err := d.conn(ctx); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(strings.ToLower(path), ".apk") {
+		return fmt.Errorf("android install needs an .apk, got %s", path)
+	}
+	d.mu.Lock()
+	serial := d.run.serial()
+	d.mu.Unlock()
+	out, err := adbExec(ctx, serial, "install", "-r", path)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(out, "Success") {
+		return fmt.Errorf("adb install: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// Launch starts the app's launcher activity (or "pkg/activity") and waits until it is
+// displayed, like `am start -W`, but from the long-lived agent.
+func (b *Backend) Launch(ctx context.Context, id, app string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	_, a, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	pkg, act, _ := strings.Cut(app, "/")
+	if pkg == "" {
+		return errors.New("launch needs a package name")
+	}
+	return a.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
+}
+
+func (b *Backend) Terminate(ctx context.Context, id, app string) error {
+	d, err := b.devFor(id)
+	if err != nil {
+		return err
+	}
+	_, a, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	return a.call(ctx, map[string]any{"cmd": "stop", "pkg": app}, nil)
+}
+
+func (b *Backend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, d := range b.devs {
+		d.drop()
+	}
+	return nil
+}
