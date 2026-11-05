@@ -31,7 +31,7 @@ type Op struct {
 	Baseline func() error
 	BaseDesc string // e.g. "adb exec-out screencap -p"
 	Agemu    func() error
-	AgemDesc string // e.g. "agemu screenshot"
+	AgemDesc string       // e.g. "agemu screenshot"
 	Daemon   func() error // same op over a persistent daemon connection (optional)
 }
 
