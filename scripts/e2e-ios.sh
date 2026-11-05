@@ -108,7 +108,7 @@ printf '%s\n' "$LAST" >"$OUT/general-ui.txt"
 has "General screen has About" 'label="About"'
 has "General screen has a back button" "id=BackButton"
 
-step "go back (key back = left-edge swipe)"
+step "go back (key back: nav-bar back button, else left-edge swipe)"
 expect "key back" key back
 expect "About is gone" wait --id About --gone --timeout-ms 10000
 expect "back on the Settings root" wait --id com.apple.settings.general --timeout-ms 10000
