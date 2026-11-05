@@ -73,6 +73,19 @@ func (fs *frameStream) Close() {
 	fs.shm.Close()
 }
 
+// invalidate drops the cached frame. A snapshot load restores the display from the snapshot
+// without the guest necessarily posting a new frame, so the cache must not survive it; until
+// the next frame is captured, screenshots read the framebuffer directly.
+func (fs *frameStream) invalidate() {
+	if fs == nil {
+		return
+	}
+	fs.mu.Lock()
+	fs.cache, fs.cacheN = frame{}, 0
+	fs.signalLocked()
+	fs.mu.Unlock()
+}
+
 // signalLocked wakes everyone waiting for a state change.
 func (fs *frameStream) signalLocked() {
 	close(fs.changed)

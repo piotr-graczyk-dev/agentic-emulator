@@ -774,6 +774,15 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
 	// Let boot-time work (launcher, package scans) finish so a restored device is quiet.
 	time.Sleep(settle)
+	// The emulator's touchscreen advertises a stylus, so Gboard treats taps on text fields as
+	// stylus input and shows its floating handwriting toolbar instead of the keyboard. A phone
+	// is used with a finger: turn stylus handwriting off (a user setting, `settings put`).
+	d.mu.Lock()
+	serial := d.run.serial()
+	d.mu.Unlock()
+	if _, err := adbShellOK(ctx, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
+		logf("%s: could not turn off stylus handwriting: %v", d.name, err)
+	}
 	d.warmUpKeyboard(ctx, e, a)
 	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
@@ -865,7 +874,8 @@ func (d *device) warmUpKeyboard(ctx context.Context, e *emuClient, a *agentClien
 	if find(func(el *api.Element) bool { return el.Role == "textfield" && el.Focused }, 8*time.Second) == nil {
 		logf("%s: keyboard warm-up: no focused text field", d.name)
 	}
-	_ = a.call(ctx, map[string]any{"cmd": "text", "text": "a"}, nil)
+	// Key events through the IME, not the default set-text: the sheet appears on keyboard input.
+	_ = a.call(ctx, map[string]any{"cmd": "text", "text": "a", "keys": true}, nil)
 	if sheet := find(stylusSheet, 6*time.Second); sheet != nil {
 		if c := find(func(el *api.Element) bool { return el.Text == "Cancel" && el.Clickable }, 3*time.Second); c != nil {
 			tapEl(c)
@@ -934,7 +944,9 @@ func (d *device) enterStandby(ctx context.Context) error {
 		return d.shutdown(ctx)
 	}
 	t := time.Now()
-	if err := e.loadSnapshot(ctx, baselineSnapshot); err != nil {
+	err = e.loadSnapshot(ctx, baselineSnapshot)
+	e.stream.invalidate()
+	if err != nil {
 		logf("%s: loading %s for standby failed (%v); powering off", d.name, baselineSnapshot, err)
 		return d.shutdown(ctx)
 	}
@@ -959,9 +971,11 @@ func (d *device) resume(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.stream.invalidate()
 	if err := e.setVM(ctx, emupb.VmRunState_RUNNING); err != nil {
 		return err
 	}
+	defer d.markInput()
 	return waitAgent(ctx, a, 30*time.Second)
 }
 
@@ -1027,7 +1041,9 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	t0 := time.Now()
 	prev, _ := d.display(ctx, ag, 0)
 	t1 := time.Now()
-	if err := e.loadSnapshot(ctx, baselineSnapshot); err != nil {
+	err = e.loadSnapshot(ctx, baselineSnapshot)
+	e.stream.invalidate()
+	if err != nil {
 		return err
 	}
 	t2 := time.Now()
@@ -1095,8 +1111,9 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 		return api.Device{}, err
 	}
 	var di displayInfo
-	err = d.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di)
+	// The switch waits until the screen has settled, so its frames count from the start.
 	d.markInput()
+	err = d.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di)
 	if err != nil {
 		return api.Device{}, err
 	}
@@ -1402,7 +1419,8 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	if pkg == "" {
 		return errors.New("launch needs a package name")
 	}
-	defer d.markInput()
+	// Launch returns once the app has drawn: its frames count from the start of the launch.
+	d.markInput()
 	return d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
 }
 

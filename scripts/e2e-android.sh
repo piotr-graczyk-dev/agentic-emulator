@@ -62,21 +62,37 @@ ok "tapped $(grep -o '"frame":{[^}]*}' "$OUT/tap.json") at $(grep -o '"x":[0-9]*
 timed ag wait --text "Internet" --timeout-ms 8000 >/dev/null || fail "sub-screen element 'Internet' did not appear"
 ok "sub-screen 'Network & internet' shows 'Internet'"
 
-step "key back"
+step "key back (returns once queued; wait shows its effect)"
 timed ag key back >/dev/null
 ag wait --text "Search Settings" --timeout-ms 8000 >/dev/null || fail "back did not return to Settings home"
 ok "back returned to Settings home"
 
-step "type into the Settings search field"
+step "type into the Settings search field (sets the field's text; the app must react)"
 ag tap --text "Search Settings" >/dev/null
 ag wait --id open_search_view_edit_text --timeout-ms 8000 >/dev/null || fail "search field did not appear"
-timed ag type "agemu wifi" >/dev/null
+timed ag type "net" >/dev/null
+timed ag type "work" >/dev/null
 ag find --id open_search_view_edit_text --json >"$OUT/field.json"
-cat "$OUT/field.json"
-grep -q '"text":"agemu wifi"' "$OUT/field.json" || fail "typed text not in the UI tree"
-ok "search field contains \"agemu wifi\""
+cat "$OUT/field.json"; echo
+grep -q '"text":"network"' "$OUT/field.json" || fail "typed text not in the UI tree (want \"network\": the second type appends)"
+ok "search field contains \"network\" (two type calls, appended at the cursor)"
+ag wait --id breadcrumb --timeout-ms 15000 >"$OUT/result.json" || fail "Settings search showed no results for \"network\""
+ag find --id breadcrumb >"$OUT/results.txt"
+head -3 "$OUT/results.txt"
+ok "Settings search lists $(wc -l <"$OUT/results.txt" | tr -d ' ') results for \"network\" (TextWatcher ran the query)"
+ag screenshot -o "$OUT/shot-search.png" >/dev/null
+
+step "type --keys (one key event per character through the keyboard)"
+ag tap --text "Clear text" >/dev/null || fail "no Clear text button"
+ag wait --id breadcrumb --gone --timeout-ms 8000 >/dev/null || fail "results did not clear"
+timed ag type --keys "wifi" >/dev/null
+ag find --id open_search_view_edit_text --json >"$OUT/field-keys.json"
+grep -q '"text":"wifi"' "$OUT/field-keys.json" || fail "type --keys: field is $(cat "$OUT/field-keys.json")"
+ag wait --id breadcrumb --timeout-ms 15000 >/dev/null || fail "Settings search showed no results for \"wifi\""
+ok "type --keys typed \"wifi\" and Settings lists results"
 ag key back >/dev/null
 ag key back >/dev/null
+ag wait --text "Search Settings" --timeout-ms 8000 >/dev/null || ag key back >/dev/null
 
 step "screenshots in profiles (PNG size must equal the profile size)"
 for p in pixel-9:1080x2424 small-phone:720x1600 pixel-fold-inner:2076x2152 pixel-tablet:1600x2560 galaxy-s24:1080x2340; do

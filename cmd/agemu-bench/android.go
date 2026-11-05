@@ -257,6 +257,47 @@ func androidSuite(cfg Config) ([]Op, error) {
 			Daemon:   func() error { return call("screenshot", map[string]any{"path": shot(&si)}) },
 		},
 		{
+			// The screen changes before every iteration (untimed): Settings scrolls by a swipe, then
+			// 1.5 s pass, as between an agent's action and its next look at the screen. Every
+			// iteration therefore encodes a new frame; agemu has received it from the emulator's
+			// frame stream in the meantime.
+			Name: "screenshot (after a screen change)", Setup: func() error {
+				if err := native(); err != nil {
+					return err
+				}
+				return settingsHome()
+			},
+			Before: func() func() error {
+				down := false
+				return func() error {
+					down = !down
+					y1, y2 := 1800, 900
+					if !down {
+						y1, y2 = 900, 1800
+					}
+					if err := call("swipe", map[string]any{"x": 540, "y": y1, "x2": 540, "y2": y2, "durationMs": 150}); err != nil {
+						return err
+					}
+					time.Sleep(1500 * time.Millisecond)
+					return nil
+				}
+			}(),
+			BaseDesc: "adb exec-out screencap -p > f.png",
+			Baseline: func() error {
+				f, err := os.Create(shot(&si))
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				c := exec.Command(adbBin, "-s", serial(), "exec-out", "screencap", "-p")
+				c.Stdout = f
+				return c.Run()
+			},
+			AgemDesc: "agemu screenshot -o f.png",
+			Agemu:    func() error { return ag("screenshot", "-o", shot(&si)) },
+			Daemon:   func() error { return call("screenshot", map[string]any{"path": shot(&si)}) },
+		},
+		{
 			// Only one UiAutomation client can be connected, so uiautomator cannot dump while the
 			// agemu agent runs: Setup stops the agent, and it is restarted (untimed) before the
 			// first agemu iteration.
@@ -303,7 +344,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 			Daemon:   func() error { return call("tap", map[string]any{"x": 800, "y": 1100}) },
 		},
 		{
-			Name: "swipe (300 ms gesture)", Setup: settingsHome,
+			Name: "swipe (300 ms gesture)", Setup: settingsHome, InherentMs: 300,
 			BaseDesc: "adb shell input swipe 540 1800 540 1000 300",
 			Baseline: func() error { return adb("shell", "input", "swipe", "540", "1800", "540", "1000", "300") },
 			AgemDesc: "agemu swipe 540 1800 540 1000 --ms 300",
@@ -313,7 +354,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 			},
 		},
 		{
-			Name: "swipe (50 ms gesture)", Setup: settingsHome,
+			Name: "swipe (50 ms gesture)", Setup: settingsHome, InherentMs: 50,
 			BaseDesc: "adb shell input swipe 540 1800 540 1000 50",
 			Baseline: func() error { return adb("shell", "input", "swipe", "540", "1800", "540", "1000", "50") },
 			AgemDesc: "agemu swipe 540 1800 540 1000 --ms 50",
@@ -327,12 +368,21 @@ func androidSuite(cfg Config) ([]Op, error) {
 			Name: "type text (plain field)", Setup: plainField,
 			BaseDesc: "adb shell input text hello",
 			Baseline: func() error { return adb("shell", "input", "text", "hello") },
-			AgemDesc: "agemu type hello",
+			AgemDesc: "agemu type hello (sets the field's text)",
 			Agemu:    func() error { return ag("type", "hello") },
 			Daemon:   func() error { return call("type", map[string]any{"text": "hello"}) },
 		},
 		{
-			// Settings search re-runs a query on every keystroke; both tools wait for the app.
+			// The same field with agemu's per-key mode (one key event per character, like input text).
+			Name: "type text --keys (plain field)", Setup: plainField,
+			BaseDesc: "adb shell input text hello",
+			Baseline: func() error { return adb("shell", "input", "text", "hello") },
+			AgemDesc: "agemu type --keys hello",
+			Agemu:    func() error { return ag("type", "--keys", "hello") },
+			Daemon:   func() error { return call("type", map[string]any{"text": "hello", "keys": true}) },
+		},
+		{
+			// Settings search re-runs a query on every text change; both tools wait for the app.
 			Name: "type text (Settings search)", Setup: func() error {
 				if err := settingsHome(); err != nil {
 					return err
@@ -344,15 +394,17 @@ func androidSuite(cfg Config) ([]Op, error) {
 			},
 			BaseDesc: "adb shell input text hello",
 			Baseline: func() error { return adb("shell", "input", "text", "hello") },
-			AgemDesc: "agemu type hello",
+			AgemDesc: "agemu type hello (sets the field's text)",
 			Agemu:    func() error { return ag("type", "hello") },
 			Daemon:   func() error { return call("type", map[string]any{"text": "hello"}) },
 		},
 		{
+			// agemu returns once the key is queued in InputManager (like tap); input keyevent waits
+			// until the app has handled it.
 			Name: "key home", Setup: home,
 			BaseDesc: "adb shell input keyevent KEYCODE_HOME",
 			Baseline: func() error { return adb("shell", "input", "keyevent", "KEYCODE_HOME") },
-			AgemDesc: "agemu key home",
+			AgemDesc: "agemu key home (returns when queued)",
 			Agemu:    func() error { return ag("key", "home") },
 			Daemon:   func() error { return call("key", map[string]any{"key": "home"}) },
 		},
