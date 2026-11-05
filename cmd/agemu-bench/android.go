@@ -165,8 +165,43 @@ func androidSuite(cfg Config) ([]Op, error) {
 		}
 		return fmt.Errorf("cold boot timed out")
 	}
-	shutdown := func() error { return call("shutdown", map[string]any{}) }
 	ensureBooted := func() error { return call("boot", map[string]any{}) }
+	// powerOff stops the emulator process (a cold boot needs the AVD free).
+	powerOff := func() error {
+		s, pid, err := androidSerial(avd)
+		if err != nil {
+			return nil
+		}
+		_ = Run(adbBin, "-s", s, "emu", "kill")
+		deadline := time.Now().Add(60 * time.Second)
+		for syscall.Kill(pid, 0) == nil {
+			if time.Now().After(deadline) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		_, _ = cl.Call("devices", map[string]any{}, nil) // let the daemon notice
+		return nil
+	}
+	// standby: running device -> agemu shutdown (baseline restored, VM paused).
+	standby := func() error {
+		if err := ensureBooted(); err != nil {
+			return err
+		}
+		return call("shutdown", map[string]any{})
+	}
+	// phased returns a Before that runs first() for the first n calls (the baseline
+	// iterations) and then() afterwards (agemu CLI and daemon iterations).
+	phased := func(n int, first, then func() error) func() error {
+		calls := 0
+		return func() error {
+			calls++
+			if calls <= n {
+				return first()
+			}
+			return then()
+		}
+	}
 	waitAdbReady := func() error {
 		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
@@ -324,6 +359,11 @@ func androidSuite(cfg Config) ([]Op, error) {
 		{
 			// Cold app start: Settings is force-stopped before every iteration (not timed).
 			Name: "launch app (cold start)", N: 10,
+			// A fresh Settings task (no leftover activities of other packages on top), then the
+			// Settings process is killed before every iteration.
+			Setup: func() error {
+				return adb("shell", "am", "start", "-W", "--activity-clear-task", "-n", settingsComp)
+			},
 			Before: func() error {
 				if err := adb("shell", "am", "force-stop", "com.android.settings"); err != nil {
 					return err
@@ -345,7 +385,9 @@ func androidSuite(cfg Config) ([]Op, error) {
 		{
 			// Warm start: Settings is running in the background (home pressed before each run).
 			Name: "launch app (warm, in background)", N: 10,
-			Setup:    func() error { return call("launch", map[string]any{"app": "com.android.settings"}) },
+			Setup: func() error {
+				return adb("shell", "am", "start", "-W", "--activity-clear-task", "-n", settingsComp)
+			},
 			Before:   home,
 			BaseDesc: "adb shell am start -W -n " + settingsComp,
 			Baseline: func() error {
@@ -402,17 +444,24 @@ func androidSuite(cfg Config) ([]Op, error) {
 			}(),
 		},
 		{
-			Name: "boot to agent-ready", N: 3, BaseN: 3,
-			Setup: func() error {
-				if err := native(); err != nil {
-					return err
-				}
-				return nil
-			},
-			Before:   shutdown,
+			// Standby is agemu's "shutdown": the baseline is restored and the VM paused, so boot
+			// only resumes it. The baseline cold-boots a powered-off AVD.
+			Name: "boot to agent-ready (from standby)", N: 3, BaseN: 3,
+			Setup:    native,
+			Before:   phased(3, powerOff, standby),
 			BaseDesc: "emulator cold boot (same flags, -no-snapshot-load) until sys.boot_completed=1",
 			Baseline: coldBoot,
-			AgemDesc: "agemu boot (baseline snapshot + agent answering)",
+			AgemDesc: "agemu boot (resume from standby + agent answering)",
+			Agemu:    func() error { return Run(cfg.AgemuBin, "boot", dev) },
+			Daemon:   func() error { return call("boot", map[string]any{}) },
+		},
+		{
+			// No standby: a new emulator process loads the baseline snapshot.
+			Name: "boot to agent-ready (powered off)", N: 3, BaseN: 3,
+			Before:   powerOff,
+			BaseDesc: "emulator cold boot (same flags, -no-snapshot-load) until sys.boot_completed=1",
+			Baseline: coldBoot,
+			AgemDesc: "agemu boot (new emulator process + baseline snapshot + agent answering)",
 			Agemu:    func() error { return Run(cfg.AgemuBin, "boot", dev) },
 			Daemon:   func() error { return call("boot", map[string]any{}) },
 		},

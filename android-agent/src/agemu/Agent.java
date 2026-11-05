@@ -489,12 +489,33 @@ public final class Agent {
     // `adb shell input` does (virtual keyboard device), but synchronously: injectInputEvent(sync)
     // returns after the focused app has handled the event.
 
+    // InputManager.INJECT_INPUT_EVENT_MODE_*: the same call `adb shell input` makes (cmd input).
+    // UiAutomation.injectInputEvent(e, true) is avoided on purpose: since API 33 it also waits
+    // for window animations, which a soft keyboard runs on every key press.
+    static final int INJECT_ASYNC = 0, INJECT_WAIT_FOR_FINISH = 2;
+    static Object inputManager;
+    static Method injectMethod;
+
+    static void inject(android.view.InputEvent ev, int mode) {
+        try {
+            if (injectMethod == null) {
+                IBinder b = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "input");
+                inputManager = Class.forName("android.hardware.input.IInputManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, b);
+                injectMethod = inputManager.getClass().getMethod("injectInputEvent", android.view.InputEvent.class, int.class);
+            }
+            injectMethod.invoke(inputManager, ev, mode);
+        } catch (Throwable t) {
+            // Fall back to UiAutomation (needs no reflection).
+            ua.injectInputEvent(ev, mode != INJECT_ASYNC);
+        }
+    }
+
     static void injectKey(int code) {
         long now = SystemClock.uptimeMillis();
         KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
-        ua.injectInputEvent(down, false);
+        inject(down, INJECT_ASYNC);
         KeyEvent up = new KeyEvent(now, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
-        ua.injectInputEvent(up, true);
+        inject(up, INJECT_WAIT_FOR_FINISH);
     }
 
     /** Types text with virtual-keyboard key events (like `input text`); characters with no key use ACTION_MULTIPLE. */
@@ -513,12 +534,13 @@ public final class Agent {
                 all.add(new KeyEvent(SystemClock.uptimeMillis(), ch, KeyCharacterMap.VIRTUAL_KEYBOARD, 0));
             }
         }
-        // The input dispatcher keeps order; waiting for the last event means all were handled.
+        // The input dispatcher keeps order, so waiting for the last event to be finished by the
+        // app means every earlier one was handled too.
         for (int k = 0; k < all.size(); k++) {
             KeyEvent e = all.get(k);
             KeyEvent ev = e.getAction() == KeyEvent.ACTION_MULTIPLE ? e : KeyEvent.changeTimeRepeat(e, SystemClock.uptimeMillis(), 0);
             ev.setSource(InputDevice.SOURCE_KEYBOARD);
-            ua.injectInputEvent(ev, k == all.size() - 1);
+            inject(ev, k == all.size() - 1 ? INJECT_WAIT_FOR_FINISH : INJECT_ASYNC);
         }
     }
 

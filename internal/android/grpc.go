@@ -3,6 +3,9 @@ package android
 import (
 	"context"
 	"fmt"
+	"os"
+	"sync"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -14,11 +17,13 @@ import (
 
 // emuClient is a gRPC connection to one running emulator (EmulatorController + SnapshotService).
 type emuClient struct {
-	conn *grpc.ClientConn
-	ctl  emupb.EmulatorControllerClient
-	snap emupb.SnapshotServiceClient
-	port int
-	pid  int
+	conn     *grpc.ClientConn
+	ctl      emupb.EmulatorControllerClient
+	snap     emupb.SnapshotServiceClient
+	port     int
+	pid      int
+	fb       *shm // MMAP frame transport (nil: frames come in the gRPC reply)
+	fbBroken bool
 }
 
 type bearer string
@@ -49,7 +54,23 @@ func dialEmu(r runningEmu) (*emuClient, error) {
 	return &emuClient{conn: conn, ctl: emupb.NewEmulatorControllerClient(conn), snap: emupb.NewSnapshotServiceClient(conn), port: r.GRPCPort, pid: r.PID}, nil
 }
 
-func (e *emuClient) Close() error { return e.conn.Close() }
+func (e *emuClient) Close() error {
+	e.fb.Close()
+	return e.conn.Close()
+}
+
+// enableShm switches screenshots to the MMAP transport (AGEMU_ANDROID_SHM=0 disables it).
+func (e *emuClient) enableShm(path string, w, h int) {
+	if env("AGEMU_ANDROID_SHM", "1") == "0" || w <= 0 || h <= 0 {
+		return
+	}
+	s, err := openShm(path, w, h)
+	if err != nil {
+		logf("frame shm %s: %v", path, err)
+		return
+	}
+	e.fb = s
+}
 
 func (e *emuClient) status(ctx context.Context) (*emupb.EmulatorStatus, error) {
 	return e.ctl.GetStatus(ctx, &emptypb.Empty{})
@@ -61,7 +82,76 @@ type frame struct {
 	Pix  []byte // len W*H*4
 }
 
+// shm is a file-backed shared memory region the emulator writes frames into (MMAP image
+// transport), so a 10 MB frame does not travel through protobuf and HTTP/2.
+type shm struct {
+	mu   sync.Mutex
+	path string
+	data []byte
+	size int
+}
+
 func (e *emuClient) screenshot(ctx context.Context) (frame, error) {
+	if e.fb != nil && !e.fbBroken {
+		f, err := e.screenshotMMAP(ctx)
+		if err == nil {
+			return f, nil
+		}
+		logf("mmap screenshot failed (%v); using gRPC bytes from now on", err)
+		e.fbBroken = true
+	}
+	return e.screenshotBytes(ctx)
+}
+
+func (e *emuClient) screenshotMMAP(ctx context.Context) (frame, error) {
+	e.fb.mu.Lock()
+	defer e.fb.mu.Unlock()
+	img, err := e.ctl.GetScreenshot(ctx, &emupb.ImageFormat{
+		Format:    emupb.ImageFormat_RGBA8888,
+		Transport: &emupb.ImageTransport{Channel: emupb.ImageTransport_MMAP, Handle: "file://" + e.fb.path},
+	})
+	if err != nil {
+		return frame{}, err
+	}
+	f := img.GetFormat()
+	w, h := int(f.GetWidth()), int(f.GetHeight())
+	if w == 0 || h == 0 || w*h*4 > e.fb.size {
+		return frame{}, fmt.Errorf("mmap frame %dx%d does not fit %d bytes", w, h, e.fb.size)
+	}
+	if len(img.Image) > 0 { // emulator ignored the transport
+		return frame{W: w, H: h, Pix: img.Image[:w*h*4]}, nil
+	}
+	pix := make([]byte, w*h*4)
+	copy(pix, e.fb.data[:w*h*4])
+	return frame{W: w, H: h, Pix: pix}, nil
+}
+
+// openShm creates (or reuses) the frame file for a device, sized for w x h RGBA.
+func openShm(path string, w, h int) (*shm, error) {
+	size := w * h * 4
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if err := f.Truncate(int64(size)); err != nil {
+		return nil, err
+	}
+	data, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, err
+	}
+	return &shm{path: path, data: data, size: size}, nil
+}
+
+func (s *shm) Close() {
+	if s != nil && s.data != nil {
+		_ = syscall.Munmap(s.data)
+		s.data = nil
+	}
+}
+
+func (e *emuClient) screenshotBytes(ctx context.Context) (frame, error) {
 	img, err := e.ctl.GetScreenshot(ctx, &emupb.ImageFormat{Format: emupb.ImageFormat_RGBA8888})
 	if err != nil {
 		return frame{}, err

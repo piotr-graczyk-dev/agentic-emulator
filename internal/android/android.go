@@ -151,6 +151,9 @@ func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) 
 	}
 	d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, a, time.Time{}, false
 	d.mu.Unlock()
+	if av, err := loadAVD(d.name); err == nil {
+		e.enableShm(filepath.Join(logDir(), d.name+".fb"), av.intCfg("hw.lcd.width"), av.intCfg("hw.lcd.height"))
+	}
 	return e, a, nil
 }
 
@@ -567,6 +570,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			}
 			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, &agentClient{serial: r.serial()}, time.Time{}, false
 			d.mu.Unlock()
+			e.enableShm(filepath.Join(logDir(), d.name+".fb"), a.intCfg("hw.lcd.width"), a.intCfg("hw.lcd.height"))
 			return nil
 		}
 		if cmd.ProcessState != nil || !pidAlive(cmd.Process.Pid) {
@@ -967,11 +971,12 @@ func (b *Backend) Screenshot(ctx context.Context, id string, o api.ScreenshotOpt
 	if err != nil {
 		return api.Screenshot{}, err
 	}
-	// Grab the framebuffer and refresh the logical display size concurrently.
+	// Grab the framebuffer while getting the logical display size (cached for 2 s like taps;
+	// agemu's own profile / reset / boot calls refresh it immediately).
 	var di displayInfo
 	var derr error
 	done := make(chan struct{})
-	go func() { di, derr = d.display(ctx, a, 0); close(done) }()
+	go func() { di, derr = d.display(ctx, a, 2*time.Second); close(done) }()
 	f, err := e.screenshot(ctx)
 	<-done
 	if err != nil {
