@@ -46,6 +46,12 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 @property (nonatomic, readonly) CGSize screenPixels;
 @property (nonatomic, readonly) double screenScale;
 
+/// CoreSimulator's boot progress (what `simctl bootstatus` reports): status (4 = waiting on
+/// SpringBoard), terminal (YES once finished), elapsed (s). nil when unknown.
+@property (nonatomic, readonly, nullable) NSDictionary *bootStatusInfo;
+/// When the current boot started (-[SimDevice lastBootedAt]); changes with every boot.
+@property (nonatomic, readonly, nullable) NSDate *lastBootedAt;
+
 // Lifecycle
 - (BOOL)bootWithError:(NSError **)error;
 - (BOOL)shutdownWithError:(NSError **)error;
@@ -82,17 +88,28 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 - (BOOL)consumerUsage:(uint32_t)usage down:(BOOL)down error:(NSError **)error;
 /// Connects the HID client now (the first connection takes about a second).
 - (BOOL)prepareHIDWithError:(NSError **)error;
+/// YES when the framebuffer surface / HID client of the current boot are connected.
+@property (nonatomic, readonly) BOOL framebufferConnected;
+@property (nonatomic, readonly) BOOL hidConnected;
 /// Waits until every HID message sent so far has been acknowledged.
 - (BOOL)hidWaitForAcknowledgements:(NSTimeInterval)timeout error:(NSError **)error;
 
-// Accessibility (AXPTranslator)
+// Accessibility (AXPTranslator). Every read is bounded by timeout (seconds, <= 0: 20 s) and
+// fails with an error, never with a partial result, when the simulator does not answer in time.
 /// The frontmost application's accessibility tree as nested dictionaries. Frames are in points.
 /// maxDepth < 0 means unlimited.
-- (nullable NSDictionary *)accessibilityTreeWithMaxDepth:(NSInteger)maxDepth error:(NSError **)error;
+- (nullable NSDictionary *)accessibilityTreeWithMaxDepth:(NSInteger)maxDepth
+                                                 timeout:(double)timeout
+                                                   error:(NSError **)error;
 /// Hit-tests a point (in points) and returns that element's subtree plus its attribute names.
-- (nullable NSDictionary *)accessibilityAtPointX:(double)x y:(double)y maxDepth:(NSInteger)maxDepth error:(NSError **)error;
-/// A cheap readiness probe: the frontmost application's pid and frame (no children).
-- (nullable NSDictionary *)accessibilityFrontmostWithError:(NSError **)error;
+- (nullable NSDictionary *)accessibilityAtPointX:(double)x
+                                               y:(double)y
+                                        maxDepth:(NSInteger)maxDepth
+                                         timeout:(double)timeout
+                                           error:(NSError **)error;
+/// A cheap readiness probe: the frontmost application's pid (one request), plus its frame and
+/// label when full is YES.
+- (nullable NSDictionary *)accessibilityFrontmostWithTimeout:(double)timeout full:(BOOL)full error:(NSError **)error;
 
 @end
 

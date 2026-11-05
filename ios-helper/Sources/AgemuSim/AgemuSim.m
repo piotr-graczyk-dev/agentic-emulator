@@ -170,13 +170,28 @@ static NSString *AGStringValue(id value)
 
 #pragma mark - Accessibility bridge
 
-// AXPTranslator is a process-wide singleton with one token-delegate slot. Each tree read
-// registers a token -> SimDevice mapping; the translator calls back with the token for every
-// lazily fetched attribute, and we forward the request to that device via CoreSimulator.
+// One accessibility read (a tree, a frontmost probe, a hit test). Every request of the read
+// is bounded: by the read's deadline and by a per-request timeout. A request that misses
+// either is answered with an empty response and counted, so the read can fail with an error
+// instead of returning a silently incomplete tree.
+@interface AGAXSession : NSObject
+@property (nonatomic, strong) id device;
+@property (nonatomic, assign) CFAbsoluteTime deadline;
+@property (nonatomic, assign) double requestTimeout;
+@property (atomic, assign) NSUInteger requests;
+@property (atomic, assign) NSUInteger timeouts;
+@end
+
+@implementation AGAXSession
+@end
+
+// AXPTranslator is a process-wide singleton with one token-delegate slot. Each read registers
+// a token -> session mapping; the translator calls back with the token for every request, and
+// we forward the request to that device via CoreSimulator.
 @interface AGAXBridge : NSObject <AGAXPTranslationTokenDelegateHelper>
 @property (nonatomic, strong, readonly) dispatch_queue_t callbackQueue;
 @property (nonatomic, strong, readonly) dispatch_queue_t workQueue;
-@property (nonatomic, strong, readonly) NSMutableDictionary<NSString *, id> *devices;
+@property (nonatomic, strong, readonly) NSMutableDictionary<NSString *, AGAXSession *> *sessions;
 @property (nonatomic, strong, readonly) id translator;
 @property (atomic, assign) NSUInteger requestCount;
 @end
@@ -201,37 +216,46 @@ static NSString *AGStringValue(id value)
   }
   _callbackQueue = dispatch_queue_create("agemu.ax.callback", DISPATCH_QUEUE_CONCURRENT);
   _workQueue = dispatch_queue_create("agemu.ax.work", DISPATCH_QUEUE_SERIAL);
-  _devices = [NSMutableDictionary dictionary];
+  _sessions = [NSMutableDictionary dictionary];
   Class translatorClass = NSClassFromString(@"AXPTranslator");
   _translator = [(id<AGAXPTranslator>)translatorClass sharedInstance];
   [(id<AGAXPTranslator>)_translator setBridgeTokenDelegate:self];
   return self;
 }
 
-- (NSString *)pushDevice:(id)device
+// timeout: the whole read's budget in seconds. Each request may take at most 5 s of it.
+- (AGAXSession *)openSessionForDevice:(id)device timeout:(double)timeout token:(NSString **)token
 {
-  NSString *token = NSUUID.UUID.UUIDString;
-  @synchronized(self.devices) {
-    self.devices[token] = device;
+  AGAXSession *session = [[AGAXSession alloc] init];
+  session.device = device;
+  if (timeout <= 0) {
+    timeout = 20;
   }
-  return token;
+  session.deadline = CFAbsoluteTimeGetCurrent() + timeout;
+  session.requestTimeout = MIN(5.0, timeout);
+  NSString *t = NSUUID.UUID.UUIDString;
+  @synchronized(self.sessions) {
+    self.sessions[t] = session;
+  }
+  *token = t;
+  return session;
 }
 
-- (void)popToken:(NSString *)token
+- (void)closeToken:(NSString *)token
 {
-  @synchronized(self.devices) {
-    [self.devices removeObjectForKey:token];
+  @synchronized(self.sessions) {
+    [self.sessions removeObjectForKey:token];
   }
 }
 
 - (AGTranslationCallback)accessibilityTranslationDelegateBridgeCallbackWithToken:(NSString *)token
 {
-  id device;
-  @synchronized(self.devices) {
-    device = self.devices[token];
+  AGAXSession *session;
+  @synchronized(self.sessions) {
+    session = self.sessions[token];
   }
   Class responseClass = NSClassFromString(@"AXPTranslatorResponse");
-  if (!device) {
+  if (!session) {
     return ^id(id request) {
       return [(id<AGAXPTranslatorResponse>)responseClass emptyResponse];
     };
@@ -244,23 +268,37 @@ static NSString *AGStringValue(id value)
   });
   return ^id(id request) {
     self.requestCount += 1;
+    session.requests += 1;
+    double wait = session.requestTimeout;
+    double remaining = session.deadline - CFAbsoluteTimeGetCurrent();
+    if (remaining <= 0) {
+      session.timeouts += 1;
+      return [(id<AGAXPTranslatorResponse>)responseClass emptyResponse];
+    }
+    wait = MIN(wait, remaining);
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
     if (debug) {
       fprintf(stderr, "ax> %s\n", [[request description] UTF8String]);
     }
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block id response = nil;
-    [(id<AGSimDevice>)device sendAccessibilityRequestAsync:request
-                                           completionQueue:queue
-                                         completionHandler:^(id inner) {
-                                           response = inner;
-                                           dispatch_semaphore_signal(done);
-                                         }];
-    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))) != 0 || !response) {
+    [(id<AGSimDevice>)session.device sendAccessibilityRequestAsync:request
+                                                   completionQueue:queue
+                                                 completionHandler:^(id inner) {
+                                                   response = inner;
+                                                   dispatch_semaphore_signal(done);
+                                                 }];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC))) != 0) {
+      session.timeouts += 1;
+      return [(id<AGAXPTranslatorResponse>)responseClass emptyResponse];
+    }
+    if (!response) {
       return [(id<AGAXPTranslatorResponse>)responseClass emptyResponse];
     }
     if (debug) {
-      fprintf(stderr, "ax< %.1f ms %s\n", (CFAbsoluteTimeGetCurrent() - start) * 1000, [[[response description] substringToIndex:MIN((NSUInteger)200, [[response description] length])] UTF8String]);
+      NSString *d = [response description];
+      fprintf(stderr, "ax< %.1f ms %s\n", (CFAbsoluteTimeGetCurrent() - start) * 1000,
+              [[d substringToIndex:MIN((NSUInteger)200, d.length)] UTF8String]);
     }
     return response;
   };
@@ -279,13 +317,44 @@ static NSString *AGStringValue(id value)
 
 @end
 
-static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSInteger maxDepth, NSUInteger *count);
+static NSError *AGAXTimeoutError(AGAXSession *session, NSString *what, double budget)
+{
+  return AGError(@"%@: the simulator's accessibility service did not answer in time (%lu of %lu requests "
+                 @"timed out, budget %.1f s); the simulator is busy, try again",
+                 what, (unsigned long)session.timeouts, (unsigned long)session.requests, budget);
+}
+
+// The attributes agemu maps to api.Element, fetched for one element in ONE translator request
+// (AXPTranslatorRequest type 5: AXUIElementCopyMultipleAttributeValues inside the simulator)
+// instead of one request per attribute.
+static NSArray<NSString *> *AGAXAttributeNames(void)
+{
+  static NSArray *names;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    names = @[
+      @"AXRole", @"AXSubrole", @"AXDescription", @"AXIdentifier", @"AXValue", @"AXFrame", @"AXEnabled", @"AXSelected",
+      @"AXFocused", @"AXChildren", @"AXTitle", @"AXPlaceholderValue"
+    ];
+  });
+  return names;
+}
+
+typedef struct {
+  NSString *__unsafe_unretained token;
+  AGAXSession *__unsafe_unretained session;
+  NSInteger maxDepth;
+  NSUInteger count;
+  BOOL batched;
+} AGAXWalk;
+
+static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth);
 
 // Some containers report no children although they have some (e.g. the iOS 26 Settings
 // toolbar that hosts the search field: both AXChildren and AXChildrenInNavigationOrder come
 // back empty). Hit-testing inside the container still finds them, so sample three points
 // along its horizontal centre line and keep distinct elements that lie inside its frame.
-static NSArray *AGAXHiddenChildren(NSRect frame, NSString *token, NSInteger depth, NSInteger maxDepth, NSUInteger *count)
+static NSArray *AGAXHiddenChildren(NSRect frame, AGAXWalk *walk, NSInteger depth)
 {
   if (frame.size.width < 1 || frame.size.height < 1) {
     return @[];
@@ -297,11 +366,11 @@ static NSArray *AGAXHiddenChildren(NSRect frame, NSString *token, NSInteger dept
   NSRect bounds = NSInsetRect(frame, -1, -1);
   for (NSNumber *fx in @[ @0.5, @0.17, @0.83 ]) {
     CGPoint point = CGPointMake(NSMinX(frame) + fx.doubleValue * NSWidth(frame), NSMidY(frame));
-    id translation = [translator objectAtPoint:point displayId:0 bridgeDelegateToken:token];
+    id translation = [translator objectAtPoint:point displayId:0 bridgeDelegateToken:walk->token];
     if (!translation) {
       continue;
     }
-    [(id<AGAXPTranslationObject>)translation setBridgeDelegateToken:token];
+    [(id<AGAXPTranslationObject>)translation setBridgeDelegateToken:walk->token];
     NSNumber *objectID = @([(id<AGAXPTranslationObject>)translation objectID]);
     if ([seen containsObject:objectID]) {
       continue;
@@ -311,12 +380,12 @@ static NSArray *AGAXHiddenChildren(NSRect frame, NSString *token, NSInteger dept
     if (!element) {
       continue;
     }
-    [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:token];
+    [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:walk->token];
     NSRect hit = [(NSAccessibilityElement *)element accessibilityFrame];
     if (NSIsEmptyRect(hit) || !NSContainsRect(bounds, hit) || NSEqualRects(hit, frame)) {
       continue;
     }
-    NSDictionary *node = AGAXNode(element, token, depth, maxDepth, count);
+    NSDictionary *node = AGAXNode(element, walk, depth);
     if (node) {
       [out addObject:node];
     }
@@ -324,65 +393,89 @@ static NSArray *AGAXHiddenChildren(NSRect frame, NSString *token, NSInteger dept
   return out;
 }
 
-// Reads one element. Each NSAccessibility getter is one translator round trip, so only the
-// attributes agemu maps to api.Element are read.
-static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSInteger maxDepth, NSUInteger *count)
+static BOOL AGAXBool(id value)
 {
-  [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:token];
+  return [value respondsToSelector:@selector(boolValue)] && [value boolValue];
+}
+
+// Reads one element: one batched request (plus the translator's own remote-element check),
+// or one request per attribute when the translator cannot batch.
+static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
+{
+  [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:walk->token];
   NSAccessibilityElement *e = element;
   NSMutableDictionary *node = [NSMutableDictionary dictionary];
-  *count += 1;
-  NSRect frame = e.accessibilityFrame;
+  walk->count += 1;
+  NSDictionary *v = nil;
+  if (walk->batched) {
+    id values = [(id<AGAXPMacPlatformElement>)element accessibilityMultipleAttributes:AGAXAttributeNames()];
+    v = [values isKindOfClass:NSDictionary.class] ? values : @{};
+  }
+  NSRect frame = NSZeroRect;
+  if (v) {
+    NSValue *fv = v[@"AXFrame"];
+    if ([fv isKindOfClass:NSValue.class]) {
+      frame = fv.rectValue;
+    }
+  } else {
+    frame = e.accessibilityFrame;
+  }
   node[@"frame"] = @[ @(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height) ];
-  NSString *role = e.accessibilityRole;
-  if (role) {
+  NSString *role = AGStringValue(v ? v[@"AXRole"] : e.accessibilityRole);
+  if (role.length) {
     node[@"role"] = role;
   }
-  NSString *subrole = e.accessibilitySubrole;
-  if (subrole) {
+  NSString *subrole = AGStringValue(v ? v[@"AXSubrole"] : e.accessibilitySubrole);
+  if (subrole.length) {
     node[@"subrole"] = subrole;
   }
-  NSString *label = AGStringValue(e.accessibilityLabel);
+  NSString *label = AGStringValue(v ? v[@"AXDescription"] : e.accessibilityLabel);
   if (label.length) {
     node[@"label"] = label;
   }
-  NSString *identifier = AGStringValue(e.accessibilityIdentifier);
+  NSString *identifier = AGStringValue(v ? v[@"AXIdentifier"] : e.accessibilityIdentifier);
   if (identifier.length) {
     node[@"id"] = identifier;
   }
-  NSString *value = AGStringValue(e.accessibilityValue);
+  NSString *value = AGStringValue(v ? v[@"AXValue"] : e.accessibilityValue);
   if (value.length) {
     node[@"value"] = value;
   }
   if ([role isEqualToString:@"AXTextField"] || [role isEqualToString:@"AXTextArea"]) {
     // An empty field reports its placeholder as its value; the placeholder tells them apart.
-    NSString *placeholder = AGStringValue(e.accessibilityPlaceholderValue);
+    NSString *placeholder = AGStringValue(v ? v[@"AXPlaceholderValue"] : e.accessibilityPlaceholderValue);
     if (placeholder.length) {
       node[@"placeholder"] = placeholder;
     }
   }
-  NSString *title = AGStringValue(e.accessibilityTitle);
+  NSString *title = AGStringValue(v ? v[@"AXTitle"] : e.accessibilityTitle);
   if (title.length) {
     node[@"title"] = title;
   }
-  node[@"enabled"] = @(e.isAccessibilityEnabled);
-  if (e.isAccessibilitySelected) {
+  node[@"enabled"] = @(v ? AGAXBool(v[@"AXEnabled"]) : e.isAccessibilityEnabled);
+  if (v ? AGAXBool(v[@"AXSelected"]) : e.isAccessibilitySelected) {
     node[@"selected"] = @YES;
   }
-  if (e.isAccessibilityFocused) {
+  if (v ? AGAXBool(v[@"AXFocused"]) : e.isAccessibilityFocused) {
     node[@"focused"] = @YES;
   }
-  if (maxDepth < 0 || depth < maxDepth) {
-    NSArray *children = e.accessibilityChildren;
+  if ((walk->maxDepth < 0 || depth < walk->maxDepth) && walk->session.timeouts == 0) {
+    NSArray *children = v ? v[@"AXChildren"] : e.accessibilityChildren;
+    if (![children isKindOfClass:NSArray.class]) {
+      children = @[];
+    }
     NSMutableArray *out = [NSMutableArray arrayWithCapacity:children.count];
     for (id child in children) {
-      NSDictionary *c = AGAXNode(child, token, depth + 1, maxDepth, count);
+      if (walk->session.timeouts > 0) {
+        break;
+      }
+      NSDictionary *c = AGAXNode(child, walk, depth + 1);
       if (c) {
         [out addObject:c];
       }
     }
-    if (out.count == 0 && depth > 0 && [role isEqualToString:@"AXGroup"]) {
-      [out addObjectsFromArray:AGAXHiddenChildren(frame, token, depth + 1, maxDepth, count)];
+    if (out.count == 0 && depth > 0 && [role isEqualToString:@"AXGroup"] && walk->session.timeouts == 0) {
+      [out addObjectsFromArray:AGAXHiddenChildren(frame, walk, depth + 1)];
       if (out.count) {
         node[@"hitTested"] = @YES;
       }
@@ -536,6 +629,30 @@ static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSIn
     AG_FAIL(error, AGExceptionError(@"shutdown", e));
     return NO;
   }
+}
+
+- (NSDictionary *)bootStatusInfo
+{
+  @try {
+    if (![self.device respondsToSelector:@selector(bootStatus)]) {
+      return nil;
+    }
+    id info = [self.device bootStatus];
+    if (!info || ![info respondsToSelector:@selector(status)] ||
+        ![info respondsToSelector:@selector(isTerminalStatus)]) {
+      return nil;
+    }
+    id<AGSimDeviceBootInfo> b = info;
+    double elapsed = [info respondsToSelector:@selector(bootElapsedTime)] ? b.bootElapsedTime : 0;
+    return @{@"status" : @(b.status), @"terminal" : @(b.isTerminalStatus), @"elapsed" : @(elapsed)};
+  } @catch (NSException *e) {
+    return nil;
+  }
+}
+
+- (NSDate *)lastBootedAt
+{
+  return [self currentBoot];
 }
 
 - (NSDate *)currentBoot
@@ -775,6 +892,24 @@ static IOSurface *AGAsSurface(id candidate)
   @synchronized(self) {
     self.surface = surface;
   }
+}
+
+- (BOOL)framebufferConnected
+{
+  [self reconnectIfRebooted];
+  @synchronized(self) {
+    return self.surface != nil;
+  }
+}
+
+- (BOOL)hidConnected
+{
+  [self reconnectIfRebooted];
+  __block BOOL connected = NO;
+  dispatch_sync(self.hidQueue, ^{
+    connected = self.hidClient != nil;
+  });
+  return connected;
 }
 
 - (IOSurface *)framebufferWithError:(NSError **)error
@@ -1104,7 +1239,22 @@ static void *AGTouchMessage(double x, double y, BOOL down, uint32_t edge)
   return element;
 }
 
-- (NSDictionary *)accessibilityTreeWithMaxDepth:(NSInteger)maxDepth error:(NSError **)error
+static BOOL AGAXBatching(id element)
+{
+  static BOOL disabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    disabled = getenv("AGEMU_AX_UNBATCHED") != NULL;
+  });
+  return !disabled && [element respondsToSelector:@selector(accessibilityMultipleAttributes:)];
+}
+
+// Runs body on the accessibility work queue with a session bounded by timeout (seconds).
+- (nullable id)withAXSession:(double)timeout
+                        what:(NSString *)what
+                       error:(NSError **)error
+                        body:(id _Nullable (^)(AGAXBridge *bridge, NSString *token, AGAXSession *session,
+                                               NSError **err))body
 {
   if (!AGLoadFrameworks(error)) {
     return nil;
@@ -1114,112 +1264,134 @@ static void *AGTouchMessage(double x, double y, BOOL down, uint32_t edge)
     return nil;
   }
   AGAXBridge *bridge = AGAXBridge.shared;
-  __block NSDictionary *result = nil;
+  __block id result = nil;
   __block NSError *err = nil;
+  double budget = timeout > 0 ? timeout : 20;
+  CFAbsoluteTime enqueued = CFAbsoluteTimeGetCurrent();
   dispatch_sync(bridge.workQueue, ^{
-    NSString *token = [bridge pushDevice:self.device];
-    NSUInteger before = bridge.requestCount;
+    // Time spent queued behind another read counts against this read's budget.
+    double left = budget - (CFAbsoluteTimeGetCurrent() - enqueued);
+    if (left <= 0) {
+      err = AGError(@"%@: waited %.1f s for another accessibility read to finish", what, budget);
+      return;
+    }
+    NSString *token = nil;
+    AGAXSession *session = [bridge openSessionForDevice:self.device timeout:left token:&token];
     @try {
-      int pid = 0;
-      id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:&err];
-      if (element) {
-        NSUInteger count = 0;
-        NSDictionary *root = AGAXNode(element, token, 0, maxDepth, &count);
-        result = @{
-          @"pid" : @(pid),
-          @"root" : root,
-          @"elements" : @(count),
-          @"requests" : @(bridge.requestCount - before),
-        };
+      NSError *inner = nil;
+      result = body(bridge, token, session, &inner);
+      if (session.timeouts > 0) {
+        result = nil;
+        err = AGAXTimeoutError(session, what, budget);
+      } else if (!result) {
+        err = inner;
       }
     } @catch (NSException *e) {
-      err = AGExceptionError(@"accessibility", e);
+      result = nil;
+      err = AGExceptionError(what, e);
     } @finally {
-      [bridge popToken:token];
+      [bridge closeToken:token];
     }
   });
   if (!result) {
-    AG_FAIL(error, err ?: AGError(@"accessibility read failed"));
+    AG_FAIL(error, err ?: AGError(@"%@ failed", what));
   }
   return result;
 }
 
-- (NSDictionary *)accessibilityAtPointX:(double)x y:(double)y maxDepth:(NSInteger)maxDepth error:(NSError **)error
+- (NSDictionary *)accessibilityTreeWithMaxDepth:(NSInteger)maxDepth timeout:(double)timeout error:(NSError **)error
 {
-  if (!AGLoadFrameworks(error)) {
-    return nil;
-  }
-  AGAXBridge *bridge = AGAXBridge.shared;
-  __block NSDictionary *result = nil;
-  __block NSError *err = nil;
-  dispatch_sync(bridge.workQueue, ^{
-    NSString *token = [bridge pushDevice:self.device];
-    @try {
-      id<AGAXPTranslator> translator = bridge.translator;
-      id translation = [translator objectAtPoint:CGPointMake(x, y) displayId:0 bridgeDelegateToken:token];
-      if (!translation) {
-        err = AGError(@"nothing at %.0f,%.0f", x, y);
-        return;
-      }
-      [(id<AGAXPTranslationObject>)translation setBridgeDelegateToken:token];
-      id element = [translator macPlatformElementFromTranslation:translation];
-      [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:token];
-      NSUInteger count = 0;
-      NSMutableDictionary *node = [AGAXNode(element, token, 0, maxDepth, &count) mutableCopy];
-      NSArray *names = [(NSAccessibilityElement *)element accessibilityAttributeNames];
-      node[@"attributeNames"] = names ?: @[];
-      id parent = [(NSAccessibilityElement *)element accessibilityParent];
-      if (parent) {
-        node[@"parentRole"] = AGStringValue([(NSAccessibilityElement *)parent accessibilityRole]) ?: @"";
-      }
-      result = node;
-    } @catch (NSException *e) {
-      err = AGExceptionError(@"accessibility", e);
-    } @finally {
-      [bridge popToken:token];
-    }
-  });
-  if (!result) {
-    AG_FAIL(error, err ?: AGError(@"accessibility read failed"));
-  }
-  return result;
+  return [self withAXSession:timeout
+                        what:@"accessibility tree"
+                       error:error
+                        body:^id(AGAXBridge *bridge, NSString *token, AGAXSession *session, NSError **err) {
+                          int pid = 0;
+                          id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:err];
+                          if (!element) {
+                            return nil;
+                          }
+                          AGAXWalk walk = {
+                            .token = token, .session = session, .maxDepth = maxDepth, .count = 0,
+                            .batched = AGAXBatching(element)};
+                          NSDictionary *root = AGAXNode(element, &walk, 0);
+                          return @{
+                            @"pid" : @(pid),
+                            @"root" : root,
+                            @"elements" : @(walk.count),
+                            @"requests" : @(session.requests),
+                            @"batched" : @(walk.batched),
+                          };
+                        }];
 }
 
-- (NSDictionary *)accessibilityFrontmostWithError:(NSError **)error
+- (NSDictionary *)accessibilityAtPointX:(double)x
+                                      y:(double)y
+                               maxDepth:(NSInteger)maxDepth
+                                timeout:(double)timeout
+                                  error:(NSError **)error
 {
-  if (!AGLoadFrameworks(error)) {
-    return nil;
-  }
-  if (self.device.state != 3) {
-    AG_FAIL(error, AGError(@"device %@ is not booted (%@)", self.udid, self.stateString));
-    return nil;
-  }
-  AGAXBridge *bridge = AGAXBridge.shared;
-  __block NSDictionary *result = nil;
-  __block NSError *err = nil;
-  dispatch_sync(bridge.workQueue, ^{
-    NSString *token = [bridge pushDevice:self.device];
-    @try {
-      int pid = 0;
-      id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:&err];
-      if (element) {
-        NSRect frame = [(NSAccessibilityElement *)element accessibilityFrame];
-        result = @{
-          @"pid" : @(pid),
-          @"frame" : @[ @(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height) ],
-          @"label" : AGStringValue([(NSAccessibilityElement *)element accessibilityLabel]) ?: @"",
-        };
-      }
-    } @catch (NSException *e) {
-      err = AGExceptionError(@"accessibility", e);
-    } @finally {
-      [bridge popToken:token];
-    }
-  });
-  if (!result) {
-    AG_FAIL(error, err ?: AGError(@"accessibility read failed"));
-  }
-  return result;
+  return [self withAXSession:timeout
+                        what:@"accessibility hit test"
+                       error:error
+                        body:^id(AGAXBridge *bridge, NSString *token, AGAXSession *session, NSError **err) {
+                          id<AGAXPTranslator> translator = bridge.translator;
+                          id translation = [translator objectAtPoint:CGPointMake(x, y) displayId:0 bridgeDelegateToken:token];
+                          if (!translation) {
+                            AG_FAIL(err, AGError(@"nothing at %.0f,%.0f", x, y));
+                            return nil;
+                          }
+                          [(id<AGAXPTranslationObject>)translation setBridgeDelegateToken:token];
+                          id element = [translator macPlatformElementFromTranslation:translation];
+                          [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation]
+                            setBridgeDelegateToken:token];
+                          AGAXWalk walk = {
+                            .token = token, .session = session, .maxDepth = maxDepth, .count = 0,
+                            .batched = AGAXBatching(element)};
+                          NSMutableDictionary *node = [AGAXNode(element, &walk, 0) mutableCopy];
+                          NSArray *names = [(NSAccessibilityElement *)element accessibilityAttributeNames];
+                          node[@"attributeNames"] = names ?: @[];
+                          id parent = [(NSAccessibilityElement *)element accessibilityParent];
+                          if (parent) {
+                            node[@"parentRole"] = AGStringValue([(NSAccessibilityElement *)parent accessibilityRole]) ?: @"";
+                          }
+                          return node;
+                        }];
+}
+
+- (NSDictionary *)accessibilityFrontmostWithTimeout:(double)timeout full:(BOOL)full error:(NSError **)error
+{
+  return [self withAXSession:timeout
+                        what:@"frontmost application"
+                       error:error
+                        body:^id(AGAXBridge *bridge, NSString *token, AGAXSession *session, NSError **err) {
+                          int pid = 0;
+                          id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:err];
+                          if (!element) {
+                            return nil;
+                          }
+                          if (!full) {
+                            return @{@"pid" : @(pid)};
+                          }
+                          NSRect frame = NSZeroRect;
+                          NSString *label = nil;
+                          if (AGAXBatching(element)) {
+                            NSDictionary *v = [(id<AGAXPMacPlatformElement>)element
+                              accessibilityMultipleAttributes:@[ @"AXFrame", @"AXDescription" ]];
+                            if ([v isKindOfClass:NSDictionary.class]) {
+                              NSValue *fv = v[@"AXFrame"];
+                              frame = [fv isKindOfClass:NSValue.class] ? fv.rectValue : NSZeroRect;
+                              label = AGStringValue(v[@"AXDescription"]);
+                            }
+                          } else {
+                            frame = [(NSAccessibilityElement *)element accessibilityFrame];
+                            label = AGStringValue([(NSAccessibilityElement *)element accessibilityLabel]);
+                          }
+                          return @{
+                            @"pid" : @(pid),
+                            @"frame" : @[ @(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height) ],
+                            @"label" : label ?: @"",
+                          };
+                        }];
 }
 
 @end

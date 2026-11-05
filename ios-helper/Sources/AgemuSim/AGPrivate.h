@@ -40,6 +40,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (id)runtime;
 - (NSString *)dataPath;
 - (nullable NSDate *)lastBootedAt;
+- (nullable id)bootStatus;
 - (nullable id)io;
 - (BOOL)bootWithOptions:(NSDictionary *)options error:(NSError **)error;
 - (BOOL)shutdownWithError:(NSError **)error;
@@ -57,6 +58,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)sendAccessibilityRequestAsync:(id)request
                       completionQueue:(dispatch_queue_t)queue
                     completionHandler:(void (^)(id response))handler;
+@end
+
+// SimDeviceBootInfo: what `simctl bootstatus` prints. status: 0 booting, 1 waiting on
+// BackBoard, 2 waiting on data migration, 4 waiting on the system app (SpringBoard),
+// 0xFFFFFFFF finished (terminal).
+@protocol AGSimDeviceBootInfo <NSObject>
+- (unsigned int)status;
+- (BOOL)isTerminalStatus;
+- (double)bootElapsedTime;
 @end
 
 // SimDeviceIOClient
@@ -121,12 +131,25 @@ typedef id _Nonnull (^AGTranslationCallback)(id request);
 
 @protocol AGAXPTranslatorResponse <NSObject>
 + (id)emptyResponse;
+- (unsigned long long)error;
+- (nullable id)resultData;
+@end
+
+@protocol AGAXPTranslatorRequest <NSObject>
++ (id)requestWithTranslation:(nullable id)translation;
+- (void)setRequestType:(unsigned long long)type;
+- (void)setAttributeType:(unsigned long long)type;
+- (void)setParameters:(nullable NSDictionary *)parameters;
+- (void)setClientType:(unsigned long long)type;
 @end
 
 // AXPMacPlatformElement is an NSAccessibilityElement subclass; its NSAccessibility
 // properties are fetched lazily, one translator request each.
 @protocol AGAXPMacPlatformElement <NSObject>
 - (id)translation;
+/// Mac attribute names (AXRole, AXFrame, ...) -> converted values, fetched in one translator
+/// request (type 5, multiple attributes).
+- (nullable NSDictionary *)accessibilityMultipleAttributes:(NSArray<NSString *> *)attributes;
 @end
 
 NS_ASSUME_NONNULL_END
