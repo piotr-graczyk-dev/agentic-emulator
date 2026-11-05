@@ -24,6 +24,7 @@ type emuClient struct {
 	pid      int
 	fb       *shm // MMAP frame transport (nil: frames come in the gRPC reply)
 	fbBroken bool
+	stream   *frameStream // latest posted frame (nil: off)
 }
 
 type bearer string
@@ -55,11 +56,14 @@ func dialEmu(r runningEmu) (*emuClient, error) {
 }
 
 func (e *emuClient) Close() error {
+	e.stream.Close()
+	err := e.conn.Close()
 	e.fb.Close()
-	return e.conn.Close()
+	return err
 }
 
-// enableShm switches screenshots to the MMAP transport (AGEMU_ANDROID_SHM=0 disables it).
+// enableShm switches screenshots to the MMAP transport (AGEMU_ANDROID_SHM=0 disables it) and
+// starts the frame stream (AGEMU_ANDROID_STREAM=0 disables it), which uses its own mapping.
 func (e *emuClient) enableShm(path string, w, h int) {
 	if env("AGEMU_ANDROID_SHM", "1") == "0" || w <= 0 || h <= 0 {
 		return
@@ -70,6 +74,15 @@ func (e *emuClient) enableShm(path string, w, h int) {
 		return
 	}
 	e.fb = s
+	if env("AGEMU_ANDROID_STREAM", "1") == "0" {
+		return
+	}
+	ss, err := openShm(path+".stream", w, h)
+	if err != nil {
+		logf("frame stream shm %s: %v", path+".stream", err)
+		return
+	}
+	e.stream = startFrameStream(e.ctl, ss, path, w, h)
 }
 
 func (e *emuClient) status(ctx context.Context) (*emupb.EmulatorStatus, error) {
@@ -106,6 +119,9 @@ func (e *emuClient) screenshot(ctx context.Context) (frame, error) {
 func (e *emuClient) screenshotMMAP(ctx context.Context) (frame, error) {
 	e.fb.mu.Lock()
 	defer e.fb.mu.Unlock()
+	if e.fb.data == nil {
+		return frame{}, fmt.Errorf("frame mapping closed")
+	}
 	img, err := e.ctl.GetScreenshot(ctx, &emupb.ImageFormat{
 		Format:    emupb.ImageFormat_RGBA8888,
 		Transport: &emupb.ImageTransport{Channel: emupb.ImageTransport_MMAP, Handle: "file://" + e.fb.path},
@@ -144,8 +160,14 @@ func openShm(path string, w, h int) (*shm, error) {
 	return &shm{path: path, data: data, size: size}, nil
 }
 
+// Close unmaps the region; it waits for a reader holding s.mu.
 func (s *shm) Close() {
-	if s != nil && s.data != nil {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data != nil {
 		_ = syscall.Munmap(s.data)
 		s.data = nil
 	}

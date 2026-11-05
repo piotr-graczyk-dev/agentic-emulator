@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,9 +60,65 @@ type device struct {
 	proc    *exec.Cmd // emulator we launched (reaped by a goroutine)
 	retook  bool      // baseline already retaken by this daemon
 	agentOK bool      // agent version checked on the current connection
+
+	// lastInput is when agemu last sent input (unix ns); screenshots taken right after an
+	// input wait for the frame that shows its effect (see frameStream.get).
+	lastInput atomic.Int64
+}
+
+func (d *device) markInput() { d.lastInput.Store(time.Now().UnixNano()) }
+
+// redirector owns the console port redirection to the agent's guest TCP port for one
+// emulator process (agentClient.tcp). It has its own lock: it is called with the agent
+// client's lock held, and device.mu is taken around agent calls elsewhere.
+type redirector struct {
+	name    string
+	console int
+	mu      sync.Mutex
+	port    int
+	failed  bool
+}
+
+func (r *redirector) get(ctx context.Context, refresh bool) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.port != 0 && !refresh {
+		return r.port, nil
+	}
+	if r.failed && !refresh {
+		return 0, errors.New("no console redirection")
+	}
+	c, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	hp, err := ensureRedir(c, r.console, agentGuestPort, r.port)
+	if err != nil {
+		if !r.failed {
+			logf("%s: agent TCP redirection unavailable (%v); using adb", r.name, err)
+		}
+		r.failed = true
+		return 0, err
+	}
+	r.port, r.failed = hp, false
+	return hp, nil
+}
+
+// newAgent returns an agent client for a running emulator: TCP via the console redirection
+// (AGEMU_ANDROID_AGENT_TCP=0 disables it), adb otherwise.
+func newAgent(name string, r runningEmu) *agentClient {
+	a := &agentClient{serial: r.serial()}
+	if env("AGEMU_ANDROID_AGENT_TCP", "1") != "0" && r.Console > 0 {
+		if tok := agentToken(name); tok != "" {
+			rd := &redirector{name: name, console: r.Console}
+			a.tcp, a.token = rd.get, tok
+		}
+	}
+	return a
 }
 
 func logf(format string, args ...any) { log.Printf("android: "+format, args...) }
+
+// trace enables per-operation debug lines in the daemon log (AGEMU_ANDROID_TRACE=1).
+var trace = os.Getenv("AGEMU_ANDROID_TRACE") == "1"
 
 func avdName(id string) (string, error) {
 	name, ok := strings.CutPrefix(id, string(api.Android)+":")
@@ -141,7 +198,7 @@ func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	a := &agentClient{serial: r.serial()}
+	a := newAgent(d.name, r)
 	d.mu.Lock()
 	if d.emu != nil {
 		d.emu.Close()
@@ -449,7 +506,12 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if err := d.launch(ctx, a, loadBaseline); err != nil {
 		return api.Device{}, err
 	}
-	if err := d.waitBooted(ctx, 180*time.Second); err != nil {
+	if loadBaseline {
+		err = d.waitAgentOrBooted(ctx, 180*time.Second)
+	} else {
+		err = d.waitBooted(ctx, 180*time.Second)
+	}
+	if err != nil {
 		return api.Device{}, err
 	}
 	_, ag, err := d.connRaw(ctx)
@@ -574,7 +636,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			if d.agent != nil {
 				d.agent.Close()
 			}
-			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, &agentClient{serial: r.serial()}, time.Time{}, false
+			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, newAgent(d.name, r), time.Time{}, false
 			d.mu.Unlock()
 			e.enableShm(filepath.Join(logDir(), d.name+".fb"), a.intCfg("hw.lcd.width"), a.intCfg("hw.lcd.height"))
 			return nil
@@ -617,6 +679,40 @@ func (d *device) waitBooted(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
+// waitAgentOrBooted waits until the agent restored from the baseline answers over TCP (no
+// need to wait for adb, which re-handshakes after the snapshot load), or, when it does not
+// answer, until adb sees sys.boot_completed=1.
+func (d *device) waitAgentOrBooted(ctx context.Context, timeout time.Duration) error {
+	d.mu.Lock()
+	serial, a := d.run.serial(), d.agent
+	d.mu.Unlock()
+	deadline := time.Now().Add(timeout)
+	for {
+		if a != nil && a.tcp != nil {
+			c, cancel := context.WithTimeout(ctx, 2*time.Second)
+			p, err := a.ping(c)
+			cancel()
+			if err == nil && p.BootCompleted == "1" {
+				return nil
+			}
+		}
+		c, cancel := context.WithTimeout(ctx, time.Second)
+		out, err := adbShellOK(c, serial, "getprop sys.boot_completed")
+		cancel()
+		if err == nil && strings.TrimSpace(out) == "1" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not finish booting in %v (last: %v %q)", serial, timeout, err, strings.TrimSpace(out))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // checkGuest logs guest properties that would make the device differ from a real phone.
 func (d *device) checkGuest(ctx context.Context) {
 	d.mu.Lock()
@@ -653,6 +749,9 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if _, err := ensureAgent(ctx, a, logf); err != nil {
 		return fmt.Errorf("agent not running before snapshot: %w", err)
 	}
+	// No host connection inside the snapshot: a restored guest would hold a dead socket.
+	a.Close()
+	time.Sleep(100 * time.Millisecond)
 	t := time.Now()
 	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -899,6 +998,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	if err := waitAgent(ctx, ag, 30*time.Second); err != nil {
 		return err
 	}
+	d.markInput()
 	if prev.W > 0 && (prev.W != prev.PhysW || prev.H != prev.PhysH || prev.Density != prev.PhysDensity) {
 		var di displayInfo
 		if err := d.call(ctx, map[string]any{"cmd": "profile", "w": prev.W, "h": prev.H, "density": prev.Density, "settleMs": 2000}, &di); err != nil {
@@ -952,7 +1052,9 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 		return api.Device{}, err
 	}
 	var di displayInfo
-	if err := d.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di); err != nil {
+	err = d.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di)
+	d.markInput()
+	if err != nil {
 		return api.Device{}, err
 	}
 	d.setDisplay(di)
@@ -983,7 +1085,19 @@ func (b *Backend) Screenshot(ctx context.Context, id string, o api.ScreenshotOpt
 	var derr error
 	done := make(chan struct{})
 	go func() { di, derr = d.display(ctx, a, 2*time.Second); close(done) }()
-	f, err := e.screenshot(ctx)
+	// The latest posted frame from the stream (waiting for a recent input's effect), or a
+	// framebuffer read when the stream does not have a current frame.
+	var last time.Time
+	if ns := d.lastInput.Load(); ns != 0 {
+		last = time.Unix(0, ns)
+	}
+	f, fromStream := e.stream.get(ctx, last)
+	if !fromStream {
+		f, err = e.screenshot(ctx)
+	}
+	if trace {
+		logf("%s: screenshot frame from stream=%v", d.name, fromStream)
+	}
 	<-done
 	if err != nil {
 		return api.Screenshot{}, err
@@ -1062,17 +1176,17 @@ func (d *device) screen(ctx context.Context, a *agentClient) (screenMap, error) 
 	return newScreenMap(di.W, di.H, di.PhysW, di.PhysH), nil
 }
 
-func (b *Backend) inputDev(ctx context.Context, id string) (*emuClient, screenMap, error) {
+func (b *Backend) inputDev(ctx context.Context, id string) (*device, *emuClient, screenMap, error) {
 	d, err := b.devFor(id)
 	if err != nil {
-		return nil, screenMap{}, err
+		return nil, nil, screenMap{}, err
 	}
 	e, a, err := d.conn(ctx)
 	if err != nil {
-		return nil, screenMap{}, err
+		return nil, nil, screenMap{}, err
 	}
 	m, err := d.screen(ctx, a)
-	return e, m, err
+	return d, e, m, err
 }
 
 func checkPoint(m screenMap, x, y int) error {
@@ -1083,10 +1197,11 @@ func checkPoint(m screenMap, x, y int) error {
 }
 
 func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
-	e, m, err := b.inputDev(ctx, id)
+	d, e, m, err := b.inputDev(ctx, id)
 	if err != nil {
 		return err
 	}
+	defer d.markInput()
 	if err := checkPoint(m, x, y); err != nil {
 		return err
 	}
@@ -1098,10 +1213,11 @@ func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
 }
 
 func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, durationMs int) error {
-	e, m, err := b.inputDev(ctx, id)
+	d, e, m, err := b.inputDev(ctx, id)
 	if err != nil {
 		return err
 	}
+	defer d.markInput()
 	if err := checkPoint(m, x1, y1); err != nil {
 		return err
 	}
@@ -1135,11 +1251,23 @@ func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, duration
 	return e.touch(ctx, bx, by, 0)
 }
 
-// TypeText types into the focused field. A phone AVD has no keyboard device (hw.keyboard=no,
-// so the soft keyboard behaves as on a real phone), which leaves the emulator's gRPC sendKey
-// nothing to drive; the on-device agent injects the key events instead (like
-// `adb shell input text`, including non-ASCII) and returns once the app has handled them.
+// TypeText types into the focused field. The agent inserts the text at the cursor of the
+// focused editable node with AccessibilityNodeInfo ACTION_SET_TEXT (what UiAutomator and
+// Appium setText do): the app's TextWatchers and listeners have run when it returns. Newlines
+// and tabs are sent as Enter / Tab keys. With no focused editable node it falls back to key
+// events (TypeKeys).
 func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
+	return b.typeText(ctx, id, text, false)
+}
+
+// TypeKeys types text as one key event per character through the IME path, like
+// `adb shell input text`, waiting until the app has handled each key. Slower; use it to
+// exercise an app's key handling or the soft keyboard.
+func (b *Backend) TypeKeys(ctx context.Context, id string, text string) error {
+	return b.typeText(ctx, id, text, true)
+}
+
+func (b *Backend) typeText(ctx context.Context, id string, text string, keys bool) error {
 	d, err := b.devFor(id)
 	if err != nil {
 		return err
@@ -1150,7 +1278,11 @@ func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
 	if text == "" {
 		return nil
 	}
-	return d.call(ctx, map[string]any{"cmd": "text", "text": text}, nil)
+	defer d.markInput()
+	var res struct {
+		Mode string `json:"mode"`
+	}
+	return d.call(ctx, map[string]any{"cmd": "text", "text": text, "keys": keys}, &res)
 }
 
 // Android KeyEvent key codes for the named keys.
@@ -1178,7 +1310,10 @@ func (b *Backend) Key(ctx context.Context, id string, key string) error {
 	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
-	return d.call(ctx, map[string]any{"cmd": "key", "code": code}, nil)
+	// Returns once InputManager has queued the key, like a tap through the emulator; follow it
+	// with wait or ui to see its effect.
+	defer d.markInput()
+	return d.call(ctx, map[string]any{"cmd": "key", "code": code, "async": true}, nil)
 }
 
 // ------------------------------------------------------------------ apps
@@ -1197,6 +1332,9 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 	d.mu.Lock()
 	serial := d.run.serial()
 	d.mu.Unlock()
+	if err := waitDevice(ctx, serial, 60*time.Second); err != nil {
+		return err
+	}
 	out, err := adbExec(ctx, serial, "install", "-r", path)
 	if err != nil {
 		return err
@@ -1221,6 +1359,7 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	if pkg == "" {
 		return errors.New("launch needs a package name")
 	}
+	defer d.markInput()
 	return d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
 }
 
@@ -1232,6 +1371,7 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
+	defer d.markInput()
 	return d.call(ctx, map[string]any{"cmd": "stop", "pkg": app}, nil)
 }
 

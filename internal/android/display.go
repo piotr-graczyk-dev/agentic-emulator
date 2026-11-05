@@ -163,28 +163,46 @@ func resizeBilinear(src, out rgbaImage, sx, sy float64) {
 }
 
 func resizeBox(src, out rgbaImage, sx, sy float64) {
+	// Source column range of every output column, computed once.
+	x0 := make([]int32, out.W)
+	x1 := make([]int32, out.W)
+	for x := 0; x < out.W; x++ {
+		a := int(float64(x) * sx)
+		b := max(a+1, min(src.W, int(math.Ceil(float64(x+1)*sx))))
+		x0[x], x1[x] = int32(a), int32(b)
+	}
 	parallelRows(out.H, func(ya, yb int) {
+		acc := make([]uint32, out.W*4)
 		for y := ya; y < yb; y++ {
 			sy0 := int(float64(y) * sy)
 			sy1 := max(sy0+1, min(src.H, int(math.Ceil(float64(y+1)*sy))))
-			o := out.Pix[y*out.W*4 : (y+1)*out.W*4]
-			for x := 0; x < out.W; x++ {
-				sx0 := int(float64(x) * sx)
-				sx1 := max(sx0+1, min(src.W, int(math.Ceil(float64(x+1)*sx))))
-				var acc [4]uint32
-				for j := sy0; j < sy1; j++ {
-					row := src.Pix[(j*src.W+sx0)*4 : (j*src.W+sx1)*4]
-					for i := 0; i < len(row); i += 4 {
-						acc[0] += uint32(row[i])
-						acc[1] += uint32(row[i+1])
-						acc[2] += uint32(row[i+2])
-						acc[3] += uint32(row[i+3])
+			clear(acc)
+			for j := sy0; j < sy1; j++ {
+				row := src.Pix[j*src.W*4 : (j+1)*src.W*4]
+				for x := 0; x < out.W; x++ {
+					a, b := int(x0[x])*4, int(x1[x])*4
+					r, g, bl, al := acc[x*4], acc[x*4+1], acc[x*4+2], acc[x*4+3]
+					for i := a; i < b; i += 4 {
+						p := row[i : i+4 : i+4]
+						r += uint32(p[0])
+						g += uint32(p[1])
+						bl += uint32(p[2])
+						al += uint32(p[3])
 					}
+					acc[x*4], acc[x*4+1], acc[x*4+2], acc[x*4+3] = r, g, bl, al
 				}
-				n := uint32((sy1 - sy0) * (sx1 - sx0))
-				for c := 0; c < 4; c++ {
-					o[x*4+c] = byte((acc[c] + n/2) / n)
-				}
+			}
+			o := out.Pix[y*out.W*4 : (y+1)*out.W*4]
+			rows := uint32(sy1 - sy0)
+			for x := 0; x < out.W; x++ {
+				n := rows * uint32(x1[x]-x0[x])
+				h := n / 2
+				q := acc[x*4 : x*4+4 : x*4+4]
+				oo := o[x*4 : x*4+4 : x*4+4]
+				oo[0] = byte((q[0] + h) / n)
+				oo[1] = byte((q[1] + h) / n)
+				oo[2] = byte((q[2] + h) / n)
+				oo[3] = byte((q[3] + h) / n)
 			}
 		}
 	})

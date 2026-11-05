@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/png"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -122,5 +123,38 @@ func BenchmarkEncodePNG(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		var buf bytes.Buffer
 		_ = encodePNG(&buf, img)
+	}
+}
+
+// TestResizeBoxMatchesReference checks the box filter against a direct per-pixel average
+// over the same source box.
+func TestResizeBoxMatchesReference(t *testing.T) {
+	src := rgbaImage{W: 1080, H: 2400, Pix: make([]byte, 1080*2400*4)}
+	for i := range src.Pix {
+		src.Pix[i] = byte(i*7 + i/4096)
+	}
+	for _, s := range [][2]int{{720, 1600}, {540, 1200}, {333, 777}} {
+		out := resize(src, s[0], s[1])
+		sx, sy := float64(src.W)/float64(s[0]), float64(src.H)/float64(s[1])
+		for y := 0; y < s[1]; y += 37 {
+			for x := 0; x < s[0]; x += 13 {
+				sx0 := int(float64(x) * sx)
+				sx1 := max(sx0+1, min(src.W, int(math.Ceil(float64(x+1)*sx))))
+				sy0 := int(float64(y) * sy)
+				sy1 := max(sy0+1, min(src.H, int(math.Ceil(float64(y+1)*sy))))
+				for c := 0; c < 4; c++ {
+					var sum, n uint32
+					for j := sy0; j < sy1; j++ {
+						for i := sx0; i < sx1; i++ {
+							sum += uint32(src.Pix[(j*src.W+i)*4+c])
+							n++
+						}
+					}
+					if want, got := byte((sum+n/2)/n), out.Pix[(y*out.W+x)*4+c]; want != got {
+						t.Fatalf("%v: pixel %d,%d channel %d = %d, want %d", s, x, y, c, got, want)
+					}
+				}
+			}
+		}
 	}
 }

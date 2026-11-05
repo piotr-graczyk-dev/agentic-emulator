@@ -9,6 +9,7 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.os.Bundle;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
@@ -25,10 +26,14 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -46,6 +51,11 @@ import java.util.List;
  *
  * Request:  {"id":1,"cmd":"tree"}
  * Response: {"id":1,"ok":true,"result":{...}}  or  {"id":1,"ok":false,"error":"..."}
+ *
+ * With a second argument (a TCP port) the agent also listens on that port of the guest. The
+ * host reaches it through an emulator console port redirection (`redir add`), which, unlike
+ * adb, works the moment a restored snapshot resumes. A TCP client must first send the line
+ * {"auth":"<token>"} with the token from the AGEMU_TOKEN environment variable.
  */
 public final class Agent {
     static final int USER_CURRENT = -2;
@@ -72,7 +82,14 @@ public final class Agent {
                     try {
                         final LocalSocket s = server.accept();
                         Thread h = new Thread(new Runnable() {
-                            public void run() { serve(s); }
+                            public void run() {
+                                try {
+                                    serve(s.getInputStream(), s.getOutputStream(), null);
+                                } catch (Throwable ignored) {
+                                } finally {
+                                    try { s.close(); } catch (Throwable ignored) {}
+                                }
+                            }
                         }, "agemu-conn");
                         h.setDaemon(true);
                         h.start();
@@ -84,7 +101,56 @@ public final class Agent {
             }
         }, "agemu-accept");
         t.start();
+        final int tcpPort = args.length > 1 ? Integer.parseInt(args[1]) : 0;
+        final String token = System.getenv("AGEMU_TOKEN");
+        if (tcpPort > 0 && token != null && token.length() >= 16) {
+            Thread tt = new Thread(new Runnable() {
+                public void run() { serveTCP(tcpPort, token); }
+            }, "agemu-tcp");
+            tt.setDaemon(true);
+            tt.start();
+        }
         Looper.loop();
+    }
+
+    static volatile int tcpListening = 0;
+
+    static void serveTCP(int port, final String token) {
+        ServerSocket ss = null;
+        for (int i = 0; ss == null; i++) {
+            try {
+                ss = new ServerSocket();
+                ss.setReuseAddress(true);
+                ss.bind(new InetSocketAddress(port), 16);
+            } catch (Throwable e) {
+                try { if (ss != null) ss.close(); } catch (Throwable ignored) {}
+                ss = null;
+                if (i == 50) { System.err.println("tcp: " + e); return; }
+                SystemClock.sleep(100); // a previous agent may still hold the port
+            }
+        }
+        tcpListening = port;
+        System.out.println("agemu-agent listening on tcp:" + port);
+        while (true) {
+            try {
+                final Socket s = ss.accept();
+                s.setTcpNoDelay(true);
+                Thread h = new Thread(new Runnable() {
+                    public void run() {
+                        try {
+                            serve(s.getInputStream(), s.getOutputStream(), token);
+                        } catch (Throwable ignored) {
+                        } finally {
+                            try { s.close(); } catch (Throwable ignored) {}
+                        }
+                    }
+                }, "agemu-tcp-conn");
+                h.setDaemon(true);
+                h.start();
+            } catch (Throwable e) {
+                SystemClock.sleep(100);
+            }
+        }
     }
 
     static String jarHash() {
@@ -125,36 +191,42 @@ public final class Agent {
 
     // ---------------------------------------------------------------- server
 
-    static void serve(LocalSocket s) {
-        try {
-            BufferedReader r = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8), 1 << 16);
-            OutputStream out = s.getOutputStream();
-            String line;
-            while ((line = r.readLine()) != null) {
-                if (line.isEmpty()) continue;
-                long id = 0;
-                StringBuilder sb = new StringBuilder(1 << 14);
-                try {
-                    JSONObject req = new JSONObject(line);
-                    id = req.optLong("id");
-                    sb.append("{\"id\":").append(id).append(",\"ok\":true,\"result\":");
-                    handle(req, sb);
-                    sb.append("}\n");
-                } catch (Throwable e) {
-                    Throwable c = e;
-                    while (c.getCause() != null) c = c.getCause();
-                    sb.setLength(0);
-                    sb.append("{\"id\":").append(id).append(",\"ok\":false,\"error\":");
-                    str(sb, c.getClass().getSimpleName() + ": " + c.getMessage());
-                    sb.append("}\n");
-                }
-                out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+    /** Serves one connection. With a token, the first line must be {"auth":"<token>"}. */
+    static void serve(InputStream in, OutputStream out, String token) throws Exception {
+        BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8), 1 << 16);
+        String line;
+        if (token != null) {
+            line = r.readLine();
+            if (line == null) return;
+            JSONObject a = new JSONObject(line);
+            if (!MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), a.optString("auth").getBytes(StandardCharsets.UTF_8))) {
+                out.write("{\"ok\":false,\"error\":\"bad token\"}\n".getBytes(StandardCharsets.UTF_8));
                 out.flush();
+                return;
             }
-        } catch (Throwable e) {
-            // client went away
-        } finally {
-            try { s.close(); } catch (Throwable ignored) {}
+            out.write("{\"ok\":true}\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+        while ((line = r.readLine()) != null) {
+            if (line.isEmpty()) continue;
+            long id = 0;
+            StringBuilder sb = new StringBuilder(1 << 14);
+            try {
+                JSONObject req = new JSONObject(line);
+                id = req.optLong("id");
+                sb.append("{\"id\":").append(id).append(",\"ok\":true,\"result\":");
+                handle(req, sb);
+                sb.append("}\n");
+            } catch (Throwable e) {
+                Throwable c = e;
+                while (c.getCause() != null) c = c.getCause();
+                sb.setLength(0);
+                sb.append("{\"id\":").append(id).append(",\"ok\":false,\"error\":");
+                str(sb, c.getClass().getSimpleName() + ": " + c.getMessage());
+                sb.append("}\n");
+            }
+            out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+            out.flush();
         }
     }
 
@@ -166,6 +238,7 @@ public final class Agent {
                 sb.append(",\"pid\":").append(Process.myPid());
                 sb.append(",\"uptimeMs\":").append(SystemClock.uptimeMillis());
                 sb.append(",\"bootCompleted\":"); str(sb, sysprop("sys.boot_completed"));
+                sb.append(",\"tcp\":").append(tcpListening);
                 sb.append("}");
                 return;
             case "display":
@@ -188,12 +261,13 @@ public final class Agent {
                 forceStop(req.getString("pkg"));
                 sb.append("true");
                 return;
-            case "text":
-                injectText(req.getString("text"));
-                sb.append("true");
+            case "text": {
+                String mode = typeText(req.getString("text"), req.optBoolean("keys", false));
+                sb.append("{\"mode\":"); str(sb, mode); sb.append('}');
                 return;
+            }
             case "key":
-                injectKey(req.getInt("code"));
+                injectKey(req.getInt("code"), req.optBoolean("async", false));
                 sb.append("true");
                 return;
             case "fg":
@@ -522,12 +596,93 @@ public final class Agent {
         }
     }
 
-    static void injectKey(int code) {
+    /**
+     * Presses a key (down + up). async: return once InputManager has queued both events, like a
+     * touch through the emulator; otherwise wait until the focused window has handled the up.
+     */
+    static void injectKey(int code, boolean async) {
         long now = SystemClock.uptimeMillis();
         KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
         inject(down, INJECT_ASYNC);
         KeyEvent up = new KeyEvent(now, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
-        inject(up, INJECT_WAIT_FOR_FINISH);
+        inject(up, async ? INJECT_ASYNC : INJECT_WAIT_FOR_FINISH);
+    }
+
+    /**
+     * Types text. By default the text is inserted into the focused editable node with
+     * ACTION_SET_TEXT at its cursor (what UiAutomator / Appium setText do): the app's
+     * TextWatchers and listeners run before this returns. '\n' and '\t' are sent as the Enter and
+     * Tab keys. With keys=true, or when no editable node has input focus, every character is a
+     * key event through the IME path, like `adb shell input text`.
+     */
+    static String typeText(String text, boolean keys) {
+        if (keys) {
+            injectText(text);
+            return "keys";
+        }
+        StringBuilder seg = new StringBuilder();
+        boolean any = false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t') {
+                if (seg.length() > 0) {
+                    if (!setText(seg.toString(), any ? 300 : 1000)) {
+                        injectText(text.substring(i - seg.length()));
+                        return any ? "settext+keys" : "keys";
+                    }
+                    any = true;
+                    seg.setLength(0);
+                }
+                if (c == '\r' && i + 1 < text.length() && text.charAt(i + 1) == '\n') continue;
+                injectKey(c == '\t' ? KeyEvent.KEYCODE_TAB : KeyEvent.KEYCODE_ENTER, false);
+                continue;
+            }
+            seg.append(c);
+        }
+        if (seg.length() > 0) {
+            if (!setText(seg.toString(), any ? 300 : 1000)) {
+                injectText(seg.toString());
+                return any ? "settext+keys" : "keys";
+            }
+            any = true;
+        }
+        return any ? "settext" : "keys";
+    }
+
+    /** The node with input focus if it is editable, waiting up to timeoutMs for one. */
+    static AccessibilityNodeInfo focusedEditable(long timeoutMs) {
+        long t0 = SystemClock.uptimeMillis();
+        while (true) {
+            AccessibilityNodeInfo f = null;
+            try { f = ua.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); } catch (Throwable ignored) {}
+            if (f != null && f.isEditable()) return f;
+            if (SystemClock.uptimeMillis() - t0 >= timeoutMs) return null;
+            SystemClock.sleep(10);
+        }
+    }
+
+    /** Inserts text at the cursor of the focused editable node. False: not possible (use keys). */
+    static boolean setText(String text, long focusWaitMs) {
+        AccessibilityNodeInfo f = focusedEditable(focusWaitMs);
+        if (f == null) return false;
+        String cur = f.isShowingHintText() ? "" : cs(f.getText());
+        // A password field exposes masked text; it can only be set when it is empty.
+        if (f.isPassword() && !cur.isEmpty()) return false;
+        int a = f.getTextSelectionStart(), b = f.getTextSelectionEnd();
+        if (a < 0 || b < 0 || a > cur.length() || b > cur.length()) a = b = cur.length();
+        if (a > b) { int t = a; a = b; b = t; }
+        String next = cur.substring(0, a) + text + cur.substring(b);
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next);
+        if (!f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return false;
+        int caret = a + text.length();
+        if (caret != next.length()) { // SET_TEXT leaves the cursor at the end; put it after the insert
+            Bundle sel = new Bundle();
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, caret);
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, caret);
+            f.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel);
+        }
+        return true;
     }
 
     /** Types text with virtual-keyboard key events (like `input text`); characters with no key use ACTION_MULTIPLE. */

@@ -38,7 +38,7 @@ Device commands (-d <device> optional when exactly one device is booted):
   find --text T | --contains T | --id I | --role R
   tap <x> <y> | tap --text T | --contains T | --id I [--index N]
   swipe <x1> <y1> <x2> <y2> [--ms 300]
-  type <text>                               type into the focused field
+  type <text> [--keys]                      type into the focused field (--keys: per-key events)
   key home|back|enter|delete|tab|escape|lock
   install <path.apk|path.app>  launch <app-id>  terminate <app-id>
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
@@ -92,7 +92,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true}
+var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -211,6 +211,7 @@ func runCommand(cmd string, args []string) error {
 		p.DurationMs = c.int("ms")
 	case "type":
 		p.Text = strings.Join(c.pos, " ")
+		p.Keys = c.flags["keys"] == "true"
 	case "key":
 		if len(c.pos) == 0 {
 			return fmt.Errorf("key needs a key name")

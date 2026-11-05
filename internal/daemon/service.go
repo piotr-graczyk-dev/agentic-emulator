@@ -43,6 +43,9 @@ type Params struct {
 	DurationMs int    `json:"durationMs,omitempty"`
 	Text       string `json:"text,omitempty"`
 	Key        string `json:"key,omitempty"`
+	// Keys types with one key event per character (the IME path) instead of the platform's
+	// fast text entry, on backends that have both (Android).
+	Keys bool `json:"keys,omitempty"`
 
 	// apps
 	App string `json:"app,omitempty"`
@@ -266,6 +269,9 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		}
 		return ok(b.Swipe(ctx, id, *p.X, *p.Y, p.X2, p.Y2, d))
 	case "type":
+		if kt, isKT := b.(keyTyper); isKT && p.Keys {
+			return ok(kt.TypeKeys(ctx, id, p.Text))
+		}
 		return ok(b.TypeText(ctx, id, p.Text))
 	case "key":
 		return ok(b.Key(ctx, id, strings.ToLower(p.Key)))
@@ -277,6 +283,12 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		return ok(b.Terminate(ctx, id, p.App))
 	}
 	return nil, fmt.Errorf("unknown method %q", method)
+}
+
+// keyTyper is implemented by backends whose TypeText does not send key events (Android sets
+// the field's text); TypeKeys types one key event per character instead.
+type keyTyper interface {
+	TypeKeys(ctx context.Context, id, text string) error
 }
 
 func ok(err error) (any, error) {
