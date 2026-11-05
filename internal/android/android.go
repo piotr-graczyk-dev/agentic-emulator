@@ -385,7 +385,7 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	}
 	args := []string{
 		"-avd", name, "-port", strconv.Itoa(p.console), "-grpc", strconv.Itoa(p.grpc),
-		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "host"),
+		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "auto"),
 		"-memory", strconv.Itoa(ram), "-no-snapshot-save",
 	}
 	// Emulator 37 raises guest RAM to 4096 MB for API > 36 images; -lowram is the only switch

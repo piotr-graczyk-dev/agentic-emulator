@@ -146,7 +146,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 			return err
 		}
 		cmd := exec.Command(emuBin, "-avd", avd, "-port", "5580", "-grpc", "8580", "-no-window", "-no-audio",
-			"-no-boot-anim", "-gpu", "host", "-memory", "2048", "-lowram", "-no-snapshot-load", "-no-snapshot-save")
+			"-no-boot-anim", "-gpu", "auto", "-memory", "2048", "-lowram", "-no-snapshot-load", "-no-snapshot-save")
 		cmd.Stdout, cmd.Stderr = lf, lf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := cmd.Start(); err != nil {
