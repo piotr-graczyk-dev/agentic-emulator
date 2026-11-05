@@ -17,11 +17,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/piotr-graczyk-dev/agentic-emulator/internal/android"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
-	"github.com/piotr-graczyk-dev/agentic-emulator/internal/ios"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/mcp"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/outline"
 )
@@ -81,7 +79,7 @@ func runDaemon() {
 	defer cancel()
 	tmp := filepath.Join(daemon.Home(), "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
-	svc := daemon.NewService(tmp, android.New(), ios.New())
+	svc := daemon.NewService(tmp, backends()...)
 	defer svc.Close()
 	if err := daemon.Serve(ctx, svc); err != nil {
 		log.Fatal(err)
