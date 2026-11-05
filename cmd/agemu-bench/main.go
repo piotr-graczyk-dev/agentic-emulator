@@ -34,6 +34,9 @@ type Op struct {
 	Agemu    func() error
 	AgemDesc string       // e.g. "agemu screenshot"
 	Daemon   func() error // same op over a persistent daemon connection (optional)
+	// InherentMs is time both tools must spend by definition (e.g. a swipe's gesture
+	// duration). When set, the table also reports the speedup of the overhead on top of it.
+	InherentMs float64
 }
 
 // Config is passed to suites.
@@ -64,6 +67,21 @@ type Result struct {
 	Daemon    *Stats  `json:"daemon,omitempty"`
 	SpeedupX  float64 `json:"speedupCli,omitempty"`
 	SpeedupDX float64 `json:"speedupDaemon,omitempty"`
+	// Overhead speedups exclude InherentMs from both sides.
+	InherentMs float64 `json:"inherentMs,omitempty"`
+	OverheadX  float64 `json:"overheadSpeedupCli,omitempty"`
+	OverheadDX float64 `json:"overheadSpeedupDaemon,omitempty"`
+}
+
+func overhead(base, ours *Stats, inherent float64) float64 {
+	if inherent <= 0 || base == nil || ours == nil || base.Err != "" || ours.Err != "" {
+		return 0
+	}
+	b, o := base.MedMs-inherent, ours.MedMs-inherent
+	if b <= 0 || o <= 0 {
+		return 0
+	}
+	return b / o
 }
 
 func measure(n int, before, fn func() error) *Stats {
@@ -155,7 +173,7 @@ func main() {
 				continue
 			}
 		}
-		r := Result{Op: op.Name, BaseDesc: op.BaseDesc, AgemDesc: op.AgemDesc}
+		r := Result{Op: op.Name, BaseDesc: op.BaseDesc, AgemDesc: op.AgemDesc, InherentMs: op.InherentMs}
 		baseIters := iters
 		if op.BaseN > 0 {
 			baseIters = op.BaseN
@@ -169,6 +187,8 @@ func main() {
 		if r.Baseline != nil && r.Daemon != nil && r.Baseline.Err == "" && r.Daemon.Err == "" && r.Daemon.MedMs > 0 {
 			r.SpeedupDX = r.Baseline.MedMs / r.Daemon.MedMs
 		}
+		r.OverheadX = overhead(r.Baseline, r.Agemu, op.InherentMs)
+		r.OverheadDX = overhead(r.Baseline, r.Daemon, op.InherentMs)
 		fmt.Fprintf(os.Stderr, "   %s\n", line(r))
 		results = append(results, r)
 	}
@@ -215,6 +235,15 @@ func markdown(platform, dev string, rs []Result) string {
 			sd = fmt.Sprintf("**%.1f×**", r.SpeedupDX)
 		}
 		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s |\n", r.Op, r.BaseDesc, fmtStats(r.Baseline), fmtStats(r.Agemu), fmtStats(r.Daemon), sx, sd)
+	}
+	var notes []string
+	for _, r := range rs {
+		if r.InherentMs > 0 && (r.OverheadX > 0 || r.OverheadDX > 0) {
+			notes = append(notes, fmt.Sprintf("- %s: both tools must spend %.0f ms on the gesture itself. Overhead on top of it: CLI %.1f×, daemon %.1f× faster.", r.Op, r.InherentMs, r.OverheadX, r.OverheadDX))
+		}
+	}
+	if len(notes) > 0 {
+		b.WriteString("\n" + strings.Join(notes, "\n") + "\n")
 	}
 	return b.String()
 }
