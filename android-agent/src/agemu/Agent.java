@@ -263,8 +263,12 @@ public final class Agent {
                 sb.append("true");
                 return;
             case "text": {
+                tFocus = tSet = 0;
+                long t0 = SystemClock.uptimeMillis();
                 String mode = typeText(req.getString("text"), req.optBoolean("keys", false));
-                sb.append("{\"mode\":"); str(sb, mode); sb.append('}');
+                sb.append("{\"mode\":"); str(sb, mode);
+                sb.append(",\"ms\":").append(SystemClock.uptimeMillis() - t0);
+                sb.append(",\"focusMs\":").append(tFocus).append(",\"setMs\":").append(tSet).append('}');
                 return;
             }
             case "key":
@@ -696,10 +700,21 @@ public final class Agent {
         }
     }
 
+    static long tFocus, tSet; // phase timings of the last setText (reported by "text")
+
     /** Inserts text at the cursor of the focused editable node. False: not possible (use keys). */
     static boolean setText(String text, long focusWaitMs) {
+        long t0 = SystemClock.uptimeMillis();
         AccessibilityNodeInfo f = focusedEditable(focusWaitMs);
-        if (f == null) return false;
+        if (f == null) {
+            tFocus += SystemClock.uptimeMillis() - t0;
+            return false;
+        }
+        // The node may come from the accessibility cache, which the app updates asynchronously
+        // after each change: read the current text and cursor from the app, or back-to-back
+        // calls would insert at a stale position.
+        f.refresh();
+        tFocus += SystemClock.uptimeMillis() - t0;
         String cur = f.isShowingHintText() ? "" : cs(f.getText());
         // A password field exposes masked text; it can only be set when it is empty.
         if (f.isPassword() && !cur.isEmpty()) return false;
@@ -709,7 +724,10 @@ public final class Agent {
         String next = cur.substring(0, a) + text + cur.substring(b);
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next);
-        if (!f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return false;
+        long t1 = SystemClock.uptimeMillis();
+        boolean done = f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        tSet += SystemClock.uptimeMillis() - t1;
+        if (!done) return false;
         int caret = a + text.length();
         if (caret != next.length()) { // SET_TEXT leaves the cursor at the end; put it after the insert
             Bundle sel = new Bundle();

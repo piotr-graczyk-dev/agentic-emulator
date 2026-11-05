@@ -502,3 +502,31 @@ func TestDeviceLaunchPhases(t *testing.T) {
 		t.Logf("warm launch %d: %v total, agent says %v (err %v)", i, time.Since(t0).Round(time.Millisecond), res, err)
 	}
 }
+
+// TestDeviceTypePhases prints the agent's set-text timing into the focused field.
+func TestDeviceTypePhases(t *testing.T) {
+	avd := env("AGEMU_TEST_AVD", "agemu-pixel")
+	if _, ok := findRunning(avd); !ok {
+		t.Skipf("%s not running", avd)
+	}
+	ctx := context.Background()
+	b := New()
+	defer b.Close()
+	d, _ := b.devFor("android:" + avd)
+	if _, _, err := d.conn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < envInt("AGEMU_TEST_N", 8); i++ {
+		var res map[string]any
+		t0 := time.Now()
+		time.Sleep(time.Duration(envInt("AGEMU_TEST_GAP_MS", 1)) * time.Millisecond)
+		keys := i%2 == 1 && env("AGEMU_TEST_KEYS", "1") == "1"
+		t0 = time.Now()
+		word := env("AGEMU_TEST_WORD", "hello")
+		if word == "seq" {
+			word = fmt.Sprintf("<%d>", i)
+		}
+		err := d.call(ctx, map[string]any{"cmd": "text", "text": word, "keys": keys}, &res)
+		t.Logf("type %d: %v round trip, agent %v (err %v)", i, time.Since(t0).Round(time.Millisecond), res, err)
+	}
+}

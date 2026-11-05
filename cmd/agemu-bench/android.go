@@ -137,6 +137,10 @@ func androidSuite(cfg Config) ([]Op, error) {
 		return call("wait", map[string]any{"selector": map[string]any{"role": "textfield"}, "timeoutMs": 5000})
 	}
 	shot := func(i *int) string { *i++; return filepath.Join(tmp, fmt.Sprintf("shot-%d.png", *i%4)) }
+	// idle gives the app 500 ms (untimed) to finish handling the previous text change, as the
+	// think time between an agent's calls would. Text changes run on the app's UI thread; a
+	// back-to-back loop would measure how fast the app redraws, not how fast the tool is.
+	idle := func() error { time.Sleep(500 * time.Millisecond); return nil }
 	var si int
 
 	// Cold boot with the same flags agemu uses, minus the snapshot; ready = sys.boot_completed.
@@ -365,7 +369,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			// A plain EditText (Contacts' new-contact form): measures input delivery.
-			Name: "type text (plain field)", Setup: plainField,
+			Name: "type text (plain field)", Setup: plainField, Before: idle,
 			BaseDesc: "adb shell input text hello",
 			Baseline: func() error { return adb("shell", "input", "text", "hello") },
 			AgemDesc: "agemu type hello (sets the field's text)",
@@ -374,7 +378,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			// The same field with agemu's per-key mode (one key event per character, like input text).
-			Name: "type text --keys (plain field)", Setup: plainField,
+			Name: "type text --keys (plain field)", Setup: plainField, Before: idle,
 			BaseDesc: "adb shell input text hello",
 			Baseline: func() error { return adb("shell", "input", "text", "hello") },
 			AgemDesc: "agemu type --keys hello",
@@ -383,7 +387,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			// Settings search re-runs a query on every text change; both tools wait for the app.
-			Name: "type text (Settings search)", Setup: func() error {
+			Name: "type text (Settings search)", Before: idle, Setup: func() error {
 				if err := settingsHome(); err != nil {
 					return err
 				}
