@@ -534,13 +534,21 @@ public final class Agent {
                 all.add(new KeyEvent(SystemClock.uptimeMillis(), ch, KeyCharacterMap.VIRTUAL_KEYBOARD, 0));
             }
         }
-        // The input dispatcher keeps order, so waiting for the last event to be finished by the
-        // app means every earlier one was handled too.
-        for (int k = 0; k < all.size(); k++) {
-            KeyEvent e = all.get(k);
+        // Typing right after a tap can race the keyboard binding to the new field (Gboard then
+        // re-applies its composing text and characters appear twice). Wait until an editable
+        // view has input focus, then send each event and wait until the app handled it, as
+        // `input text` does.
+        long t0 = SystemClock.uptimeMillis();
+        while (SystemClock.uptimeMillis() - t0 < 2000) {
+            AccessibilityNodeInfo f = null;
+            try { f = ua.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); } catch (Throwable ignored) {}
+            if (f != null && f.isEditable()) break;
+            SystemClock.sleep(10);
+        }
+        for (KeyEvent e : all) {
             KeyEvent ev = e.getAction() == KeyEvent.ACTION_MULTIPLE ? e : KeyEvent.changeTimeRepeat(e, SystemClock.uptimeMillis(), 0);
             ev.setSource(InputDevice.SOURCE_KEYBOARD);
-            inject(ev, k == all.size() - 1 ? INJECT_WAIT_FOR_FINISH : INJECT_ASYNC);
+            inject(ev, INJECT_WAIT_FOR_FINISH);
         }
     }
 

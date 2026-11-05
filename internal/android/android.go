@@ -189,6 +189,10 @@ func (d *device) call(ctx context.Context, req map[string]any, out any) error {
 		return err
 	}
 	logf("%s: agent unreachable (%v); restarting it", d.name, de.err)
+	// If the guest itself restarted (adb offline / not booted), wait for it first.
+	if err := d.waitBooted(ctx, 180*time.Second); err != nil {
+		return fmt.Errorf("%v; device did not come back: %w", de, err)
+	}
 	if _, rerr := ensureAgent(ctx, a, logf); rerr != nil {
 		return fmt.Errorf("%v; restarting the agent failed: %w", err, rerr)
 	}
@@ -895,7 +899,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	}
 	if prev.W > 0 && (prev.W != prev.PhysW || prev.H != prev.PhysH || prev.Density != prev.PhysDensity) {
 		var di displayInfo
-		if err := ag.call(ctx, map[string]any{"cmd": "profile", "w": prev.W, "h": prev.H, "density": prev.Density, "settleMs": 2000}, &di); err != nil {
+		if err := d.call(ctx, map[string]any{"cmd": "profile", "w": prev.W, "h": prev.H, "density": prev.Density, "settleMs": 2000}, &di); err != nil {
 			return fmt.Errorf("re-applying profile after reset: %w", err)
 		}
 		d.setDisplay(di)
