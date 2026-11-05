@@ -285,6 +285,18 @@ public final class Agent {
         }
         long left = settleMs - (SystemClock.uptimeMillis() - t1);
         idle(300, Math.max(500, left));
+        // The display change also runs a window cross-fade; wait until WindowManager has no
+        // animations left so the next screenshot shows the settled screen.
+        waitForWindowAnimations();
+    }
+
+    static void waitForWindowAnimations() {
+        try {
+            Object wm = windowManager();
+            wm.getClass().getMethod("syncInputTransactions", boolean.class).invoke(wm, true);
+        } catch (Throwable ignored) {
+            SystemClock.sleep(500);
+        }
     }
 
     static boolean fgWindowFits(int w, int h) {

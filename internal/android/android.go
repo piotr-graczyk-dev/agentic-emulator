@@ -199,8 +199,10 @@ func (d *device) call(ctx context.Context, req map[string]any, out any) error {
 	return a.call(ctx, req, out)
 }
 
+// isZombie reports whether the emulator we are connected to is a child of this daemon that
+// has exited (its pid is not reusable until reaped, so kill(0) alone would say "alive").
 func isZombie(d *device) bool {
-	return d.proc != nil && d.proc.ProcessState != nil
+	return d.proc != nil && d.proc.Process != nil && d.proc.Process.Pid == d.run.PID && d.proc.ProcessState != nil
 }
 
 func (d *device) drop() {
