@@ -42,12 +42,20 @@ type agentClient struct {
 	// tcp returns the host port of the redirection to the agent's guest TCP port, re-creating
 	// it when refresh is set. nil: adb only.
 	tcp   func(ctx context.Context, refresh bool) (int, error)
-	token string // shared secret the agent's TCP listener requires
+	rd    *redirector // owner of tcp (nil: adb only)
+	token string      // shared secret the agent's TCP listener requires
 	mu    sync.Mutex
 	conn  net.Conn
 	r     *bufio.Reader
 	next  int64
 	via   string // "tcp" or "adb": transport of the current connection
+}
+
+// transport reports how the current connection reaches the agent ("tcp", "adb" or "").
+func (a *agentClient) transport() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.via
 }
 
 // dial opens a connection to the agent: TCP when available, adb otherwise.

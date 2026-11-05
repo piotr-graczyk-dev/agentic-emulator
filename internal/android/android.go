@@ -76,7 +76,7 @@ type redirector struct {
 	console int
 	mu      sync.Mutex
 	port    int
-	failed  bool
+	failed  time.Time // last failure; retried after a second (the console is busy during a snapshot load)
 }
 
 func (r *redirector) get(ctx context.Context, refresh bool) (int, error) {
@@ -85,21 +85,49 @@ func (r *redirector) get(ctx context.Context, refresh bool) (int, error) {
 	if r.port != 0 && !refresh {
 		return r.port, nil
 	}
-	if r.failed && !refresh {
+	if !r.failed.IsZero() && time.Since(r.failed) < time.Second {
 		return 0, errors.New("no console redirection")
 	}
-	c, cancel := context.WithTimeout(ctx, 10*time.Second)
+	c, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	hp, err := ensureRedir(c, r.console, agentGuestPort, r.port)
 	if err != nil {
-		if !r.failed {
-			logf("%s: agent TCP redirection unavailable (%v); using adb", r.name, err)
+		if r.failed.IsZero() {
+			logf("%s: agent TCP redirection unavailable for now (%v); using adb", r.name, err)
 		}
-		r.failed = true
+		r.failed = time.Now()
 		return 0, err
 	}
-	r.port, r.failed = hp, false
+	r.port, r.failed = hp, time.Time{}
 	return hp, nil
+}
+
+// drop deletes the redirection. The emulator saves its user-mode network (slirp) state in
+// snapshots, and a snapshot saved with the redirection's listening socket cannot be loaded
+// again ("Failed to load slirp-sbuf ... error while loading state ... of device 'slirp'",
+// -EINVAL). The next get re-creates it.
+func (r *redirector) drop(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, _, err := consoleRun(c, r.console, "redir list")
+	if err != nil {
+		logf("%s: redir list: %v", r.name, err)
+		return
+	}
+	var cmds []string
+	for _, line := range strings.Split(out[0], "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && f[0] == "ipv4" {
+			cmds = append(cmds, "redir del "+f[1])
+		}
+	}
+	if len(cmds) > 0 {
+		if _, errs, err := consoleRun(c, r.console, cmds...); err != nil {
+			logf("%s: redir del: %v %v", r.name, err, errs)
+		}
+	}
+	r.port = 0
 }
 
 // newAgent returns an agent client for a running emulator: TCP via the console redirection
@@ -108,8 +136,8 @@ func newAgent(name string, r runningEmu) *agentClient {
 	a := &agentClient{serial: r.serial()}
 	if env("AGEMU_ANDROID_AGENT_TCP", "1") != "0" && r.Console > 0 {
 		if tok := agentToken(name); tok != "" {
-			rd := &redirector{name: name, console: r.Console}
-			a.tcp, a.token = rd.get, tok
+			a.rd = &redirector{name: name, console: r.Console}
+			a.tcp, a.token = a.rd.get, tok
 		}
 	}
 	return a
@@ -458,6 +486,8 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	} else {
 		args = append(args, "-no-snapshot-load")
 	}
+	// Extra emulator flags, e.g. "-show-kernel" or "-feature OnDemandSnapshotLoad".
+	args = append(args, strings.Fields(os.Getenv("AGEMU_ANDROID_EMULATOR_FLAGS"))...)
 	return args
 }
 
@@ -503,9 +533,11 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	defer d.setBooting(false)
 
 	loadBaseline := !opts.Cold && a.hasBaseline()
+	t0 := time.Now()
 	if err := d.launch(ctx, a, loadBaseline); err != nil {
 		return api.Device{}, err
 	}
+	t1 := time.Now()
 	if loadBaseline {
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
 	} else {
@@ -514,6 +546,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if err != nil {
 		return api.Device{}, err
 	}
+	logf("%s: boot: emulator gRPC up %v, then guest ready %v later", d.name, t1.Sub(t0).Round(time.Millisecond), time.Since(t1).Round(time.Millisecond))
 	_, ag, err := d.connRaw(ctx)
 	if err != nil {
 		return api.Device{}, err
@@ -749,9 +782,13 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if _, err := ensureAgent(ctx, a, logf); err != nil {
 		return fmt.Errorf("agent not running before snapshot: %w", err)
 	}
-	// No host connection inside the snapshot: a restored guest would hold a dead socket.
+	// No host connection or port redirection inside the snapshot: the emulator cannot load a
+	// snapshot that holds the redirection's socket (see redirector.drop).
 	a.Close()
-	time.Sleep(100 * time.Millisecond)
+	if a.rd != nil {
+		a.rd.drop(ctx)
+	}
+	time.Sleep(500 * time.Millisecond)
 	t := time.Now()
 	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -987,18 +1024,24 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	t0 := time.Now()
 	prev, _ := d.display(ctx, ag, 0)
+	t1 := time.Now()
 	if err := e.loadSnapshot(ctx, baselineSnapshot); err != nil {
 		return err
 	}
-	ag.Close() // the adb stream died with the old VM state
+	t2 := time.Now()
+	ag.Close() // the connection died with the old VM state
 	d.mu.Lock()
 	d.dispAt = time.Time{}
 	d.mu.Unlock()
 	if err := waitAgent(ctx, ag, 30*time.Second); err != nil {
 		return err
 	}
+	t3 := time.Now()
 	d.markInput()
+	logf("%s: reset: display %v, snapshot load %v, agent answering %v later (via %s)", d.name,
+		t1.Sub(t0).Round(time.Millisecond), t2.Sub(t1).Round(time.Millisecond), t3.Sub(t2).Round(time.Millisecond), ag.transport())
 	if prev.W > 0 && (prev.W != prev.PhysW || prev.H != prev.PhysH || prev.Density != prev.PhysDensity) {
 		var di displayInfo
 		if err := d.call(ctx, map[string]any{"cmd": "profile", "w": prev.W, "h": prev.H, "density": prev.Density, "settleMs": 2000}, &di); err != nil {
