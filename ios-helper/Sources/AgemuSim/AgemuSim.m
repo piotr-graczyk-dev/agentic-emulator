@@ -354,6 +354,13 @@ static NSDictionary *AGAXNode(id element, NSString *token, NSInteger depth, NSIn
   if (value.length) {
     node[@"value"] = value;
   }
+  if ([role isEqualToString:@"AXTextField"] || [role isEqualToString:@"AXTextArea"]) {
+    // An empty field reports its placeholder as its value; the placeholder tells them apart.
+    NSString *placeholder = AGStringValue(e.accessibilityPlaceholderValue);
+    if (placeholder.length) {
+      node[@"placeholder"] = placeholder;
+    }
+  }
   NSString *title = AGStringValue(e.accessibilityTitle);
   if (title.length) {
     node[@"title"] = title;
@@ -865,6 +872,22 @@ static IOSurface *AGAsSurface(id candidate)
     AG_FAIL(error, AGExceptionError(@"SimDeviceLegacyHIDClient init", e));
     return NO;
   }
+}
+
+- (BOOL)prepareHIDWithError:(NSError **)error
+{
+  if (!AGLoadFrameworks(error)) {
+    return NO;
+  }
+  __block BOOL ok = NO;
+  __block NSError *err = nil;
+  dispatch_sync(self.hidQueue, ^{
+    ok = [self ensureHIDClient:&err];
+  });
+  if (!ok) {
+    AG_FAIL(error, err);
+  }
+  return ok;
 }
 
 // Hands a malloc'ed Indigo message to the HID client, which frees it.

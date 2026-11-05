@@ -217,6 +217,10 @@ func runningApps(_ d: AGDevice) throws -> [[String: Any]] {
         let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
         guard cols.count >= 3, let pid = Int(cols[0]) else { continue }
         let label = String(cols[2])
+        if label == "com.apple.SpringBoard" {
+            apps.append(["bundleId": "com.apple.springboard", "pid": pid])
+            continue
+        }
         guard label.hasPrefix("UIKitApplication:") else { continue }
         var bundle = String(label.dropFirst("UIKitApplication:".count))
         if let bracket = bundle.firstIndex(of: "[") { bundle = String(bundle[..<bracket]) }
@@ -237,6 +241,7 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
         if d.state == 3 {
             if bootedAt < 0 { bootedAt = Date().timeIntervalSince(start) * 1000 }
             do {
+                try d.prepareHID()
                 let surface = try d.framebuffer()
                 let front = try d.accessibilityFrontmost()
                 let frame = front["frame"] as? [Double] ?? []

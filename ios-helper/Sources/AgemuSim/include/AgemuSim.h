@@ -80,6 +80,8 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 - (BOOL)button:(uint32_t)source down:(BOOL)down error:(NSError **)error;
 /// A consumer-page HID usage (e.g. 0xE9 volume up).
 - (BOOL)consumerUsage:(uint32_t)usage down:(BOOL)down error:(NSError **)error;
+/// Connects the HID client now (the first connection takes about a second).
+- (BOOL)prepareHIDWithError:(NSError **)error;
 /// Waits until every HID message sent so far has been acknowledged.
 - (BOOL)hidWaitForAcknowledgements:(NSTimeInterval)timeout error:(NSError **)error;
 
