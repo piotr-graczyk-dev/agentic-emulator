@@ -1,0 +1,9 @@
+/agemu
+/bin/
+/dist/
+.build/
+*.xcuserstate
+DerivedData/
+/bench/out/
+/android-agent/build/
+.DS_Store
