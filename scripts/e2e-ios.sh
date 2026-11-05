@@ -160,6 +160,13 @@ for P in iphone-se-3 ipad-mini iphone-17-pro; do
   expect "screenshot in $P" screenshot -o "$OUT/$P.png"
   got=$(png_size "$OUT/$P.png")
   [[ "$got" == "$want" ]] && ok "$P.png is $got (profile $want)" || bad "$P.png is $got, profile says $want"
+  if [[ "$P" == ipad-mini ]]; then
+    # The UI tree answers right after a cold profile switch (it waits for accessibility).
+    # (On iPad, iOS reports the dock's DockFolderViewService as the frontmost app; see
+    # docs/IOS.md, so the content is not checked.)
+    expect "iPad: UI tree read right after the switch" ui
+    printf '%s\n' "$LAST" >"$OUT/ipad-mini-ui.txt"
+  fi
   if [[ "$P" == iphone-se-3 ]]; then
     # Tap by selector in a non-default profile (2x scale, 750x1334 pixels).
     expect "SE: launch Settings" launch com.apple.Preferences

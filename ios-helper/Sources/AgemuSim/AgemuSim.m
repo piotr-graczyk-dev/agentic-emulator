@@ -538,6 +538,10 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
 @property (nonatomic, strong, readonly) dispatch_queue_t framebufferCallbackQueue;
 @property (nonatomic, strong, nullable) id display;
 @property (nonatomic, strong, nullable) IOSurface *surface;
+// Display activity (see startDisplayMonitor): when the picture last changed.
+@property (atomic, assign) CFAbsoluteTime lastFrameAt;
+@property (atomic, assign) NSUInteger frameCount;
+@property (nonatomic, assign) BOOL monitorStarted;
 @property (nonatomic, strong, readonly) NSUUID *callbackUUID;
 // HID
 @property (nonatomic, strong, readonly) dispatch_queue_t hidQueue;
@@ -923,6 +927,76 @@ static IOSurface *AGAsSurface(id candidate)
     return (IOSurface *)candidate;
   }
   return nil;
+}
+
+// The display monitor samples the framebuffer surface's seed (bumped on every write, i.e. every
+// new frame) every 8 ms on a background thread and records when the picture last changed, so
+// "has the screen been still for N ms?" is answered without waiting. (The display's frame
+// callback does not fire for this client.) Started when the framebuffer is first connected.
+- (void)startDisplayMonitor
+{
+  @synchronized(self) {
+    if (self.monitorStarted) {
+      return;
+    }
+    self.monitorStarted = YES;
+  }
+  self.lastFrameAt = CFAbsoluteTimeGetCurrent();
+  __weak AGDevice *weakSelf = self;
+  [NSThread detachNewThreadWithBlock:^{
+    IOSurface *last = nil;
+    uint32_t lastSeed = 0;
+    for (;;) {
+      AGDevice *strong = weakSelf;
+      if (!strong) {
+        return;
+      }
+      IOSurface *current;
+      @synchronized(strong) {
+        current = strong.surface;
+      }
+      if (!current) {
+        strong = nil;
+        usleep(50000);
+        continue;
+      }
+      uint32_t seed = IOSurfaceGetSeed((__bridge IOSurfaceRef)current);
+      if (current != last || seed != lastSeed) {
+        last = current;
+        lastSeed = seed;
+        strong.lastFrameAt = CFAbsoluteTimeGetCurrent();
+        strong.frameCount += 1;
+      }
+      strong = nil;
+      usleep(8000);
+    }
+  }];
+}
+
+// Waits until the display has shown no new frame for quietMs (an animation or transition has
+// ended), at most maxMs.
+- (NSDictionary *)waitForSettleQuiet:(double)quietMs max:(double)maxMs
+{
+  NSError *err = nil;
+  if (![self framebufferWithError:&err]) {
+    return @{@"settled" : @NO, @"waitedMs" : @0, @"frames" : @0, @"error" : err.localizedDescription ?: @"no framebuffer"};
+  }
+  [self startDisplayMonitor];
+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+  NSUInteger framesBefore = self.frameCount;
+  double quiet = quietMs / 1000, limit = maxMs / 1000;
+  for (;;) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL settled = now - self.lastFrameAt >= quiet;
+    if (settled || now - start >= limit) {
+      return @{
+        @"settled" : @(settled),
+        @"waitedMs" : @((now - start) * 1000),
+        @"frames" : @(self.frameCount - framesBefore),
+      };
+    }
+    usleep(4000);
+  }
 }
 
 - (void)setLiveSurface:(id)candidate

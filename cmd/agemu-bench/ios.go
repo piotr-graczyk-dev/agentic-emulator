@@ -39,6 +39,7 @@ type iosBench struct {
 	maestro string
 	cl      *client.Client
 	dev     api.Device
+	seUDID  string
 }
 
 func findMaestro() string {
@@ -120,7 +121,9 @@ func (b *iosBench) settings() error {
 	return b.agemu("wait", "--id", "com.apple.settings.general", "--timeout-ms", "20000")
 }
 
-func (b *iosBench) waitShutdown() error {
+func (b *iosBench) waitShutdown() error { return b.waitShutdownUDID(b.udid) }
+
+func (b *iosBench) waitShutdownUDID(udid string) error {
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		out, err := Output("xcrun", "simctl", "list", "devices", "-j")
@@ -138,21 +141,41 @@ func (b *iosBench) waitShutdown() error {
 		}
 		for _, ds := range v.Devices {
 			for _, d := range ds {
-				if d.UDID == b.udid && d.State == "Shutdown" {
+				if d.UDID == udid && d.State == "Shutdown" {
 					return nil
 				}
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("%s did not shut down", b.udid)
+	return fmt.Errorf("%s did not shut down", udid)
 }
 
-func (b *iosBench) shutdown() error {
-	if err := b.simctl("shutdown", b.udid); err != nil && !strings.Contains(err.Error(), "current state: Shutdown") {
+func (b *iosBench) shutdown() error { return b.shutdownUDID(b.udid) }
+
+func (b *iosBench) shutdownUDID(udid string) error {
+	if err := b.simctl("shutdown", udid); err != nil && !strings.Contains(err.Error(), "current state: Shutdown") {
 		return err
 	}
-	return b.waitShutdown()
+	return b.waitShutdownUDID(udid)
+}
+
+// otherProfile returns the udid of agemu-iphone-se-3 (created if missing), the target of the
+// profile-switch row.
+func (b *iosBench) otherProfile() (string, error) {
+	if b.seUDID != "" {
+		return b.seUDID, nil
+	}
+	out, err := Output(b.cfg.AgemuBin, "create", "--platform", "ios", "--profile", "iphone-se-3")
+	if err != nil {
+		return "", err
+	}
+	var d api.Device
+	if err := json.Unmarshal(out, &d); err != nil {
+		return "", fmt.Errorf("create: %v: %s", err, out)
+	}
+	b.seUDID = strings.TrimPrefix(d.ID, "ios:")
+	return b.seUDID, nil
 }
 
 func iosSuite(cfg Config) ([]Op, error) {
@@ -338,8 +361,47 @@ func iosSuite(cfg Config) ([]Op, error) {
 				}
 				return b.simctl("bootstatus", b.udid, "-b")
 			},
-			AgemDesc: "agemu boot (until agent-ready)",
+			AgemDesc: "agemu boot (until interactive: boot finished, framebuffer, HID; UI tree warming up)",
 			Agemu:    func() error { return b.agemu("boot", b.id) },
+		},
+		{
+			Name: "boot (cold) + first UI tree", N: 2,
+			Before:   b.shutdown,
+			AgemDesc: "agemu boot + agemu ui (until the UI tree is read)",
+			Agemu: func() error {
+				if err := b.agemu("boot", b.id); err != nil {
+					return err
+				}
+				return b.agemu("ui")
+			},
+		},
+		{
+			// A profile switch to another device type is a cold boot of that type's simulator
+			// (iOS has no runtime resolution change). Starts from this device booted and the
+			// other one shut down.
+			Name: "profile switch (to iphone-se-3, cold)", N: 2,
+			Before: func() error {
+				se, err := b.otherProfile()
+				if err != nil {
+					return err
+				}
+				if err := b.shutdownUDID(se); err != nil {
+					return err
+				}
+				return Run(b.cfg.AgemuBin, "boot", b.id)
+			},
+			BaseDesc: "simctl shutdown <this> + simctl boot <se> + simctl bootstatus <se> -b",
+			Baseline: func() error {
+				if err := b.shutdown(); err != nil {
+					return err
+				}
+				if err := b.simctl("boot", b.seUDID); err != nil {
+					return err
+				}
+				return b.simctl("bootstatus", b.seUDID, "-b")
+			},
+			AgemDesc: "agemu profile iphone-se-3 (until interactive)",
+			Agemu:    func() error { return b.agemu("profile", "iphone-se-3") },
 		},
 		{
 			Name: "reset to clean state", N: 2,

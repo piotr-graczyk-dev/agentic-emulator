@@ -88,6 +88,8 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 - (BOOL)consumerUsage:(uint32_t)usage down:(BOOL)down error:(NSError **)error;
 /// Connects the HID client now (the first connection takes about a second).
 - (BOOL)prepareHIDWithError:(NSError **)error;
+/// Waits until the display shows no new frame for quietMs (max maxMs): {settled, waitedMs, frames}.
+- (NSDictionary *)waitForSettleQuiet:(double)quietMs max:(double)maxMs;
 /// YES when the framebuffer surface / HID client of the current boot are connected.
 @property (nonatomic, readonly) BOOL framebufferConnected;
 @property (nonatomic, readonly) BOOL hidConnected;

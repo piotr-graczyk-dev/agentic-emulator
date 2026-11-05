@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -143,7 +144,7 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	if simctlErr != nil {
 		return rep, fmt.Errorf("reset: %w", simctlErr)
 	}
-	if err := b.goHome(ctx, udid); err != nil {
+	if err := b.goHome(ctx, udid, strings.Contains(d.DeviceType, "iPad")); err != nil {
 		return rep, fmt.Errorf("reset: %w", err)
 	}
 	rep.Ms = ms(time.Since(start))
@@ -181,8 +182,11 @@ func (b *Backend) systemApps(ctx context.Context, d simDevice) ([]string, error)
 const springboardBundle = "com.apple.springboard"
 
 // goHome presses home and waits (up to 15 s) until SpringBoard is the frontmost application,
-// recognised by the bundle id accessibility reports.
-func (b *Backend) goHome(ctx context.Context, udid string) error {
+// recognised by the bundle id accessibility reports. On iPad (iOS 26.5) accessibility reports
+// the dock's DockFolderViewService as the frontmost application, on the home screen and in front
+// of apps alike, so SpringBoard cannot be confirmed there: after pressing home, a frontmost
+// "...ViewService" is accepted once the screen has been still for 300 ms.
+func (b *Backend) goHome(ctx context.Context, udid string, ipad bool) error {
 	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "home"}, nil); err != nil {
 		return err
 	}
@@ -197,6 +201,10 @@ func (b *Backend) goHome(ctx context.Context, udid string) error {
 		switch {
 		case err != nil:
 			last = err.Error()
+		case ipad && strings.HasSuffix(front.BundleID, "ViewService"):
+			_ = b.call(ctx, "settle", map[string]any{"udid": udid, "quietMs": 300, "maxMs": 2000}, nil)
+			log.Printf("ios reset %s: iPad accessibility reports %s frontmost; pressed home without confirming SpringBoard", udid, front.BundleID)
+			return nil
 		case front.BundleID == springboardBundle:
 			// SpringBoard reports itself frontmost before it has finished handling the
 			// press; an app launched in that window starts in the background. Let it settle.

@@ -169,6 +169,7 @@ var callTimeouts = map[string]time.Duration{
 	"running":    20 * time.Second,
 	"spawn":      30 * time.Second,
 	"notify":     15 * time.Second,
+	"settle":     10 * time.Second,
 }
 
 // waitingFor says, for a timeout error, what a command was waiting for.

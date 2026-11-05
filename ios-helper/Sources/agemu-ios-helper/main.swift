@@ -207,6 +207,9 @@ func pressKey(_ d: AGDevice, _ name: String) throws {
     try d.hidWait(forAcknowledgements: 5)
 }
 
+/// AGEMU_IOS_TAP_SETTLE=0 makes taps skip the wait for a still screen.
+let tapSettle = ProcessInfo.processInfo.environment["AGEMU_IOS_TAP_SETTLE"] != "0"
+
 // MARK: - Running apps
 
 // Parses `launchctl list` from inside the simulator: UIKitApplication:<bundle>[...] entries.
@@ -777,8 +780,16 @@ func handle(_ req: [String: Any]) throws -> Any {
         let d = try device(req)
         let x = try req.double("x"), y = try req.double("y")
         let hold = req.optDouble("holdMs", 0)
-        try inputQueue(d.udid).sync { try tap(d, x: x, y: y, holdMs: hold) }
-        return ["ok": true]
+        // A tap during a transition (e.g. a navigation pop still sliding in) is ignored by
+        // UIKit: wait until the screen has been still for 48 ms first (at most 1 s; instant
+        // when it already is).
+        let settleMs = tapSettle ? req.optDouble("settleMaxMs", 1000) : 0
+        var settle: [String: Any] = [:]
+        try inputQueue(d.udid).sync {
+            if settleMs > 0 { settle = d.wait(forSettleQuiet: 48, max: settleMs) as? [String: Any] ?? [:] }
+            try tap(d, x: x, y: y, holdMs: hold)
+        }
+        return ["ok": true, "settleMs": settle["waitedMs"] ?? 0]
     case "swipe":
         let d = try device(req)
         let edge = AGEdge(rawValue: UInt32(req.optDouble("edge", 0))) ?? AGEdge.none
@@ -864,6 +875,9 @@ func handle(_ req: [String: Any]) throws -> Any {
         let out = try d.spawnCapture(try req.string("path"), arguments: req["args"] as? [String] ?? [],
                                      timeout: req.optDouble("timeoutMs", 10000) / 1000)
         return ["stdout": out]
+    case "settle":
+        let d = try device(req)
+        return d.wait(forSettleQuiet: req.optDouble("quietMs", 48), max: req.optDouble("maxMs", 1000))
     case "notify":
         try device(req).postDarwinNotification(try req.string("name"))
         return ["ok": true]
