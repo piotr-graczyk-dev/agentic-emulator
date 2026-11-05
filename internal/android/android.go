@@ -163,7 +163,7 @@ func (d *device) ready(ctx context.Context) (*emuClient, *agentClient, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	p, perr := a.ping(pctx)
 	cancel()
 	if perr == nil && p.Version == agentVersion {
