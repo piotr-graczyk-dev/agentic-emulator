@@ -475,3 +475,30 @@ func TestDeviceScreenshotFresh(t *testing.T) {
 	}
 	t.Logf("from stream %d, compared %d, stale %d, inconclusive %d", fromStream, checked, stale, inconclusive)
 }
+
+// TestDeviceLaunchPhases prints the agent's launch timing (startActivityAndWait vs the wait for
+// the app's accessibility window) for warm launches, next to `am start -W`.
+func TestDeviceLaunchPhases(t *testing.T) {
+	avd := env("AGEMU_TEST_AVD", "agemu-pixel")
+	if _, ok := findRunning(avd); !ok {
+		t.Skipf("%s not running", avd)
+	}
+	ctx := context.Background()
+	b := New()
+	defer b.Close()
+	id := "android:" + avd
+	d, _ := b.devFor(id)
+	if _, _, err := d.conn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pkg := env("AGEMU_TEST_PKG", "com.android.settings")
+	_ = d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg}, nil)
+	for i := 0; i < envInt("AGEMU_TEST_N", 5); i++ {
+		_ = b.Key(ctx, id, "home")
+		time.Sleep(1500 * time.Millisecond)
+		var res map[string]any
+		t0 := time.Now()
+		err := d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg}, &res)
+		t.Logf("warm launch %d: %v total, agent says %v (err %v)", i, time.Since(t0).Round(time.Millisecond), res, err)
+	}
+}

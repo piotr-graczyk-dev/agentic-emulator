@@ -245,6 +245,7 @@ public final class Agent {
                 display(sb);
                 return;
             case "tree":
+                awaitPendingLaunch();
                 synchronized (uaLock) { tree(sb); }
                 return;
             case "profile":
@@ -272,6 +273,9 @@ public final class Agent {
                 return;
             case "fg":
                 str(sb, foreground());
+                return;
+            case "awaitlaunch":
+                sb.append(awaitPendingLaunch() ? "true" : "false");
                 return;
             case "cleartasks": {
                 // Remove recent tasks (what swiping everything away in Overview does).
@@ -500,7 +504,19 @@ public final class Agent {
 
     // ---------------------------------------------------------------- apps
 
+    /** A launch whose window the accessibility layer may not report yet (see awaitPendingLaunch). */
+    static final Object launchLock = new Object();
+    static String pendingPkg, pendingPrevFg;
+    static long pendingUntil;
+
+    /**
+     * Starts the app like `am start -W` (the same startActivityAndWait call) and returns when it
+     * does: once the activity has drawn its first frame. The accessibility layer reports the new
+     * window only after the window transition; the next "tree" request waits for that
+     * (awaitPendingLaunch), so launch + ui stays consistent without slowing launch itself.
+     */
     static void launch(String pkg, String activity, StringBuilder sb) throws Exception {
+        long t0 = SystemClock.uptimeMillis();
         ComponentName cn;
         if (!activity.isEmpty()) {
             cn = new ComponentName(pkg, activity.startsWith(".") ? pkg + activity : activity);
@@ -518,7 +534,9 @@ public final class Agent {
             ResolveInfo ri = list.get(0);
             cn = new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name);
         }
+        long t1 = SystemClock.uptimeMillis();
         String prevFg = foreground();
+        long t2 = SystemClock.uptimeMillis();
         Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(cn)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
@@ -528,20 +546,37 @@ public final class Agent {
         // (caller, callingPackage, callingFeatureId, intent, resolvedType, resultTo, resultWho,
         //  requestCode, flags, profilerInfo, options, userId) - the same call `am start -W` makes.
         Object wr = sm.invoke(atm, null, "com.android.shell", null, i, null, null, null, 0, 0, null, null, USER_CURRENT);
+        long t3 = SystemClock.uptimeMillis();
         int result = wr.getClass().getField("result").getInt(wr);
         long total = wr.getClass().getField("totalTime").getLong(wr);
         if (result < 0) throw new IllegalStateException("start failed, result " + result + " for " + cn.flattenToShortString());
-        // `am start -W` returns at the first drawn frame; agents read the accessibility tree next,
-        // so also wait until the app's window is the active one and exposes content.
-        long t0 = SystemClock.uptimeMillis();
-        boolean ready = false;
-        while (!ready && SystemClock.uptimeMillis() - t0 < 3000) {
-            ready = appWindowReady(cn.getPackageName(), prevFg);
-            if (!ready) SystemClock.sleep(5);
+        synchronized (launchLock) {
+            pendingPkg = cn.getPackageName();
+            pendingPrevFg = prevFg;
+            pendingUntil = t3 + 3000;
         }
         sb.append("{\"component\":"); str(sb, cn.flattenToShortString());
         sb.append(",\"result\":").append(result).append(",\"totalTime\":").append(total);
-        sb.append(",\"a11yReadyMs\":").append(SystemClock.uptimeMillis() - t0).append(",\"a11yReady\":").append(ready).append('}');
+        sb.append(",\"resolveMs\":").append(t1 - t0).append(",\"fgMs\":").append(t2 - t1);
+        sb.append(",\"startMs\":").append(t3 - t2).append('}');
+    }
+
+    /**
+     * Waits (up to 3 s after the launch) until the accessibility layer reports the launched app's
+     * window as the active one. Returns whether a launch was pending.
+     */
+    static boolean awaitPendingLaunch() {
+        String pkg, prev;
+        long until;
+        synchronized (launchLock) {
+            pkg = pendingPkg; prev = pendingPrevFg; until = pendingUntil;
+        }
+        if (pkg == null) return false;
+        while (SystemClock.uptimeMillis() < until && !appWindowReady(pkg, prev)) SystemClock.sleep(5);
+        synchronized (launchLock) {
+            if (pendingUntil == until) pendingPkg = null;
+        }
+        return true;
     }
 
     /**
