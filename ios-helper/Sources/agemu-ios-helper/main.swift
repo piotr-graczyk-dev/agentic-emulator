@@ -714,6 +714,14 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
             } else if warmup != nil, !(warmup!.isDone) {
                 lastError = warmup!.lastError.isEmpty ? "waiting for accessibility" : warmup!.lastError
             }
+            // A boot whose display was never created does not recover (SpringBoard keeps
+            // crashing): report it so the caller can boot again.
+            flagLock.lock()
+            let noDisplay = fbError.contains("no display port")
+            flagLock.unlock()
+            if noDisplay, !trace.has("framebuffer"), let b = bootedAt, Date().timeIntervalSince(b) > 60 {
+                throw HelperError("device \(d.udid) came up without a display (no framebuffer 60 s after boot) [timeline: \(trace.summary)]")
+            }
         } else {
             lastError = "state \(d.stateString)"
         }

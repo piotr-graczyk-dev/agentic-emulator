@@ -298,9 +298,24 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	return ready.api(), nil
 }
 
-// bootMakingRoom boots udid (if needed) until agent-ready while shutting down the least
-// recently used agemu simulators beyond the booted limit. The shutdowns overlap the boot
-// unless memory is critically short, in which case they finish first.
+// overlapSwitch: may the old simulator shut down while the new one boots? CoreSimulator
+// refused a boot ("Invalid argument") issued while another simulator was shutting down, and
+// that device's next boot came up without a display; so the boot call is always issued first,
+// and the overlap (the old device shutting down during the rest of the new boot) is used only
+// when memory pressure is normal. AGEMU_IOS_OVERLAP_SWITCH=1/0 forces it on/off.
+func overlapSwitch() bool {
+	switch strings.ToLower(os.Getenv("AGEMU_IOS_OVERLAP_SWITCH")) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	return !memoryPressured()
+}
+
+// bootMakingRoom boots udid (if needed) until interactive while shutting down the least
+// recently used agemu simulators beyond the booted limit: first, or, when overlapSwitch
+// allows it, right after the new device's boot call returned.
 func (b *Backend) bootMakingRoom(ctx context.Context, udid string, booted bool) (simDevice, error) {
 	victims, err := b.evictionVictims(ctx, udid)
 	if err != nil {
@@ -333,15 +348,14 @@ func (b *Backend) bootMakingRoom(ctx context.Context, udid string, booted bool) 
 		}
 		log.Printf("ios: shutting down %s (limit %d booted, memory: %s)", strings.Join(names, ", "), effectiveMaxBooted(), memoryState())
 	}
-	if booted || memoryCritical() || len(victims) == 0 {
+	if len(victims) == 0 || booted || !overlapSwitch() {
 		if err := shutdownAll(); err != nil {
 			return simDevice{}, err
 		}
 		return b.bootReady(ctx, udid)
 	}
 	done := make(chan error, 1)
-	go func() { done <- shutdownAll() }()
-	d, err := b.bootReady(ctx, udid)
+	d, err := b.bootReadyThen(ctx, udid, func() { go func() { done <- shutdownAll() }() })
 	if serr := <-done; err == nil && serr != nil {
 		err = serr
 	}
@@ -378,6 +392,28 @@ func waitAccessibilityOnBoot() bool { return envOn("AGEMU_IOS_BOOT_WAIT_AX") }
 // interactive (see waitAccessibilityOnBoot). Cold boots log their readiness timeline to the
 // daemon log.
 func (b *Backend) bootReady(ctx context.Context, udid string) (simDevice, error) {
+	return b.bootReadyThen(ctx, udid, nil)
+}
+
+// bootReadyThen is bootReady with a hook run once the boot call has returned (or at once when
+// the device is already booted). A boot that comes up broken (no display, SpringBoard
+// crashing) is shut down and booted again once.
+func (b *Backend) bootReadyThen(ctx context.Context, udid string, afterBootCall func()) (simDevice, error) {
+	d, err := b.bootReadyOnce(ctx, udid, afterBootCall)
+	if err == nil || !strings.Contains(err.Error(), brokenBootMarker) {
+		return d, err
+	}
+	log.Printf("ios boot %s: %v; shutting it down and booting it again", udid, err)
+	if serr := b.shutdown(ctx, udid); serr != nil {
+		return simDevice{}, fmt.Errorf("%w (and shutting it down failed: %v)", err, serr)
+	}
+	return b.bootReadyOnce(ctx, udid, nil)
+}
+
+// brokenBootMarker is part of the helper's error for a boot without a display.
+const brokenBootMarker = "came up without a display"
+
+func (b *Backend) bootReadyOnce(ctx context.Context, udid string, afterBootCall func()) (simDevice, error) {
 	start := time.Now()
 	var d simDevice
 	if err := b.call(ctx, "describe", map[string]any{"udid": udid}, &d); err != nil {
@@ -390,6 +426,9 @@ func (b *Backend) bootReady(ctx context.Context, udid string) (simDevice, error)
 			return simDevice{}, err
 		}
 		bootCall = time.Since(start)
+	}
+	if afterBootCall != nil {
+		afterBootCall()
 	}
 	// The first boot of a new or erased simulator migrates data and can take minutes on a
 	// busy host; later boots take seconds.
