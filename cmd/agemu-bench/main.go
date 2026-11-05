@@ -26,6 +26,7 @@ import (
 type Op struct {
 	Name     string
 	N        int          // iterations (0 = global --n)
+	BaseN    int          // baseline iterations when the baseline is slow (0 = N)
 	Setup    func() error // run once before the op's iterations (not timed)
 	Before   func() error // run before every iteration (not timed)
 	Baseline func() error
@@ -155,7 +156,11 @@ func main() {
 			}
 		}
 		r := Result{Op: op.Name, BaseDesc: op.BaseDesc, AgemDesc: op.AgemDesc}
-		r.Baseline = measure(iters, op.Before, op.Baseline)
+		baseIters := iters
+		if op.BaseN > 0 {
+			baseIters = op.BaseN
+		}
+		r.Baseline = measure(baseIters, op.Before, op.Baseline)
 		r.Agemu = measure(iters, op.Before, op.Agemu)
 		r.Daemon = measure(iters, op.Before, op.Daemon)
 		if r.Baseline != nil && r.Agemu != nil && r.Baseline.Err == "" && r.Agemu.Err == "" && r.Agemu.MedMs > 0 {
@@ -183,7 +188,7 @@ func fmtStats(s *Stats) string {
 	if s.Err != "" {
 		return "ERR: " + s.Err
 	}
-	return fmt.Sprintf("%.1f ms (p95 %.1f)", s.MedMs, s.P95Ms)
+	return fmt.Sprintf("%.1f ms (p95 %.1f, n=%d)", s.MedMs, s.P95Ms, s.N)
 }
 
 func line(r Result) string {
@@ -199,7 +204,7 @@ func host() string {
 
 func markdown(platform, dev string, rs []Result) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "### %s benchmark (%s)\n\nHost: %s. Device: `%s`. Median of N runs (p95 in parentheses).\n\n", platform, time.Now().Format("2006-01-02"), host(), dev)
+	fmt.Fprintf(&b, "### %s benchmark (%s)\n\nHost: %s. Device: `%s`. Median of n runs (p95 and n in parentheses).\n\n", platform, time.Now().Format("2006-01-02"), host(), dev)
 	b.WriteString("| Operation | Baseline tool | Baseline | agemu CLI | agemu daemon/MCP | Speedup (CLI) | Speedup (daemon) |\n|---|---|---|---|---|---|---|\n")
 	for _, r := range rs {
 		sx, sd := "-", "-"

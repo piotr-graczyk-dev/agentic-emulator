@@ -229,6 +229,53 @@ func runningApps(_ d: AGDevice) throws -> [[String: Any]] {
     return apps
 }
 
+// MARK: - App accessibility switch
+
+// Apps load their accessibility runtime only while ApplicationAccessibilityEnabled is on in the
+// simulator. XCUITest-based tools (Maestro, `xcodebuild test`) switch it on for their session and
+// back off afterwards, which leaves apps launched later unreadable (a zero-sized root, no
+// children). agemu switches it on, as any UI automation does, and posts the change notifications
+// so running apps load their accessibility runtime without a relaunch.
+let axSwitchLock = NSLock()
+var axSwitchedAt: [String: Date] = [:]
+
+@discardableResult
+func ensureAppAccessibility(_ d: AGDevice, force: Bool) throws -> Bool {
+    axSwitchLock.lock()
+    defer { axSwitchLock.unlock() }
+    if !force, let t = axSwitchedAt[d.udid], Date().timeIntervalSince(t) < 3 { return false }
+    _ = try d.spawnCapture(
+        "usr/bin/defaults",
+        arguments: ["write", "com.apple.Accessibility", "ApplicationAccessibilityEnabled", "-bool", "true"],
+        timeout: 10)
+    try d.postDarwinNotification("com.apple.accessibility.cache.app.ax")
+    try d.postDarwinNotification("com.apple.accessibility.cache.ax")
+    axSwitchedAt[d.udid] = Date()
+    return true
+}
+
+func zeroRoot(_ tree: [String: Any]) -> Bool {
+    guard let root = tree["root"] as? [String: Any], let frame = root["frame"] as? [Double], frame.count == 4 else {
+        return true
+    }
+    return frame[2] <= 0 || frame[3] <= 0
+}
+
+// Reads the frontmost app's tree. A live app with a zero-sized root has no accessibility runtime
+// loaded: switch app accessibility on and retry for up to 4 s.
+func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
+    var tree = try d.accessibilityTree(withMaxDepth: maxDepth) as! [String: Any]
+    if zeroRoot(tree), (tree["pid"] as? Int ?? 0) > 0, try ensureAppAccessibility(d, force: false) {
+        let deadline = Date().addingTimeInterval(4)
+        while zeroRoot(tree), Date() < deadline {
+            sleepMs(100)
+            tree = try d.accessibilityTree(withMaxDepth: maxDepth) as! [String: Any]
+        }
+        tree["accessibilitySwitchedOn"] = true
+    }
+    return tree
+}
+
 // MARK: - Readiness
 
 // Agent-ready: booted AND SpringBoard answers accessibility AND the framebuffer is readable.
@@ -237,10 +284,17 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
     let deadline = start.addingTimeInterval(timeoutMs / 1000)
     var bootedAt: Double = -1
     var lastError = "not booted"
+    // A device that boots now gets app accessibility switched on once it is up; an already
+    // booted one is only fixed lazily (see readTree), to keep `boot` instant.
+    var needAXSwitch = d.state != 3
     while Date() < deadline {
         if d.state == 3 {
             if bootedAt < 0 { bootedAt = Date().timeIntervalSince(start) * 1000 }
             do {
+                if needAXSwitch {
+                    try ensureAppAccessibility(d, force: true)
+                    needAXSwitch = false
+                }
                 try d.prepareHID()
                 let surface = try d.framebuffer()
                 let front = try d.accessibilityFrontmost()
@@ -323,7 +377,7 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "ui":
         let d = try device(req)
         let depth = Int(req.optDouble("maxDepth", -1))
-        var tree = try d.accessibilityTree(withMaxDepth: depth) as! [String: Any]
+        var tree = try readTree(d, maxDepth: depth)
         tree["scale"] = d.screenScale
         tree["width"] = Int(d.screenPixels.width)
         tree["height"] = Int(d.screenPixels.height)
@@ -331,6 +385,8 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "hit":
         let d = try device(req)
         return try d.accessibility(atPointX: try req.double("x"), y: try req.double("y"), maxDepth: Int(req.optDouble("maxDepth", 3)))
+    case "ensure-ax":
+        return ["switched": try ensureAppAccessibility(try device(req), force: true)]
     case "frontmost":
         return try device(req).accessibilityFrontmost()
     case "launch":
