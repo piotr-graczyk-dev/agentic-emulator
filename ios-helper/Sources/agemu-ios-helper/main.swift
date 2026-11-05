@@ -264,7 +264,15 @@ func zeroRoot(_ tree: [String: Any]) -> Bool {
 // Reads the frontmost app's tree. A live app with a zero-sized root has no accessibility runtime
 // loaded: switch app accessibility on and retry for up to 4 s.
 func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
-    var tree = try d.accessibilityTree(withMaxDepth: maxDepth) as! [String: Any]
+    var tree: [String: Any]
+    do {
+        tree = try d.accessibilityTree(withMaxDepth: maxDepth) as! [String: Any]
+        noteAXResult(d, ok: true)
+    } catch {
+        noteAXResult(d, ok: false)
+        repairBridgeIfStuck(d)
+        throw error
+    }
     if zeroRoot(tree), (tree["pid"] as? Int ?? 0) > 0, try ensureAppAccessibility(d, force: false) {
         let deadline = Date().addingTimeInterval(4)
         while zeroRoot(tree), Date() < deadline {
@@ -274,6 +282,47 @@ func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
         tree["accessibilitySwitchedOn"] = true
     }
     return tree
+}
+
+// MARK: - Accessibility bridge repair
+
+// CoreSimulatorBridge (inside the simulator) answers accessibility requests. If SpringBoard is
+// killed and relaunched while the bridge runs (seen on a heavily loaded host: the boot watchdog
+// SIGKILLs a slow SpringBoard), the bridge keeps a stale handle to the old SpringBoard and
+// returns no frontmost application forever. Restarting the bridge fixes it. agemu does that
+// only after accessibility has failed for 15 s while SpringBoard is running, at most every 30 s.
+let bridgeLock = NSLock()
+var axFailingSince: [String: Date] = [:]
+var bridgeRestartedAt: [String: Date] = [:]
+
+func noteAXResult(_ d: AGDevice, ok: Bool) {
+    bridgeLock.lock()
+    defer { bridgeLock.unlock() }
+    if ok {
+        axFailingSince[d.udid] = nil
+    } else if axFailingSince[d.udid] == nil {
+        axFailingSince[d.udid] = Date()
+    }
+}
+
+@discardableResult
+func repairBridgeIfStuck(_ d: AGDevice) -> Bool {
+    bridgeLock.lock()
+    let since = axFailingSince[d.udid]
+    let last = bridgeRestartedAt[d.udid]
+    bridgeLock.unlock()
+    guard let since, Date().timeIntervalSince(since) > 15 else { return false }
+    if let last, Date().timeIntervalSince(last) < 30 { return false }
+    guard let apps = try? runningApps(d), apps.contains(where: { ($0["bundleId"] as? String) == "com.apple.springboard" }) else {
+        return false  // still booting: nothing to repair yet
+    }
+    log("\(d.udid): accessibility has returned no frontmost app for \(Int(Date().timeIntervalSince(since))) s with SpringBoard running; restarting CoreSimulatorBridge")
+    _ = try? d.spawnCapture("bin/launchctl", arguments: ["kickstart", "-k", "system/com.apple.CoreSimulator.bridge"], timeout: 15)
+    bridgeLock.lock()
+    bridgeRestartedAt[d.udid] = Date()
+    axFailingSince[d.udid] = Date()
+    bridgeLock.unlock()
+    return true
 }
 
 // MARK: - User apps
@@ -319,9 +368,17 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
                 }
                 try d.prepareHID()
                 let surface = try d.framebuffer()
-                let front = try d.accessibilityFrontmost()
+                let front: [String: Any]
+                do {
+                    front = try d.accessibilityFrontmost() as! [String: Any]
+                } catch {
+                    noteAXResult(d, ok: false)
+                    repairBridgeIfStuck(d)
+                    throw error
+                }
                 let frame = front["frame"] as? [Double] ?? []
                 let pid = front["pid"] as? Int ?? 0
+                noteAXResult(d, ok: pid > 0)
                 if pid > 0, frame.count == 4, frame[2] > 0, frame[3] > 0, surface.width > 0 {
                     return [
                         "bootedMs": bootedAt,

@@ -68,6 +68,17 @@ and zero-sized leaves are dropped. Two quirks of the iOS 26 accessibility tree a
   running app loads its accessibility runtime without a relaunch. Any UI automation tool,
   XCUITest included, does the same.
 
+### Self-repair of the simulator's accessibility bridge
+
+Inside the simulator, `CoreSimulatorBridge` answers the accessibility requests. On this
+heavily loaded host SpringBoard was once SIGKILLed during a boot (presumably by the boot
+watchdog) and relaunched; the bridge kept a handle to the dead SpringBoard and from then on
+answered every request with "no frontmost application", for any client, until it was restarted
+(observed for 10 minutes). When accessibility has returned no frontmost app for 15 s while
+SpringBoard is running, the helper restarts the bridge
+(`launchctl kickstart -k system/com.apple.CoreSimulator.bridge` inside that simulator, at most
+every 30 s) and logs it to the daemon log.
+
 ## Fast boot and reset
 
 There are no snapshots for iOS Simulators, so a cold boot costs what it costs (see the table).
