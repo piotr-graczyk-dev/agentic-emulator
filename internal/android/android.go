@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/android/emupb"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
 )
@@ -56,6 +57,8 @@ type device struct {
 	disp    displayInfo // last known logical display
 	dispAt  time.Time
 	proc    *exec.Cmd // emulator we launched (reaped by a goroutine)
+	retook  bool      // baseline already retaken by this daemon
+	agentOK bool      // agent version checked on the current connection
 }
 
 func logf(format string, args ...any) { log.Printf("android: "+format, args...) }
@@ -93,7 +96,35 @@ func (b *Backend) devFor(id string) (*device, error) {
 // ------------------------------------------------------------------ connections
 
 // conn returns live clients for a running device, (re)connecting when the emulator changed.
+// A device in standby is reported as shut down.
 func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
+	e, a, err := d.connRaw(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	d.mu.Lock()
+	checked := d.agentOK
+	d.mu.Unlock()
+	if !checked {
+		c, cancel := context.WithTimeout(ctx, 2*time.Second)
+		st, verr := e.vmState(c)
+		cancel()
+		if verr == nil && st == emupb.VmRunState_PAUSED {
+			return nil, nil, fmt.Errorf("device android:%s is shut down (in standby); agemu boot android:%s", d.name, d.name)
+		}
+		// First contact with this emulator from this daemon: make sure our agent version runs.
+		if _, err := ensureAgent(ctx, a, logf); err != nil {
+			return nil, nil, err
+		}
+		d.mu.Lock()
+		d.agentOK = true
+		d.mu.Unlock()
+	}
+	return e, a, nil
+}
+
+// connRaw returns clients without checking the VM state or the agent.
+func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) {
 	d.mu.Lock()
 	if d.emu != nil && pidAlive(d.run.PID) && !isZombie(d) {
 		e, a := d.emu, d.agent
@@ -111,11 +142,6 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		return nil, nil, err
 	}
 	a := &agentClient{serial: r.serial()}
-	// First contact with this emulator from this daemon: make sure our agent version runs.
-	if _, err := ensureAgent(ctx, a, logf); err != nil {
-		e.Close()
-		return nil, nil, err
-	}
 	d.mu.Lock()
 	if d.emu != nil {
 		d.emu.Close()
@@ -123,7 +149,7 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 	if d.agent != nil {
 		d.agent.Close()
 	}
-	d.run, d.emu, d.agent, d.dispAt = r, e, a, time.Time{}
+	d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, a, time.Time{}, false
 	d.mu.Unlock()
 	return e, a, nil
 }
@@ -146,6 +172,26 @@ func (d *device) ready(ctx context.Context) (*emuClient, *agentClient, error) {
 	return e, a, nil
 }
 
+// call sends a request to the on-device agent. If the agent is gone (killed, or evicted by
+// another UiAutomation client such as `uiautomator dump`), it is restarted and the request
+// retried once; that is safe because an unreachable agent never received the request.
+func (d *device) call(ctx context.Context, req map[string]any, out any) error {
+	_, a, err := d.conn(ctx)
+	if err != nil {
+		return err
+	}
+	err = a.call(ctx, req, out)
+	var de *agentDialError
+	if err == nil || !errors.As(err, &de) || ctx.Err() != nil {
+		return err
+	}
+	logf("%s: agent unreachable (%v); restarting it", d.name, de.err)
+	if _, rerr := ensureAgent(ctx, a, logf); rerr != nil {
+		return fmt.Errorf("%v; restarting the agent failed: %w", err, rerr)
+	}
+	return a.call(ctx, req, out)
+}
+
 func isZombie(d *device) bool {
 	return d.proc != nil && d.proc.ProcessState != nil
 }
@@ -159,7 +205,7 @@ func (d *device) drop() {
 	if d.agent != nil {
 		d.agent.Close()
 	}
-	d.emu, d.agent, d.run, d.dispAt = nil, nil, runningEmu{}, time.Time{}
+	d.emu, d.agent, d.run, d.dispAt, d.agentOK = nil, nil, runningEmu{}, time.Time{}, false
 }
 
 // display returns the logical display, refreshing it when older than maxAge.
@@ -170,8 +216,7 @@ func (d *device) display(ctx context.Context, a *agentClient, maxAge time.Durati
 	if !at.IsZero() && time.Since(at) <= maxAge {
 		return di, nil
 	}
-	di, err := a.display(ctx)
-	if err != nil {
+	if err := d.call(ctx, map[string]any{"cmd": "display"}, &di); err != nil {
 		return di, err
 	}
 	d.setDisplay(di)
@@ -214,6 +259,9 @@ func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
 	d.mu.Unlock()
 	if _, ok := run[a.Name]; ok {
 		dev.State = "booted"
+		if standbyEnabled() && d.inStandby(context.Background()) {
+			dev.State = "shutdown" // standby: paused at the baseline, boots in a moment
+		}
 	}
 	if booting {
 		dev.State = "booting"
@@ -359,6 +407,18 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		return api.Device{}, fmt.Errorf("unknown device %s: %w", id, err)
 	}
 	if _, ok := findRunning(d.name); ok {
+		if !opts.Cold && d.inStandby(ctx) {
+			if err := d.resume(ctx); err != nil {
+				return api.Device{}, err
+			}
+			d.mu.Lock()
+			d.agentOK = true
+			d.mu.Unlock()
+			if _, err := d.refreshDisplay(ctx); err != nil {
+				return api.Device{}, err
+			}
+			return b.device(id)
+		}
 		if !opts.Cold {
 			if _, _, err := d.ready(ctx); err != nil {
 				return api.Device{}, err
@@ -383,21 +443,54 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if err := d.waitBooted(ctx, 180*time.Second); err != nil {
 		return api.Device{}, err
 	}
-	_, ag, err := d.conn(ctx)
+	_, ag, err := d.connRaw(ctx)
 	if err != nil {
 		return api.Device{}, err
+	}
+	// After a snapshot load the agent from the snapshot should answer at once. Only an agent of
+	// a different version (agemu was upgraded) makes the baseline stale and worth retaking;
+	// an agent that does not answer is just restarted.
+	stale := false
+	if loadBaseline {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			pctx, cancel := context.WithTimeout(ctx, time.Second)
+			p, perr := ag.ping(pctx)
+			cancel()
+			if perr == nil {
+				stale = p.Version != agentVersion
+				break
+			}
+			if time.Now().After(deadline) {
+				logf("%s: agent from %s does not answer (%v); restarting it", d.name, baselineSnapshot, perr)
+				stale = true // the snapshot was taken without a live agent
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 	restarted, err := ensureAgent(ctx, ag, logf)
 	if err != nil {
 		return api.Device{}, err
 	}
-	if loadBaseline && restarted {
-		logf("%s: agent was not running after loading %s (snapshot not loaded or stale); retaking it", d.name, baselineSnapshot)
+	d.mu.Lock()
+	d.agentOK = true
+	d.mu.Unlock()
+	d.mu.Lock()
+	if stale && d.retook {
+		stale = false // retake at most once per daemon, never loop
+	}
+	if stale {
+		d.retook = true
+	}
+	d.mu.Unlock()
+	if stale {
+		logf("%s: %s has no current agent; retaking it", d.name, baselineSnapshot)
 	}
 	if !loadBaseline || restarted {
 		d.checkGuest(ctx)
 	}
-	if !a.hasBaseline() || (loadBaseline && restarted) {
+	if !a.hasBaseline() || stale {
 		if err := d.makeBaseline(ctx); err != nil {
 			return api.Device{}, fmt.Errorf("creating baseline snapshot: %w", err)
 		}
@@ -472,7 +565,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			if d.agent != nil {
 				d.agent.Close()
 			}
-			d.run, d.emu, d.agent, d.dispAt = r, e, &agentClient{serial: r.serial()}, time.Time{}
+			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, &agentClient{serial: r.serial()}, time.Time{}, false
 			d.mu.Unlock()
 			return nil
 		}
@@ -546,6 +639,10 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+	// The snapshot must contain a running agent, so boots from it are agent-ready at once.
+	if _, err := ensureAgent(ctx, a, logf); err != nil {
+		return fmt.Errorf("agent not running before snapshot: %w", err)
+	}
 	t := time.Now()
 	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -645,7 +742,81 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 	}
 	d.life.Lock()
 	defer d.life.Unlock()
-	return d.shutdown(ctx)
+	if !standbyEnabled() {
+		return d.shutdown(ctx)
+	}
+	if _, ok := findRunning(d.name); !ok {
+		d.drop()
+		return nil
+	}
+	if d.inStandby(ctx) {
+		// Shutting down a device that is already in standby powers it off for real.
+		return d.shutdown(ctx)
+	}
+	return d.enterStandby(ctx)
+}
+
+// Standby ("pre-booted state"): instead of killing the emulator, shutdown restores the
+// baseline snapshot in place and pauses the VM. The paused emulator uses no CPU (its guest
+// RAM stays allocated on the host); the next boot only resumes it, already clean and
+// agent-ready. Shutting down a device in standby powers it off. AGEMU_ANDROID_STANDBY=0
+// disables standby (shutdown always powers off).
+func standbyEnabled() bool { return env("AGEMU_ANDROID_STANDBY", "1") != "0" }
+
+func (d *device) inStandby(ctx context.Context) bool {
+	e, _, err := d.connRaw(ctx)
+	if err != nil {
+		return false
+	}
+	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	st, err := e.vmState(c)
+	return err == nil && st == emupb.VmRunState_PAUSED
+}
+
+func (d *device) enterStandby(ctx context.Context) error {
+	a, err := loadAVD(d.name)
+	if err != nil {
+		return err
+	}
+	if !a.hasBaseline() {
+		return d.shutdown(ctx)
+	}
+	e, ag, err := d.ready(ctx)
+	if err != nil {
+		logf("%s: standby needs a live device (%v); powering off", d.name, err)
+		return d.shutdown(ctx)
+	}
+	t := time.Now()
+	if err := e.loadSnapshot(ctx, baselineSnapshot); err != nil {
+		logf("%s: loading %s for standby failed (%v); powering off", d.name, baselineSnapshot, err)
+		return d.shutdown(ctx)
+	}
+	ag.Close()
+	if err := waitAgent(ctx, ag, 30*time.Second); err != nil {
+		logf("%s: agent after standby load: %v; powering off", d.name, err)
+		return d.shutdown(ctx)
+	}
+	if err := e.setVM(ctx, emupb.VmRunState_PAUSED); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.dispAt = time.Time{}
+	d.mu.Unlock()
+	logf("%s: in standby (baseline restored and VM paused in %v)", d.name, time.Since(t).Round(time.Millisecond))
+	return nil
+}
+
+// resume wakes a device from standby and waits until the agent answers.
+func (d *device) resume(ctx context.Context) error {
+	e, a, err := d.connRaw(ctx)
+	if err != nil {
+		return err
+	}
+	if err := e.setVM(ctx, emupb.VmRunState_RUNNING); err != nil {
+		return err
+	}
+	return waitAgent(ctx, a, 30*time.Second)
 }
 
 func (d *device) shutdown(ctx context.Context) error {
@@ -654,7 +825,7 @@ func (d *device) shutdown(ctx context.Context) error {
 		d.drop()
 		return nil
 	}
-	e, _, err := d.conn(ctx)
+	e, _, err := d.connRaw(ctx)
 	if err == nil {
 		c, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err = e.shutdown(c)
@@ -767,12 +938,11 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 	}
 	d.life.Lock()
 	defer d.life.Unlock()
-	_, a, err := d.ready(ctx)
-	if err != nil {
+	if _, _, err := d.ready(ctx); err != nil {
 		return api.Device{}, err
 	}
 	var di displayInfo
-	if err := a.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di); err != nil {
+	if err := d.call(ctx, map[string]any{"cmd": "profile", "w": p.Width, "h": p.Height, "density": p.Density, "settleMs": 3000}, &di); err != nil {
 		return api.Device{}, err
 	}
 	d.setDisplay(di)
@@ -855,12 +1025,11 @@ func (b *Backend) UITree(ctx context.Context, id string) (*api.UITree, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, a, err := d.conn(ctx)
-	if err != nil {
+	if _, _, err := d.conn(ctx); err != nil {
 		return nil, err
 	}
 	var raw rawTree
-	if err := a.call(ctx, map[string]any{"cmd": "tree"}, &raw); err != nil {
+	if err := d.call(ctx, map[string]any{"cmd": "tree"}, &raw); err != nil {
 		return nil, err
 	}
 	d.mu.Lock()
@@ -964,14 +1133,13 @@ func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
 	if err != nil {
 		return err
 	}
-	_, a, err := d.conn(ctx)
-	if err != nil {
+	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
 	if text == "" {
 		return nil
 	}
-	return a.call(ctx, map[string]any{"cmd": "text", "text": text}, nil)
+	return d.call(ctx, map[string]any{"cmd": "text", "text": text}, nil)
 }
 
 // Android KeyEvent key codes for the named keys.
@@ -996,11 +1164,10 @@ func (b *Backend) Key(ctx context.Context, id string, key string) error {
 		sort.Strings(names)
 		return fmt.Errorf("unknown key %q (have: %s)", key, strings.Join(names, ", "))
 	}
-	_, a, err := d.conn(ctx)
-	if err != nil {
+	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
-	return a.call(ctx, map[string]any{"cmd": "key", "code": code}, nil)
+	return d.call(ctx, map[string]any{"cmd": "key", "code": code}, nil)
 }
 
 // ------------------------------------------------------------------ apps
@@ -1036,15 +1203,14 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
-	_, a, err := d.conn(ctx)
-	if err != nil {
+	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
 	pkg, act, _ := strings.Cut(app, "/")
 	if pkg == "" {
 		return errors.New("launch needs a package name")
 	}
-	return a.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
+	return d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
 }
 
 func (b *Backend) Terminate(ctx context.Context, id, app string) error {
@@ -1052,11 +1218,10 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
-	_, a, err := d.conn(ctx)
-	if err != nil {
+	if _, _, err := d.conn(ctx); err != nil {
 		return err
 	}
-	return a.call(ctx, map[string]any{"cmd": "stop", "pkg": app}, nil)
+	return d.call(ctx, map[string]any{"cmd": "stop", "pkg": app}, nil)
 }
 
 func (b *Backend) Close() error {

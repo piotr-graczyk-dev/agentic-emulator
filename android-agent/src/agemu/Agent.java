@@ -432,6 +432,7 @@ public final class Agent {
             ResolveInfo ri = list.get(0);
             cn = new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name);
         }
+        String prevFg = foreground();
         Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(cn)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
@@ -449,7 +450,7 @@ public final class Agent {
         long t0 = SystemClock.uptimeMillis();
         boolean ready = false;
         while (!ready && SystemClock.uptimeMillis() - t0 < 3000) {
-            ready = appWindowReady(cn.getPackageName());
+            ready = appWindowReady(cn.getPackageName(), prevFg);
             if (!ready) SystemClock.sleep(5);
         }
         sb.append("{\"component\":"); str(sb, cn.flattenToShortString());
@@ -457,12 +458,19 @@ public final class Agent {
         sb.append(",\"a11yReadyMs\":").append(SystemClock.uptimeMillis() - t0).append(",\"a11yReady\":").append(ready).append('}');
     }
 
-    static boolean appWindowReady(String pkg) {
+    /**
+     * The launched task is in front once the active application window has content and is
+     * either the app's own window or a new window (a task's top activity may belong to another
+     * package, e.g. Settings' search screen).
+     */
+    static boolean appWindowReady(String pkg, String prevFg) {
         try {
             for (AccessibilityWindowInfo w : ua.getWindows()) {
                 if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(w.isActive() || w.isFocused())) continue;
                 AccessibilityNodeInfo r = w.getRoot();
-                if (r != null && pkg.contentEquals(cs(r.getPackageName())) && r.getChildCount() > 0) return true;
+                if (r == null || r.getChildCount() == 0) continue;
+                String p = cs(r.getPackageName());
+                if (p.equals(pkg) || !p.equals(prevFg)) return true;
             }
         } catch (Throwable ignored) {}
         return false;

@@ -85,6 +85,19 @@ func (e *emuClient) touch(ctx context.Context, x, y, pressure int) error {
 	return err
 }
 
+func (e *emuClient) setVM(ctx context.Context, st emupb.VmRunState_RunState) error {
+	_, err := e.ctl.SetVmState(ctx, &emupb.VmRunState{State: st})
+	return err
+}
+
+func (e *emuClient) vmState(ctx context.Context) (emupb.VmRunState_RunState, error) {
+	r, err := e.ctl.GetVmState(ctx, &emptypb.Empty{})
+	if err != nil {
+		return emupb.VmRunState_UNKNOWN, err
+	}
+	return r.GetState(), nil
+}
+
 func (e *emuClient) shutdown(ctx context.Context) error {
 	_, err := e.ctl.SetVmState(ctx, &emupb.VmRunState{State: emupb.VmRunState_SHUTDOWN})
 	return err

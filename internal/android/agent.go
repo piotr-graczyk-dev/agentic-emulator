@@ -68,7 +68,7 @@ func (a *agentClient) call(ctx context.Context, req map[string]any, out any) err
 		if a.conn == nil {
 			c, err := adbOpen(ctx, a.serial, "localabstract:"+agentSocket)
 			if err != nil {
-				return fmt.Errorf("agent: %w", err)
+				return &agentDialError{err}
 			}
 			a.conn, a.r = c, bufio.NewReaderSize(c, 1<<20)
 		}
@@ -103,6 +103,7 @@ func (a *agentClient) call(ctx context.Context, req map[string]any, out any) err
 		if !resp.OK {
 			return fmt.Errorf("agent: %s", resp.Error)
 		}
+		_ = errNoAgent
 		if out != nil {
 			return json.Unmarshal(resp.Result, out)
 		}
@@ -202,3 +203,10 @@ func installAgent(ctx context.Context, serial string) error {
 }
 
 var errNoAgent = errors.New("agent not connected")
+
+// agentDialError means the agent's socket could not be opened: the request was not sent,
+// so it is safe to restart the agent and retry.
+type agentDialError struct{ err error }
+
+func (e *agentDialError) Error() string { return "agent unreachable: " + e.err.Error() }
+func (e *agentDialError) Unwrap() error { return e.err }
