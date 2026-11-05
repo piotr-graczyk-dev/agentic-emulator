@@ -265,9 +265,11 @@ func zeroRoot(_ tree: [String: Any]) -> Bool {
 // no accessibility runtime loaded: switch app accessibility on and retry for up to 4 s.
 func readTree(_ d: AGDevice, maxDepth: Int, timeout: Double) throws -> [String: Any] {
     let deadline = Date().addingTimeInterval(timeout)
+    // Right after a boot, accessibility may still be warming up: wait for it (within budget).
+    AXWarmup.waitIfRunning(d, until: deadline)
     var tree: [String: Any]
     do {
-        tree = try d.accessibilityTree(withMaxDepth: maxDepth, timeout: timeout) as! [String: Any]
+        tree = try d.accessibilityTree(withMaxDepth: maxDepth, timeout: max(0.1, deadline.timeIntervalSinceNow)) as! [String: Any]
         bridgeDoctor.noteResult(d, error: nil)
     } catch {
         bridgeDoctor.noteResult(d, error: error)
@@ -468,33 +470,145 @@ func bootStatusName(_ status: Int64) -> String {
 let verifiedLock = NSLock()
 var verifiedBoots: [String: Date] = [:]
 
-// Agent-ready: booted, framebuffer readable, HID connected, and SpringBoard (or the frontmost
-// app) answering accessibility. The three are independent and run in parallel:
-//   - the framebuffer and HID connections are made as soon as the device is booted;
-//   - accessibility is not asked before CoreSimulator's boot status is "finished" (what
-//     `simctl bootstatus` waits for): before that SpringBoard is still starting (and may be
-//     relaunched, e.g. after data migration), and early requests only add load. Then the
-//     frontmost app is probed every 100 ms with a 1.5 s budget per probe;
-//   - if accessibility still says "no frontmost application" 3 s after boot finished, the
-//     bridge is restarted at once (again after 10 s, at most 3 times).
-// The result carries a timeline of every milestone.
-func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
+/// How long after boot finished accessibility may keep saying "no frontmost application"
+/// before the bridge is restarted. Measured (docs/IOS.md): the bridge retries finding
+/// SpringBoard every 5 s by itself and answered 1.5-2.8 s after boot finished; restarting it at
+/// once made that 4-7 s. So restart only once its own retry has had its chance.
+/// AGEMU_IOS_BRIDGE_RESTART_MS overrides (for experiments).
+let firstBridgeRestartAfter: Double = {
+    if let v = ProcessInfo.processInfo.environment["AGEMU_IOS_BRIDGE_RESTART_MS"], let ms = Double(v) { return ms / 1000 }
+    return 6
+}()
+
+/// Waits until the simulator's accessibility service answers with a frontmost app, restarting
+/// CoreSimulatorBridge if it keeps saying "no frontmost application" (first after
+/// firstBridgeRestartAfter, then every 10 s, at most 3 times). One per device at a time; UI
+/// reads wait for a running warm-up instead of failing.
+final class AXWarmup {
+    private static let lock = NSLock()
+    private static var running: [String: AXWarmup] = [:]
+
+    let udid: String
+    private let done = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
+    private var finished = false
+    private(set) var pid = 0
+    private(set) var label = ""
+    private(set) var restarts = 0
+    private(set) var lastError = ""
+
+    private init(udid: String) { self.udid = udid }
+
+    /// Starts a warm-up for d unless one is running; returns the running one.
+    static func start(_ d: AGDevice, trace: ReadyTrace, full: Bool, deadline: Date) -> AXWarmup {
+        lock.lock()
+        if let w = running[d.udid] {
+            lock.unlock()
+            return w
+        }
+        let w = AXWarmup(udid: d.udid)
+        running[d.udid] = w
+        lock.unlock()
+        Thread.detachNewThread { w.run(d, trace: trace, full: full, deadline: deadline) }
+        return w
+    }
+
+    /// Waits (until the given time) for a warm-up running on d, if any.
+    static func waitIfRunning(_ d: AGDevice, until: Date) {
+        lock.lock()
+        let w = running[d.udid]
+        lock.unlock()
+        _ = w?.wait(until: until)
+    }
+
+    var isDone: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return finished
+    }
+
+    /// true once accessibility answered.
+    func wait(until: Date) -> Bool {
+        if isDone { return pid > 0 }
+        let left = until.timeIntervalSinceNow
+        if left <= 0 { return false }
+        if done.wait(timeout: .now() + left) == .success {
+            done.signal()  // let other waiters through
+        }
+        return isDone && pid > 0
+    }
+
+    private func run(_ d: AGDevice, trace: ReadyTrace, full: Bool, deadline: Date) {
+        let started = Date()
+        var lastRestartAt: Date?
+        while Date() < deadline {
+            do {
+                let front = try d.accessibilityFrontmost(withTimeout: max(0.05, min(1.5, deadline.timeIntervalSinceNow)), full: full)
+                let p = front["pid"] as? Int ?? 0
+                let frame = front["frame"] as? [Double] ?? []
+                if p > 0, !full || (frame.count == 4 && frame[2] > 0 && frame[3] > 0) {
+                    pid = p
+                    label = front["label"] as? String ?? ""
+                    trace.mark("accessibility", "frontmost pid \(p)")
+                    bridgeDoctor.noteResult(d, error: nil)
+                    break
+                }
+                lastError = "frontmost application has no frame yet"
+            } catch {
+                let msg = (error as? HelperError)?.description ?? error.localizedDescription
+                if msg != lastError { trace.mark("accessibilityFails", String(msg.prefix(120))) }
+                lastError = msg
+            }
+            if restarts < 3, lastError.contains("no frontmost application") {
+                let since = lastRestartAt ?? started
+                let wait: Double = restarts == 0 ? firstBridgeRestartAfter : 10
+                if Date().timeIntervalSince(since) >= wait {
+                    restarts += 1
+                    trace.mark("bridgeRestart", "#\(restarts): no frontmost app \(Int(Date().timeIntervalSince(since) * 1000)) ms after boot finished")
+                    bridgeDoctor.noteRestart(d)
+                    restartBridge(d, reason: "readiness: no frontmost app after boot finished (restart #\(restarts))")
+                    trace.mark("bridgeRestarted")
+                    lastRestartAt = Date()
+                }
+            }
+            sleepMs(100)
+        }
+        if pid == 0 {
+            log("\(udid): accessibility did not answer within \(Int(Date().timeIntervalSince(started))) s after boot finished: \(lastError) [timeline: \(trace.summary)]")
+        }
+        stateLock.lock()
+        finished = true
+        stateLock.unlock()
+        AXWarmup.lock.lock()
+        AXWarmup.running[udid] = nil
+        AXWarmup.lock.unlock()
+        done.signal()
+    }
+}
+
+// Readiness. A booted simulator is
+//   - interactive when CoreSimulator's boot status is "finished" (what `simctl bootstatus`
+//     waits for), its framebuffer is readable and its HID client is connected: screenshots,
+//     taps, typing, launching apps all work;
+//   - agent-ready when, in addition, accessibility answers with a frontmost app (the UI tree).
+// The steps are independent and run in parallel: framebuffer and HID connect as soon as the
+// device is booted, and accessibility is probed (AXWarmup) from the moment boot finished; it is
+// not asked earlier, because SpringBoard is still starting (and may be relaunched, e.g. after
+// data migration) and early requests only add load.
+// waitAccessibility = false returns once interactive and leaves the warm-up running: UI reads
+// wait for it. The result carries a timeline of every milestone.
+func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws -> [String: Any] {
     let trace = ReadyTrace()
     let deadline = trace.start.addingTimeInterval(timeoutMs / 1000)
     let bg = DispatchQueue.global(qos: .userInitiated)
     let flagLock = NSLock()
     var connectStarted = false
     var fbError = "", hidError = ""
-    var restarting = false
     var lastState = -1
     var lastBootStatus: Int64 = -2
     var bootedAt: Date?
-    var gateOpenedAt: Date?
-    var lastRestartAt: Date?
-    var restarts = 0
+    var warmup: AXWarmup?
     var lastError = "not booted"
-    var frontPid = 0
-    var frontLabel = ""
     let boot = d.lastBootedAt
     verifiedLock.lock()
     let verified = boot != nil && verifiedBoots[d.udid] == boot
@@ -554,66 +668,51 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
             }
             // Never wait forever on a boot status that does not progress.
             if !finished, let b = bootedAt, Date().timeIntervalSince(b) > 120 { finished = true }
-            if gateOpenedAt == nil && finished {
-                gateOpenedAt = Date()
+            if warmup == nil && finished {
                 trace.mark("bootFinished")
+                // The warm-up may outlive this call (waitAccessibility false): give it at
+                // least 3 minutes.
+                let axDeadline = max(deadline, Date().addingTimeInterval(180))
+                warmup = AXWarmup.start(d, trace: trace, full: !verified, deadline: axDeadline)
             }
-            if gateOpenedAt != nil && frontPid == 0 {
-                let left = deadline.timeIntervalSinceNow
-                do {
-                    let front = try d.accessibilityFrontmost(withTimeout: max(0.05, min(1.5, left)), full: !verified)
-                    let pid = front["pid"] as? Int ?? 0
-                    let frame = front["frame"] as? [Double] ?? []
-                    if pid > 0, verified || (frame.count == 4 && frame[2] > 0 && frame[3] > 0) {
-                        frontPid = pid
-                        frontLabel = front["label"] as? String ?? ""
-                        trace.mark("accessibility", "frontmost pid \(pid)")
-                        bridgeDoctor.noteResult(d, error: nil)
-                    } else {
-                        lastError = "frontmost application has no frame yet"
+            let interactive = warmup != nil && trace.has("framebuffer") && trace.has("hid")
+            if interactive, let w = warmup, w.isDone || !waitAccessibility {
+                if w.isDone && w.pid == 0 {
+                    lastError = w.lastError
+                } else {
+                    trace.mark(w.isDone ? "ready" : "interactive")
+                    if w.isDone, let boot {
+                        verifiedLock.lock(); verifiedBoots[d.udid] = boot; verifiedLock.unlock()
                     }
-                } catch {
-                    lastError = (error as? HelperError)?.description ?? error.localizedDescription
-                }
-                flagLock.lock()
-                let busy = restarting
-                flagLock.unlock()
-                if frontPid == 0, !busy, restarts < 3, lastError.contains("no frontmost application") {
-                    let since = lastRestartAt ?? gateOpenedAt!
-                    let wait: Double = restarts == 0 ? 3 : 10
-                    if Date().timeIntervalSince(since) >= wait {
-                        restarts += 1
-                        lastRestartAt = Date()
-                        flagLock.lock(); restarting = true; flagLock.unlock()
-                        trace.mark("bridgeRestart", "#\(restarts): no frontmost app \(Int(Date().timeIntervalSince(since) * 1000)) ms after boot finished")
-                        bridgeDoctor.noteRestart(d)
-                        let n = restarts
+                    if !w.isDone {
+                        // Log when the UI tree becomes available.
+                        let udid = d.udid
                         bg.async {
-                            restartBridge(d, reason: "readiness: no frontmost app after boot finished (restart #\(n))")
-                            trace.mark("bridgeRestarted")
-                            flagLock.lock(); restarting = false; flagLock.unlock()
+                            if w.wait(until: Date().addingTimeInterval(200)) {
+                                if let boot {
+                                    verifiedLock.lock(); verifiedBoots[udid] = boot; verifiedLock.unlock()
+                                }
+                                log("\(udid): accessibility ready \(Int(trace.at("accessibility") ?? -1)) ms after the ready call (boot finished at \(Int(trace.at("bootFinished") ?? -1)) ms, bridge restarts \(w.restarts))")
+                            }
                         }
                     }
+                    return [
+                        "bootedMs": trace.at("booted") ?? -1,
+                        "bootFinishedMs": trace.at("bootFinished") ?? -1,
+                        "framebufferMs": trace.at("framebuffer") ?? -1,
+                        "hidMs": trace.at("hid") ?? -1,
+                        "accessibilityMs": trace.at("accessibility") ?? -1,
+                        "readyMs": trace.ms(),
+                        "accessibility": w.isDone ? "ready" : "warming",
+                        "bridgeRestarts": w.restarts,
+                        "frontmostPid": w.pid,
+                        "frontmost": w.label,
+                        "timeline": trace.timeline,
+                        "device": describe(d),
+                    ]
                 }
-            }
-            if frontPid > 0 && trace.has("framebuffer") && trace.has("hid") {
-                trace.mark("ready")
-                if let boot {
-                    verifiedLock.lock(); verifiedBoots[d.udid] = boot; verifiedLock.unlock()
-                }
-                return [
-                    "bootedMs": trace.at("booted") ?? -1,
-                    "bootFinishedMs": trace.at("bootFinished") ?? -1,
-                    "framebufferMs": trace.at("framebuffer") ?? -1,
-                    "hidMs": trace.at("hid") ?? -1,
-                    "accessibilityMs": trace.at("accessibility") ?? -1,
-                    "readyMs": trace.at("ready") ?? -1,
-                    "bridgeRestarts": restarts,
-                    "frontmostPid": frontPid,
-                    "frontmost": frontLabel,
-                    "timeline": trace.timeline,
-                    "device": describe(d),
-                ]
+            } else if warmup != nil, !(warmup!.isDone) {
+                lastError = warmup!.lastError.isEmpty ? "waiting for accessibility" : warmup!.lastError
             }
         } else {
             lastError = "state \(d.stateString)"
@@ -627,8 +726,8 @@ func waitReady(_ d: AGDevice, timeoutMs: Double) throws -> [String: Any] {
             throw HelperError("device \(d.udid) not agent-ready after \(Int(timeoutMs)) ms: \(why) [timeline: \(trace.summary)]")
         }
         // Waiting for boot: poll the (in-process) state every 50 ms; waiting for the
-        // connections only: every 5 ms.
-        sleepMs(frontPid > 0 ? 5 : (gateOpenedAt == nil ? 50 : 100))
+        // connections or accessibility only: every 5 ms.
+        sleepMs(warmup == nil ? 50 : 5)
     }
 }
 
@@ -658,7 +757,9 @@ func handle(_ req: [String: Any]) throws -> Any {
         if d.state != 1 { try d.shutdown() }
         return describe(d)
     case "ready":
-        return try waitReady(try device(req), timeoutMs: req.optDouble("timeoutMs", 120_000))
+        return try waitReady(
+            try device(req), timeoutMs: req.optDouble("timeoutMs", 120_000),
+            waitAccessibility: (req["waitAccessibility"] as? Bool) ?? true)
     case "screenshot":
         let d = try device(req)
         return try Screenshot.capture(
@@ -706,9 +807,11 @@ func handle(_ req: [String: Any]) throws -> Any {
         return ["switched": try ensureAppAccessibility(try device(req), force: true)]
     case "frontmost":
         let d = try device(req)
+        let deadline = Date().addingTimeInterval(req.optDouble("timeoutMs", 5_000) / 1000)
+        AXWarmup.waitIfRunning(d, until: deadline)
         do {
             let front = try d.accessibilityFrontmost(
-                withTimeout: req.optDouble("timeoutMs", 5_000) / 1000, full: !req.optBool("pidOnly"))
+                withTimeout: max(0.1, deadline.timeIntervalSinceNow), full: !req.optBool("pidOnly"))
             bridgeDoctor.noteResult(d, error: nil)
             return front
         } catch {

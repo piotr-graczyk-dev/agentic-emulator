@@ -317,6 +317,47 @@ static NSString *AGStringValue(id value)
 
 @end
 
+// Sends one translator request straight to the device (not through AXPTranslator), bounded
+// by the session. Returns the response's resultData.
+static id AGAXDirect(AGAXSession *session, id translation, unsigned long long requestType,
+                     unsigned long long attribute)
+{
+  Class requestClass = NSClassFromString(@"AXPTranslatorRequest");
+  if (!requestClass || !translation) {
+    return nil;
+  }
+  id request = [(id<AGAXPTranslatorRequest>)requestClass requestWithTranslation:translation];
+  [request setRequestType:requestType];
+  [request setAttributeType:attribute];
+  double wait = MIN(session.requestTimeout, session.deadline - CFAbsoluteTimeGetCurrent());
+  session.requests += 1;
+  if (wait <= 0) {
+    session.timeouts += 1;
+    return nil;
+  }
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  __block id response = nil;
+  [(id<AGSimDevice>)session.device sendAccessibilityRequestAsync:request
+                                                 completionQueue:AGAXBridge.shared.callbackQueue
+                                               completionHandler:^(id inner) {
+                                                 response = inner;
+                                                 dispatch_semaphore_signal(done);
+                                               }];
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC))) != 0) {
+    session.timeouts += 1;
+    return nil;
+  }
+  return [response respondsToSelector:@selector(resultData)] ? [response resultData] : nil;
+}
+
+// The application's bundle identifier (AXPAttributeBundleIdentifier = 6), one request.
+static NSString *AGAXBundleIdentifier(AGAXSession *session, id element)
+{
+  id translation = [(id<AGAXPMacPlatformElement>)element translation];
+  id value = AGAXDirect(session, translation, 2 /* attribute */, 6 /* AXPAttributeBundleIdentifier */);
+  return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
 static NSError *AGAXTimeoutError(AGAXSession *session, NSString *what, double budget)
 {
   return AGError(@"%@: the simulator's accessibility service did not answer in time (%lu of %lu requests "
@@ -452,7 +493,8 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
   if (title.length) {
     node[@"title"] = title;
   }
-  node[@"enabled"] = @(v ? AGAXBool(v[@"AXEnabled"]) : e.isAccessibilityEnabled);
+  // (BOOL) keeps it a JSON boolean: ?: on two BOOLs yields an int.
+  node[@"enabled"] = @((BOOL)(v ? AGAXBool(v[@"AXEnabled"]) : e.isAccessibilityEnabled));
   if (v ? AGAXBool(v[@"AXSelected"]) : e.isAccessibilitySelected) {
     node[@"selected"] = @YES;
   }
@@ -1313,9 +1355,11 @@ static BOOL AGAXBatching(id element)
                           AGAXWalk walk = {
                             .token = token, .session = session, .maxDepth = maxDepth, .count = 0,
                             .batched = AGAXBatching(element)};
+                          NSString *bundle = AGAXBundleIdentifier(session, element);
                           NSDictionary *root = AGAXNode(element, &walk, 0);
                           return @{
                             @"pid" : @(pid),
+                            @"bundleId" : bundle ?: @"",
                             @"root" : root,
                             @"elements" : @(walk.count),
                             @"requests" : @(session.requests),
@@ -1372,6 +1416,7 @@ static BOOL AGAXBatching(id element)
                           if (!full) {
                             return @{@"pid" : @(pid)};
                           }
+                          NSString *bundle = AGAXBundleIdentifier(session, element);
                           NSRect frame = NSZeroRect;
                           NSString *label = nil;
                           if (AGAXBatching(element)) {
@@ -1390,6 +1435,7 @@ static BOOL AGAXBatching(id element)
                             @"pid" : @(pid),
                             @"frame" : @[ @(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height) ],
                             @"label" : label ?: @"",
+                            @"bundleId" : bundle ?: @"",
                           };
                         }];
 }

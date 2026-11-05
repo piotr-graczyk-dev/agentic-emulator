@@ -28,6 +28,7 @@ type axNode struct {
 // axTree is the helper's "ui" result.
 type axTree struct {
 	Pid      int     `json:"pid"`
+	BundleID string  `json:"bundleId"` // the frontmost app, from accessibility
 	Root     *axNode `json:"root"`
 	Scale    float64 `json:"scale"`
 	Width    int     `json:"width"`  // screen pixels

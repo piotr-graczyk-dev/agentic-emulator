@@ -11,6 +11,8 @@ ios-helper: $(BIN)/agemu-ios-helper
 $(BIN)/agemu-ios-helper: $(IOS_HELPER_SRC)
 	cd ios-helper && swift build -c release
 	mkdir -p $(BIN)
+	# Replace, never overwrite in place: macOS SIGKILLs a signed binary rewritten in place.
+	rm -f $(BIN)/agemu-ios-helper
 	cp ios-helper/.build/release/agemu-ios-helper $(BIN)/agemu-ios-helper
 
 # Unit tests that do not need a simulator.

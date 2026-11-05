@@ -40,6 +40,9 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	return err
 }
 
+// simctlResetTimeout bounds each simctl call of a reset (privacy, keychain, pasteboard).
+const simctlResetTimeout = 60 * time.Second
+
 func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	start := time.Now()
 	var rep ResetReport
@@ -48,16 +51,26 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 		return rep, err
 	}
 	if d.StateCode != stateBooted {
-		if err := b.bootReady(ctx, d.UDID); err != nil {
+		if d, err = b.bootReady(ctx, d.UDID); err != nil {
 			return rep, err
 		}
 	}
 	udid := d.UDID
 
-	// simctl calls are slow to start (~100 ms each); run them alongside the app cleanup.
+	// simctl calls are slow to start (~100 ms each, seconds on a loaded Mac); run them
+	// alongside the app cleanup.
+	sctx, cancel := context.WithTimeout(ctx, simctlResetTimeout)
+	defer cancel()
 	var wg sync.WaitGroup
 	var simctlErr error
 	var errMu sync.Mutex
+	fail := func(err error) {
+		errMu.Lock()
+		if simctlErr == nil {
+			simctlErr = err
+		}
+		errMu.Unlock()
+	}
 	for _, args := range [][]string{
 		{"privacy", udid, "reset", "all"},
 		{"keychain", udid, "reset"},
@@ -65,20 +78,16 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 		wg.Add(1)
 		go func(args []string) {
 			defer wg.Done()
-			if _, err := simctl(ctx, args...); err != nil {
-				errMu.Lock()
-				simctlErr = err
-				errMu.Unlock()
+			if _, err := simctl(sctx, args...); err != nil {
+				fail(err)
 			}
 		}(args)
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := simctlStdin(ctx, "", "pbcopy", udid); err != nil {
-			errMu.Lock()
-			simctlErr = err
-			errMu.Unlock()
+		if err := simctlStdin(sctx, "", "pbcopy", udid); err != nil {
+			fail(err)
 		}
 	}()
 
@@ -92,13 +101,31 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 		wg.Wait()
 		return rep, err
 	}
+	tList := time.Since(start)
+
 	// Terminating an app that is not running fails in about a millisecond, so terminating
-	// everything is cheaper than asking launchctl what runs (~0.5 s).
-	for _, bundle := range append(append([]string{}, system...), user...) {
-		if err := b.call(ctx, "terminate", map[string]any{"udid": udid, "bundleId": bundle}, nil); err == nil {
-			rep.Terminated++
-		}
+	// everything is cheaper than asking launchctl what runs. The calls are independent:
+	// run 8 at a time.
+	all := append(append([]string{}, system...), user...)
+	var terminated int
+	var tMu sync.Mutex
+	sem := make(chan struct{}, 8)
+	var twg sync.WaitGroup
+	for _, bundle := range all {
+		twg.Add(1)
+		sem <- struct{}{}
+		go func(bundle string) {
+			defer func() { <-sem; twg.Done() }()
+			if err := b.call(ctx, "terminate", map[string]any{"udid": udid, "bundleId": bundle}, nil); err == nil {
+				tMu.Lock()
+				terminated++
+				tMu.Unlock()
+			}
+		}(bundle)
 	}
+	twg.Wait()
+	rep.Terminated = terminated
+	tTerminate := time.Since(start)
 	for _, bundle := range user {
 		if err := b.call(ctx, "uninstall", map[string]any{"udid": udid, "bundleId": bundle}, nil); err != nil {
 			wg.Wait()
@@ -109,22 +136,19 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	b.mu.Lock()
 	delete(b.apps, udid)
 	b.mu.Unlock()
+	tUninstall := time.Since(start)
 
-	tCleanup := time.Since(start)
 	wg.Wait()
-	if d := time.Since(start) - tCleanup; d > 100*time.Millisecond {
-		log.Printf("ios reset %s: waited %.0f ms for simctl privacy/keychain/pbcopy", udid, ms(d))
-	}
+	tSimctl := time.Since(start)
 	if simctlErr != nil {
 		return rep, fmt.Errorf("reset: %w", simctlErr)
 	}
-	tApps := time.Since(start)
 	if err := b.goHome(ctx, udid); err != nil {
 		return rep, fmt.Errorf("reset: %w", err)
 	}
-	rep.Ms = float64(time.Since(start).Microseconds()) / 1000
-	log.Printf("ios reset %s: %.0f ms (apps+simctl %.0f ms, home %.0f ms), terminated %d, uninstalled %v",
-		udid, rep.Ms, ms(tApps), ms(time.Since(start)-tApps), rep.Terminated, rep.Uninstalled)
+	rep.Ms = ms(time.Since(start))
+	log.Printf("ios reset %s: %.0f ms (app lists %.0f, terminate %d apps %.0f, uninstall %v %.0f, simctl privacy/keychain/pbcopy done at %.0f, home %.0f)",
+		udid, rep.Ms, ms(tList), len(all), ms(tTerminate-tList), rep.Uninstalled, ms(tUninstall-tTerminate), ms(tSimctl), ms(time.Since(start)-tSimctl))
 	return rep, nil
 }
 
@@ -154,64 +178,38 @@ func (b *Backend) systemApps(ctx context.Context, d simDevice) ([]string, error)
 	return out, nil
 }
 
-// goHome presses home and waits until SpringBoard is the frontmost application.
+const springboardBundle = "com.apple.springboard"
+
+// goHome presses home and waits (up to 15 s) until SpringBoard is the frontmost application,
+// recognised by the bundle id accessibility reports.
 func (b *Backend) goHome(ctx context.Context, udid string) error {
-	sb, err := b.springboardPid(ctx, udid, false)
-	if err != nil {
-		return err
-	}
 	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "home"}, nil); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	refreshed := false
+	deadline := time.Now().Add(15 * time.Second)
+	last := "nothing yet"
 	for {
 		var front struct {
-			Pid int `json:"pid"`
+			Pid      int    `json:"pid"`
+			BundleID string `json:"bundleId"`
 		}
-		if err := b.call(ctx, "frontmost", map[string]any{"udid": udid}, &front); err == nil && front.Pid == sb {
+		err := b.call(ctx, "frontmost", map[string]any{"udid": udid, "timeoutMs": 3000}, &front)
+		switch {
+		case err != nil:
+			last = err.Error()
+		case front.BundleID == springboardBundle:
 			// SpringBoard reports itself frontmost before it has finished handling the
 			// press; an app launched in that window starts in the background. Let it settle.
 			time.Sleep(300 * time.Millisecond)
 			return nil
+		default:
+			last = fmt.Sprintf("frontmost is %q (pid %d)", front.BundleID, front.Pid)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("SpringBoard (pid %d) did not come to the front", sb)
-		}
-		if !refreshed && time.Now().After(deadline.Add(-8*time.Second)) {
-			// SpringBoard may have restarted since we cached its pid.
-			if p, err := b.springboardPid(ctx, udid, true); err == nil {
-				sb = p
-			}
-			refreshed = true
+			return fmt.Errorf("SpringBoard did not come to the front within 15 s after pressing home (%s)", last)
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
-}
-
-func (b *Backend) springboardPid(ctx context.Context, udid string, refresh bool) (int, error) {
-	b.mu.Lock()
-	pid, ok := b.springboard[udid]
-	b.mu.Unlock()
-	if ok && !refresh {
-		return pid, nil
-	}
-	var running []struct {
-		BundleID string `json:"bundleId"`
-		Pid      int    `json:"pid"`
-	}
-	if err := b.call(ctx, "running", map[string]any{"udid": udid}, &running); err != nil {
-		return 0, err
-	}
-	for _, r := range running {
-		if r.BundleID == "com.apple.springboard" {
-			b.mu.Lock()
-			b.springboard[udid] = r.Pid
-			b.mu.Unlock()
-			return r.Pid, nil
-		}
-	}
-	return 0, fmt.Errorf("SpringBoard is not running on %s", udid)
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }

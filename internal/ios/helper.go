@@ -144,8 +144,69 @@ func (h *helper) close() {
 	}
 }
 
+// callTimeouts bound how long an agent waits for each helper command when its caller set no
+// deadline. Nothing an agent calls may hang silently: when the simulator does not answer in
+// time the call fails with an error that says what it waited for.
+var callTimeouts = map[string]time.Duration{
+	"list":       30 * time.Second,
+	"describe":   30 * time.Second,
+	"boot":       60 * time.Second,
+	"shutdown":   60 * time.Second,
+	"screenshot": 15 * time.Second,
+	"tap":        15 * time.Second,
+	"swipe":      30 * time.Second,
+	"type":       30 * time.Second,
+	"key":        15 * time.Second,
+	"ui":         25 * time.Second, // the helper itself gives up after 20 s (timeoutMs)
+	"frontmost":  10 * time.Second,
+	"hit":        15 * time.Second,
+	"launch":     60 * time.Second,
+	"terminate":  20 * time.Second,
+	"install":    3 * time.Minute,
+	"uninstall":  60 * time.Second,
+	"apps":       60 * time.Second,
+	"userapps":   15 * time.Second,
+	"running":    20 * time.Second,
+	"spawn":      30 * time.Second,
+	"notify":     15 * time.Second,
+}
+
+// waitingFor says, for a timeout error, what a command was waiting for.
+func waitingFor(cmd string, params map[string]any) string {
+	s := func(k string) string { v, _ := params[k].(string); return v }
+	switch cmd {
+	case "launch":
+		return "CoreSimulator to launch " + s("bundleId")
+	case "terminate":
+		return "CoreSimulator to terminate " + s("bundleId")
+	case "install":
+		return "CoreSimulator to install " + s("path")
+	case "uninstall":
+		return "CoreSimulator to uninstall " + s("bundleId")
+	case "ui", "frontmost", "hit":
+		return "the simulator's accessibility service (CoreSimulatorBridge)"
+	case "tap", "swipe", "type", "key":
+		return "the simulator to acknowledge the HID events"
+	case "screenshot":
+		return "the simulator's framebuffer"
+	case "ready":
+		return "the device to become agent-ready"
+	case "running", "spawn":
+		return "a process inside the simulator (launchctl)"
+	}
+	return "CoreSimulator (" + cmd + ")"
+}
+
 // call sends one request. params may be nil. out (optional) receives the result.
 func (h *helper) call(ctx context.Context, cmd string, params map[string]any, out any) error {
+	if _, ok := ctx.Deadline(); !ok {
+		if d, ok := callTimeouts[cmd]; ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, d)
+			defer cancel()
+		}
+	}
+	start := time.Now()
 	req := map[string]any{}
 	for k, v := range params {
 		req[k] = v
@@ -192,6 +253,11 @@ func (h *helper) call(ctx context.Context, cmd string, params map[string]any, ou
 		h.mu.Lock()
 		delete(h.pending, id)
 		h.mu.Unlock()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			udid, _ := params["udid"].(string)
+			return fmt.Errorf("%s %s: gave up after %.1f s waiting for %s; the simulator is overloaded or stuck (the request may still complete in the background)",
+				cmd, udid, time.Since(start).Seconds(), waitingFor(cmd, params))
+		}
 		return fmt.Errorf("ios helper %s: %w", cmd, ctx.Err())
 	}
 }

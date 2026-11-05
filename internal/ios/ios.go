@@ -11,6 +11,7 @@ package ios
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strings"
@@ -50,17 +51,31 @@ type Backend struct {
 	h  *helper
 	// lastUse orders booted agemu devices for the max-booted policy.
 	lastUse map[string]time.Time
-	// apps maps udid -> pid -> bundle id, filled by Launch and by `launchctl list`.
+	// apps maps udid -> pid -> bundle id, filled by Launch and by `launchctl list` (only used
+	// when accessibility does not report the frontmost app's bundle id).
 	apps map[string]map[int]string
-	// springboard caches SpringBoard's pid per udid.
-	springboard map[string]int
 	// systemAppCache holds the built-in apps per runtime identifier.
 	systemAppCache map[string][]string
 }
 
-// New is cheap: the helper process starts on first use.
+// New returns at once. The helper process is started in the background, so the first iOS
+// command does not pay for loading CoreSimulator (about 0.3 s on an idle Mac, several
+// seconds on a loaded one). AGEMU_IOS_PRESTART=0 starts it on first use instead.
 func New() *Backend {
-	return &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, springboard: map[string]int{}, systemAppCache: map[string][]string{}}
+	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{}}
+	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			start := time.Now()
+			if err := b.call(ctx, "list", nil, nil); err != nil {
+				log.Printf("ios: helper prestart: %v", err)
+				return
+			}
+			log.Printf("ios: helper ready in %.0f ms", ms(time.Since(start)))
+		}()
+	}
+	return b
 }
 
 func (b *Backend) Platform() api.Platform { return api.IOS }
@@ -274,31 +289,107 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		if err := b.shutdown(ctx, d.UDID); err != nil {
 			return api.Device{}, err
 		}
+		d.StateCode = stateShutdown
 	}
-	if d.StateCode != stateBooted {
-		// Make room first, so the new boot never exceeds the limit.
-		if err := b.enforceMaxBooted(ctx, d.UDID, 1); err != nil {
-			return api.Device{}, err
-		}
-	}
-	if err := b.bootReady(ctx, d.UDID); err != nil {
+	ready, err := b.bootMakingRoom(ctx, d.UDID, d.StateCode == stateBooted)
+	if err != nil {
 		return api.Device{}, err
 	}
-	return b.describe(ctx, d.UDID)
+	return ready.api(), nil
 }
 
-func (b *Backend) describe(ctx context.Context, udid string) (api.Device, error) {
+// bootMakingRoom boots udid (if needed) until agent-ready while shutting down the least
+// recently used agemu simulators beyond the booted limit. The shutdowns overlap the boot
+// unless memory is critically short, in which case they finish first.
+func (b *Backend) bootMakingRoom(ctx context.Context, udid string, booted bool) (simDevice, error) {
+	victims, err := b.evictionVictims(ctx, udid)
+	if err != nil {
+		return simDevice{}, err
+	}
+	shutdownAll := func() error {
+		var wg sync.WaitGroup
+		errs := make([]error, len(victims))
+		for i, v := range victims {
+			wg.Add(1)
+			go func(i int, v simDevice) {
+				defer wg.Done()
+				if err := b.shutdown(ctx, v.UDID); err != nil {
+					errs[i] = fmt.Errorf("shutting down %s to stay within %d booted agemu simulators: %w", v.Name, effectiveMaxBooted(), err)
+				}
+			}(i, v)
+		}
+		wg.Wait()
+		for _, e := range errs {
+			if e != nil {
+				return e
+			}
+		}
+		return nil
+	}
+	if len(victims) > 0 {
+		names := make([]string, len(victims))
+		for i, v := range victims {
+			names[i] = v.Name
+		}
+		log.Printf("ios: shutting down %s (limit %d booted, memory: %s)", strings.Join(names, ", "), effectiveMaxBooted(), memoryState())
+	}
+	if booted || memoryCritical() || len(victims) == 0 {
+		if err := shutdownAll(); err != nil {
+			return simDevice{}, err
+		}
+		return b.bootReady(ctx, udid)
+	}
+	done := make(chan error, 1)
+	go func() { done <- shutdownAll() }()
+	d, err := b.bootReady(ctx, udid)
+	if serr := <-done; err == nil && serr != nil {
+		err = serr
+	}
+	return d, err
+}
+
+// readyResult is the helper's "ready" answer: when each readiness milestone was reached (ms
+// since the ready call started) and the device.
+type readyResult struct {
+	BootedMs        float64 `json:"bootedMs"`
+	BootFinishedMs  float64 `json:"bootFinishedMs"`
+	FramebufferMs   float64 `json:"framebufferMs"`
+	HIDMs           float64 `json:"hidMs"`
+	AccessibilityMs float64 `json:"accessibilityMs"`
+	ReadyMs         float64 `json:"readyMs"`
+	Accessibility   string  `json:"accessibility"` // "ready", or "warming" (still starting)
+	BridgeRestarts  int     `json:"bridgeRestarts"`
+	Timeline        []struct {
+		Ms     float64 `json:"ms"`
+		Event  string  `json:"event"`
+		Detail string  `json:"detail"`
+	} `json:"timeline"`
+	Device simDevice `json:"device"`
+}
+
+// waitAccessibilityOnBoot: AGEMU_IOS_BOOT_WAIT_AX=1 makes boot wait until the UI tree is
+// readable too. By default boot returns once the device is interactive (boot finished,
+// framebuffer readable, HID connected) and accessibility finishes warming up in the background,
+// typically 1.5-3 s later; UI reads wait for it, while screenshots, taps and app launches
+// already work.
+func waitAccessibilityOnBoot() bool { return envOn("AGEMU_IOS_BOOT_WAIT_AX") }
+
+// bootReady boots the simulator (headless, persisted) if needed and waits until it is
+// interactive (see waitAccessibilityOnBoot). Cold boots log their readiness timeline to the
+// daemon log.
+func (b *Backend) bootReady(ctx context.Context, udid string) (simDevice, error) {
+	start := time.Now()
 	var d simDevice
 	if err := b.call(ctx, "describe", map[string]any{"udid": udid}, &d); err != nil {
-		return api.Device{}, err
+		return simDevice{}, err
 	}
-	return d.api(), nil
-}
-
-func (b *Backend) bootReady(ctx context.Context, udid string) error {
-	var d simDevice
-	if err := b.call(ctx, "boot", map[string]any{"udid": udid}, &d); err != nil {
-		return err
+	cold := d.StateCode != stateBooted
+	var bootCall time.Duration
+	if cold {
+		if err := b.call(ctx, "boot", map[string]any{"udid": udid}, &d); err != nil {
+			return simDevice{}, err
+		}
+		bootCall = time.Since(start)
 	}
 	// The first boot of a new or erased simulator migrates data and can take minutes on a
 	// busy host; later boots take seconds.
@@ -306,13 +397,47 @@ func (b *Backend) bootReady(ctx context.Context, udid string) error {
 	if dl, ok := ctx.Deadline(); ok {
 		timeout = time.Until(dl)
 	}
-	if err := b.call(ctx, "ready", map[string]any{"udid": udid, "timeoutMs": timeout.Milliseconds()}, nil); err != nil {
-		return err
+	rctx, cancel := context.WithTimeout(ctx, timeout+5*time.Second)
+	defer cancel()
+	var r readyResult
+	params := map[string]any{"udid": udid, "timeoutMs": timeout.Milliseconds(), "waitAccessibility": waitAccessibilityOnBoot()}
+	if err := b.call(rctx, "ready", params, &r); err != nil {
+		return simDevice{}, err
 	}
-	b.mu.Lock()
-	delete(b.springboard, udid)
-	b.mu.Unlock()
-	return nil
+	if cold || r.BridgeRestarts > 0 {
+		off := ms(bootCall)
+		at := func(v float64) string {
+			if v < 0 {
+				return "-"
+			}
+			return fmt.Sprintf("%.0f", off+v)
+		}
+		what := "agent-ready"
+		if r.Accessibility == "warming" {
+			what = "interactive (accessibility still warming up)"
+		}
+		log.Printf("ios boot %s (%s): %s in %.0f ms; ms since boot started: boot call returned %.0f, booted %s, boot finished %s, framebuffer %s, HID %s, accessibility %s; bridge restarts %d",
+			r.Device.Name, udid, what, ms(time.Since(start)), off, at(r.BootedMs), at(r.BootFinishedMs), at(r.FramebufferMs), at(r.HIDMs), at(r.AccessibilityMs), r.BridgeRestarts)
+		var tl []string
+		for _, e := range r.Timeline {
+			s := fmt.Sprintf("%.0f %s", off+e.Ms, e.Event)
+			if e.Detail != "" {
+				s += " (" + e.Detail + ")"
+			}
+			tl = append(tl, s)
+		}
+		log.Printf("ios boot %s timeline: %s", udid, strings.Join(tl, ", "))
+	}
+	if r.Device.UDID == "" {
+		return b.describeSim(ctx, udid)
+	}
+	return r.Device, nil
+}
+
+func (b *Backend) describeSim(ctx context.Context, udid string) (simDevice, error) {
+	var d simDevice
+	err := b.call(ctx, "describe", map[string]any{"udid": udid}, &d)
+	return d, err
 }
 
 func (b *Backend) Shutdown(ctx context.Context, id string) error {
@@ -336,7 +461,6 @@ func (b *Backend) shutdown(ctx context.Context, udid string) error {
 		if d.StateCode == stateShutdown {
 			b.mu.Lock()
 			delete(b.apps, udid)
-			delete(b.springboard, udid)
 			b.mu.Unlock()
 			return nil
 		}
@@ -347,55 +471,42 @@ func (b *Backend) shutdown(ctx context.Context, udid string) error {
 	}
 }
 
-// maxBooted is how many agemu simulators may run at once (AGEMU_IOS_MAX_BOOTED, default 2).
-// A booted simulator costs 1-2 GB of disk and memory.
-func maxBooted() int {
+// effectiveMaxBooted is how many agemu simulators may run at once: AGEMU_IOS_MAX_BOOTED if
+// set; otherwise 2, or 1 while macOS reports memory pressure (a booted simulator takes 1-2 GB,
+// and a second one on a swapping Mac slows everything, including the first).
+func effectiveMaxBooted() int {
 	var n int
 	if _, err := fmt.Sscanf(os.Getenv("AGEMU_IOS_MAX_BOOTED"), "%d", &n); err == nil && n > 0 {
 		return n
 	}
+	if memoryPressured() {
+		return 1
+	}
 	return 2
 }
 
-// enforceMaxBooted shuts down the least recently used booted agemu simulators (never keep,
-// never a non-agemu simulator) until at most maxBooted()-reserve of them are booted besides
-// keep. Call it with reserve 1 before booting keep.
-func (b *Backend) enforceMaxBooted(ctx context.Context, keep string, reserve int) error {
+// evictionVictims returns the least recently used booted agemu simulators (never keep, never a
+// non-agemu simulator) to shut down so that keep plus the others fit within
+// effectiveMaxBooted().
+func (b *Backend) evictionVictims(ctx context.Context, keep string) ([]simDevice, error) {
 	ds, err := b.listSims(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var booted []simDevice
-	keepBooted := 0
+	var others []simDevice
 	for _, d := range ds {
-		if managed(d.Name) && (d.StateCode == stateBooted || d.StateCode == stateBooting) {
-			booted = append(booted, d)
-			if d.UDID == keep {
-				keepBooted = 1
-			}
+		if managed(d.Name) && d.UDID != keep && (d.StateCode == stateBooted || d.StateCode == stateBooting) {
+			others = append(others, d)
 		}
 	}
-	limit := maxBooted() - reserve + keepBooted
-	if len(booted) <= limit {
-		return nil
+	allowed := effectiveMaxBooted() - 1
+	if len(others) <= allowed {
+		return nil, nil
 	}
 	b.mu.Lock()
-	sort.Slice(booted, func(i, j int) bool { return b.lastUse[booted[i].UDID].Before(b.lastUse[booted[j].UDID]) })
+	sort.Slice(others, func(i, j int) bool { return b.lastUse[others[i].UDID].Before(b.lastUse[others[j].UDID]) })
 	b.mu.Unlock()
-	count := len(booted)
-	for _, d := range booted {
-		if count <= limit {
-			break
-		}
-		if d.UDID == keep {
-			continue
-		}
-		if err := b.shutdown(ctx, d.UDID); err != nil {
-			return fmt.Errorf("shutting down %s to stay within AGEMU_IOS_MAX_BOOTED=%d: %w", d.Name, limit, err)
-		}
-		count--
-	}
-	return nil
+	return others[:len(others)-allowed], nil
 }
 
 // SetProfile switches to the agemu simulator of the profile's device type (agemu-<profile>),
@@ -409,24 +520,20 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 	if p.DeviceType == "" {
 		return api.Device{}, fmt.Errorf("profile %s has no simulator device type", p.Name)
 	}
-	udid := cur.UDID
+	d := cur
 	if cur.DeviceType != p.DeviceType {
-		d, err := b.findOrCreateForProfile(ctx, p)
-		if err != nil {
+		if d, err = b.findOrCreateForProfile(ctx, p); err != nil {
 			return api.Device{}, err
 		}
-		udid = d.UDID
 	}
 	b.mu.Lock()
-	b.lastUse[udid] = time.Now()
+	b.lastUse[d.UDID] = time.Now()
 	b.mu.Unlock()
-	if err := b.enforceMaxBooted(ctx, udid, 1); err != nil {
+	ready, err := b.bootMakingRoom(ctx, d.UDID, d.StateCode == stateBooted)
+	if err != nil {
 		return api.Device{}, err
 	}
-	if err := b.bootReady(ctx, udid); err != nil {
-		return api.Device{}, err
-	}
-	return b.describe(ctx, udid)
+	return ready.api(), nil
 }
 
 func (b *Backend) findOrCreateForProfile(ctx context.Context, p api.Profile) (simDevice, error) {
@@ -471,15 +578,36 @@ func (b *Backend) UITree(ctx context.Context, id string) (*api.UITree, error) {
 	if err != nil {
 		return nil, err
 	}
-	var t axTree
-	if err := b.call(ctx, "ui", map[string]any{"udid": d.UDID}, &t); err != nil {
+	t, err := b.readTree(ctx, d.UDID)
+	if err != nil {
 		return nil, err
 	}
-	return convertTree(&t, b.appForPid(ctx, d.UDID, t.Pid)), nil
+	app := t.BundleID
+	if app == "" {
+		app = b.appForPid(ctx, d.UDID, t.Pid)
+	}
+	return convertTree(t, app), nil
 }
 
-// appForPid names the frontmost app. Pids of apps launched through agemu are known; others
-// are looked up once with `launchctl list` inside the simulator.
+// readTree reads the frontmost app's accessibility tree within the caller's deadline (20 s
+// when there is none).
+func (b *Backend) readTree(ctx context.Context, udid string) (*axTree, error) {
+	budget := 20 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		budget = time.Until(dl) - 200*time.Millisecond
+		if budget < 100*time.Millisecond {
+			budget = 100 * time.Millisecond
+		}
+	}
+	var t axTree
+	if err := b.call(ctx, "ui", map[string]any{"udid": udid, "timeoutMs": budget.Milliseconds()}, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// appForPid names the frontmost app when accessibility did not. Pids of apps launched through
+// agemu are known; others are looked up once with `launchctl list` inside the simulator.
 func (b *Backend) appForPid(ctx context.Context, udid string, pid int) string {
 	b.mu.Lock()
 	if app, ok := b.apps[udid][pid]; ok {
@@ -566,9 +694,11 @@ func (b *Backend) Key(ctx context.Context, id, key string) error {
 		return err
 	}
 	if key == "back" {
-		var t axTree
-		if err := b.call(ctx, "ui", map[string]any{"udid": d.UDID}, &t); err == nil {
-			tree := convertTree(&t, "")
+		tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		t, err := b.readTree(tctx, d.UDID)
+		cancel()
+		if err == nil {
+			tree := convertTree(t, "")
 			var back *api.Element
 			tree.Walk(func(e *api.Element) {
 				if back == nil && e.ID == "BackButton" && e.Enabled && e.Frame.W > 0 && e.Frame.H > 0 {

@@ -328,8 +328,18 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		timeout = 10 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for {
-		t, err := b.UITree(ctx, id)
+		// Each read is bounded by the wait's own deadline (at least 1 s), so a slow device
+		// cannot stretch a wait far past its timeout.
+		rdl := deadline
+		if floor := time.Now().Add(time.Second); rdl.Before(floor) {
+			rdl = floor
+		}
+		rctx, cancel := context.WithDeadline(ctx, rdl)
+		t, err := b.UITree(rctx, id)
+		cancel()
+		lastErr = err
 		if err == nil {
 			m := Find(t, *p.Selector)
 			if p.Gone && len(m) == 0 {
@@ -343,6 +353,9 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 			state := "appear"
 			if p.Gone {
 				state = "disappear"
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("timeout after %v waiting for %s to %s (last UI read failed: %v)", timeout, describe(*p.Selector), state, lastErr)
 			}
 			return nil, fmt.Errorf("timeout after %v waiting for %s to %s", timeout, describe(*p.Selector), state)
 		}
