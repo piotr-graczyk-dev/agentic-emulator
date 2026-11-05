@@ -556,12 +556,30 @@ func (b *Backend) TypeText(ctx context.Context, id, text string) error {
 	return b.call(ctx, "key", map[string]any{"udid": d.UDID, "key": "paste"}, nil)
 }
 
-// Key presses a named key. "back" is a left-edge swipe (the navigation pop gesture), since
-// iOS has no back key.
+// Key presses a named key. iOS has no back key: "back" taps the navigation bar's back
+// button (UIKit gives it the identifier "BackButton") when the screen has one, and otherwise
+// swipes from the left edge (the interactive pop gesture). The tap is the robust path: a
+// gesture's timing can stretch on a loaded host and stop being recognized as a swipe.
 func (b *Backend) Key(ctx context.Context, id, key string) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
+	}
+	if key == "back" {
+		var t axTree
+		if err := b.call(ctx, "ui", map[string]any{"udid": d.UDID}, &t); err == nil {
+			tree := convertTree(&t, "")
+			var back *api.Element
+			tree.Walk(func(e *api.Element) {
+				if back == nil && e.ID == "BackButton" && e.Enabled && e.Frame.W > 0 && e.Frame.H > 0 {
+					back = e
+				}
+			})
+			if back != nil {
+				x, y := back.Frame.Center()
+				return b.call(ctx, "tap", map[string]any{"udid": d.UDID, "x": x, "y": y}, nil)
+			}
+		}
 	}
 	return b.call(ctx, "key", map[string]any{"udid": d.UDID, "key": key}, nil)
 }

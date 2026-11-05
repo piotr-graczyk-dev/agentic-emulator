@@ -194,8 +194,8 @@ func pressKey(_ d: AGDevice, _ name: String) throws {
         // iOS has no back key: an edge swipe from the left edge triggers the interactive pop
         // gesture of navigation controllers, like a user's thumb.
         let px = d.screenPixels
-        try swipe(d, x1: 0, y1: Double(px.height) * 0.5, x2: Double(px.width) * 0.75, y2: Double(px.height) * 0.5,
-                  durationMs: 200, edge: .left)
+        try swipe(d, x1: 0, y1: Double(px.height) * 0.5, x2: Double(px.width) * 0.8, y2: Double(px.height) * 0.5,
+                  durationMs: 350, edge: .left)
         return
     default:
         guard let u = usages[name] else {
@@ -291,12 +291,15 @@ func readTree(_ d: AGDevice, maxDepth: Int) throws -> [String: Any] {
 // is restarted; in one case it stayed that way for 10 minutes. The same happens when
 // SpringBoard is killed and relaunched while the bridge runs. Restarting the bridge fixes it.
 // agemu restarts it when accessibility still fails although SpringBoard has been running for
-// 3 s, at most every 20 s, and logs it.
+// 3 s, once per SpringBoard instance, and logs it.
 let bridgeLock = NSLock()
 var axFailingSince: [String: Date] = [:]
 var bridgeRestartedAt: [String: Date] = [:]
 var springboardSeen: [String: (pid: Int, at: Date)] = [:]
 var springboardCheckedAt: [String: Date] = [:]
+// One restart per SpringBoard instance: during a first boot (data migration) accessibility can
+// stay unavailable for minutes and repeated restarts do not help.
+var bridgeRestartedForSpringBoard: [String: Int] = [:]
 
 func noteAXResult(_ d: AGDevice, ok: Bool) {
     bridgeLock.lock()
@@ -333,12 +336,14 @@ func repairBridgeIfStuck(_ d: AGDevice) -> Bool {
         springboardSeen[d.udid] = (sbPid, Date())
     }
     let upFor = Date().timeIntervalSince(springboardSeen[d.udid]!.at)
+    let alreadyRestarted = bridgeRestartedForSpringBoard[d.udid] == sbPid
     bridgeLock.unlock()
-    guard upFor >= 3 else { return false }
+    guard upFor >= 3, !alreadyRestarted else { return false }
     log("\(d.udid): no frontmost app from accessibility for \(Int(now.timeIntervalSince(since))) s while SpringBoard (pid \(sbPid)) runs; restarting CoreSimulatorBridge")
     _ = try? d.spawnCapture("bin/launchctl", arguments: ["kickstart", "-k", "system/com.apple.CoreSimulator.bridge"], timeout: 15)
     bridgeLock.lock()
     bridgeRestartedAt[d.udid] = Date()
+    bridgeRestartedForSpringBoard[d.udid] = sbPid
     axFailingSince[d.udid] = Date()
     bridgeLock.unlock()
     return true

@@ -24,7 +24,7 @@ agemu CLI / MCP ──unix socket──► agemu daemon (Go, internal/ios)
 | screenshot | `simctl io screenshot`: new process, connects to the device, renders, encodes | The helper keeps the main display's framebuffer **IOSurface** (and its change callbacks) for the life of the process. A screenshot copies the surface (~2 ms) and encodes it: PNG with agemu's parallel encoder (`AGPNG.c`: the image is cut into 12 bands that are filtered and deflated on separate cores at zlib level 1, then joined into one valid zlib stream, as pigz does), JPEG with ImageIO. |
 | tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. |
 | type | Maestro `inputText` | HID keyboard events (US layout, shift handled). Text the US keyboard cannot produce (accents, emoji, other scripts) is put on the simulator pasteboard (`simctl pbcopy`) and pasted with Cmd-V. |
-| key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` is a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. |
+| key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every attribute request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. The helper reads only the attributes agemu maps (role, subrole, label, identifier, value, placeholder, title, frame, enabled, selected, focused, children). |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. |
 | boot | `simctl boot` + `simctl bootstatus -b` | `-[SimDevice bootWithOptions:]` (persisted, headless), then agemu waits for **agent-ready**: booted, SpringBoard answers accessibility, the framebuffer is readable, the HID client is connected. A device that is already booted is ready in milliseconds, and agemu keeps devices booted (see below). |
@@ -73,10 +73,12 @@ Inside the simulator, `CoreSimulatorBridge` answers the accessibility requests. 
 heavily loaded host SpringBoard was once SIGKILLed during a boot (presumably by the boot
 watchdog) and relaunched; the bridge kept a handle to the dead SpringBoard and from then on
 answered every request with "no frontmost application", for any client, until it was restarted
-(observed for 10 minutes). When accessibility has returned no frontmost app for 15 s while
-SpringBoard is running, the helper restarts the bridge
-(`launchctl kickstart -k system/com.apple.CoreSimulator.bridge` inside that simulator, at most
-every 30 s) and logs it to the daemon log.
+(observed for 10 minutes). After a cold boot this happened on every agemu boot measured. When
+accessibility still returns no frontmost app although SpringBoard has been running for 3 s, the
+helper restarts the bridge (`launchctl kickstart -k system/com.apple.CoreSimulator.bridge`
+inside that simulator), once per SpringBoard instance, and logs it to the daemon log. During a
+first boot (data migration) accessibility can stay unavailable for minutes regardless; agemu
+then simply waits (up to 10 minutes).
 
 ## Fast boot and reset
 
