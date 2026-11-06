@@ -263,12 +263,12 @@ public final class Agent {
                 sb.append("true");
                 return;
             case "text": {
-                tFocus = tSet = 0;
+                tFind = tFocus = tSet = 0;
                 long t0 = SystemClock.uptimeMillis();
                 String mode = typeText(req.getString("text"), req.optBoolean("keys", false));
                 sb.append("{\"mode\":"); str(sb, mode);
                 sb.append(",\"ms\":").append(SystemClock.uptimeMillis() - t0);
-                sb.append(",\"focusMs\":").append(tFocus).append(",\"setMs\":").append(tSet).append('}');
+                sb.append(",\"findMs\":").append(tFind).append(",\"focusMs\":").append(tFocus).append(",\"setMs\":").append(tSet).append('}');
                 return;
             }
             case "key":
@@ -700,20 +700,64 @@ public final class Agent {
         }
     }
 
-    static long tFocus, tSet; // phase timings of the last setText (reported by "text")
+    static long tFind, tFocus, tSet; // phase timings of the last setText (reported by "text")
+
+    static Method aicGetInstance, aicFind;
+    static Field fConn, fWin, fSrc;
+
+    /**
+     * Re-reads a node from the app, bypassing the cache and without prefetching its relatives:
+     * AccessibilityNodeInfo.refresh() asks the app to prefetch siblings and descendants on its
+     * UI thread, which costs tens of milliseconds on a big form. Falls back to refresh().
+     */
+    static AccessibilityNodeInfo fresh(AccessibilityNodeInfo n) {
+        try {
+            if (aicFind == null) {
+                Class<?> c = Class.forName("android.view.accessibility.AccessibilityInteractionClient");
+                aicGetInstance = c.getMethod("getInstance");
+                aicFind = c.getMethod("findAccessibilityNodeInfoByAccessibilityId", int.class, int.class, long.class, boolean.class, int.class, Bundle.class);
+                fConn = AccessibilityNodeInfo.class.getDeclaredField("mConnectionId");
+                fWin = AccessibilityNodeInfo.class.getDeclaredField("mWindowId");
+                fSrc = AccessibilityNodeInfo.class.getDeclaredField("mSourceNodeId");
+                fConn.setAccessible(true);
+                fWin.setAccessible(true);
+                fSrc.setAccessible(true);
+            }
+            Object client = aicGetInstance.invoke(null);
+            AccessibilityNodeInfo r = (AccessibilityNodeInfo) aicFind.invoke(client, fConn.getInt(n), fWin.getInt(n), fSrc.getLong(n), true, 0, null);
+            if (r != null) return r;
+        } catch (Throwable ignored) {
+        }
+        n.refresh(); // the caller treats the same object as "not re-read" where that matters
+        return n;
+    }
 
     /** Inserts text at the cursor of the focused editable node. False: not possible (use keys). */
+    static AccessibilityNodeInfo lastEdit; // node of the last setText
+
     static boolean setText(String text, long focusWaitMs) {
         long t0 = SystemClock.uptimeMillis();
-        AccessibilityNodeInfo f = focusedEditable(focusWaitMs);
-        if (f == null) {
-            tFocus += SystemClock.uptimeMillis() - t0;
-            return false;
+        // Typing usually continues in the field typed into last: re-read just that node (one
+        // round trip to the app, no prefetching) and keep it if it still has input focus.
+        // findFocus misses the cache after every text change and costs more.
+        AccessibilityNodeInfo f = null;
+        if (lastEdit != null) {
+            AccessibilityNodeInfo r = fresh(lastEdit);
+            if (r != lastEdit && r.isFocused() && r.isEditable()) f = r;
         }
-        // The node may come from the accessibility cache, which the app updates asynchronously
-        // after each change: read the current text and cursor from the app, or back-to-back
-        // calls would insert at a stale position.
-        f.refresh();
+        if (f == null) {
+            f = focusedEditable(focusWaitMs);
+            if (f == null) {
+                tFocus += SystemClock.uptimeMillis() - t0;
+                return false;
+            }
+            tFind += SystemClock.uptimeMillis() - t0;
+            // The node may come from the accessibility cache, which the app updates
+            // asynchronously after each change: read the current text and cursor from the app,
+            // or back-to-back calls would insert at a stale position.
+            f = fresh(f);
+        }
+        lastEdit = f;
         tFocus += SystemClock.uptimeMillis() - t0;
         String cur = f.isShowingHintText() ? "" : cs(f.getText());
         // A password field exposes masked text; it can only be set when it is empty.

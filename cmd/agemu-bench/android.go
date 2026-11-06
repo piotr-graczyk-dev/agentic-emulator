@@ -451,7 +451,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			// Warm start: Settings is running in the background (home pressed before each run).
-			Name: "launch app (warm, in background)", N: 10,
+			Name: "launch app (warm start)", N: 10,
 			Setup: func() error {
 				return adb("shell", "am", "start", "-W", "--activity-clear-task", "-n", settingsComp)
 			},
