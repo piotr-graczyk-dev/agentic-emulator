@@ -360,8 +360,11 @@ const (
 )
 
 // point resolves tap coordinates from explicit x/y or a selector. atRest reports that the
-// element was confirmed at rest (by a still screen or by two equal reads of its frame), so the
-// tap needs no further wait for a still screen.
+// screen kept changing and the element was confirmed at rest by two equal reads of its frame:
+// the tap then goes out at once, since another wait for a still screen would only time out. On
+// a still screen the tap keeps the backend's own settle. It returns at once if the screen is
+// still still, and it holds the tap if a transition started or resumed during the tree read
+// (UIKit ignores a tap during a transition).
 func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Params) (x, y int, el *api.Element, atRest bool, err error) {
 	if p.X != nil && p.Y != nil {
 		return *p.X, *p.Y, nil, false, nil
@@ -407,7 +410,6 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 			el = again
 		}
 	}
-	atRest = settler && still
 	if settler && !still {
 		// Something on screen keeps changing (a spinner, a blinking cursor): waiting for a
 		// still screen would only time out. The element is at rest once its frame repeats.

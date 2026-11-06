@@ -204,7 +204,8 @@ func TestTapBySelectorOnAStillScreen(t *testing.T) {
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"settle", "ui", "tapnow 25,25"}
+	// The tap keeps the backend's settle: a transition can start or resume during the tree read.
+	want := []string{"settle", "ui", "tap 25,25"}
 	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
 		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}
@@ -242,7 +243,7 @@ func TestTapBySelectorWaitsForTheElementToBeEnabled(t *testing.T) {
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"settle", "ui", "ui", "ui", "tapnow 25,25"}
+	want := []string{"settle", "ui", "ui", "ui", "tap 25,25"}
 	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
 		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}

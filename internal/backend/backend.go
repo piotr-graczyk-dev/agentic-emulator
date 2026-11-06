@@ -60,8 +60,10 @@ type Launcher interface {
 // mid-transition, without waiting out animations that never stop (a blinking cursor, a
 // spinner, a countdown):
 //   - Settle waits briefly for a still screen and reports whether it got one.
-//   - When it did not, the daemon reads the tree again until the element's frame repeats.
-//   - TapNow then taps without the backend's own wait for a still screen.
+//   - When it did, the tap is the backend's Tap, whose own settle catches a transition that
+//     started during the tree read.
+//   - When it did not, the daemon reads the tree again until the element's frame repeats, and
+//     TapNow taps without the backend's own wait for a still screen (it would only time out).
 type Settler interface {
 	Settle(ctx context.Context, id string) (bool, error)
 	TapNow(ctx context.Context, id string, x, y int) error
