@@ -106,7 +106,8 @@ agemu boot android:agemu-pixel                         # warm snapshot: seconds;
 agemu launch com.android.settings
 agemu ui                                               # compact outline: [ref] role "text" id=... @(x,y wxh)
 agemu tap --text "Network & internet"                  # or: tap 393 614, tap --id ..., --contains ...
-agemu wait --text Internet                             # polls the UI tree (ms per poll)
+agemu wait --text Internet                             # re-reads the UI tree as the screen changes
+agemu tap --text "Network & internet" --wait-text Internet --ui   # act, wait and observe in one call
 agemu type "hello"                                     # into the focused field
 agemu key back                                         # home, back, enter, delete, tab, escape, lock, ...
 agemu screenshot -o shot.png                           # pixels = the profile's resolution
@@ -116,6 +117,10 @@ agemu profiles                                         # all real-device profile
 ```
 
 With exactly one booted device, `-d <device>` can be left out.
+
+Actions (`tap`, `swipe`, `type`, `key`, `launch`) take `--wait-text/--wait-id/--wait-contains/--wait-role`
+(plus `--wait-gone`, `--wait-timeout-ms`) to wait for their effect in the same call, and `--ui` to
+also return the screen they end on. One call per agent step instead of two or three.
 
 ### MCP
 
