@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +28,9 @@ import (
 )
 
 func init() { suites["android"] = androidSuite }
+
+// stepBounds finds the bounds of Settings' "Network & internet" row in a uiautomator dump.
+var stepBounds = regexp.MustCompile(`text="Network &amp; internet"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"`)
 
 func androidSDK() string {
 	for _, k := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
@@ -123,6 +127,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 	native := func() error { return call("set_profile", map[string]any{"profile": "pixel-9"}) }
 
 	uiCalls := 0
+	stepCalls := 0
 	// plainField opens an empty new-contact form (Contacts is force-stopped first, so no text
 	// from an earlier run is left and the cursor starts at the end) and focuses "First name".
 	plainField := func() error {
@@ -352,6 +357,105 @@ func androidSuite(cfg Config) ([]Op, error) {
 			AgemDesc: "agemu ui --json",
 			Agemu:    func() error { return ag("ui", "--json") },
 			Daemon:   func() error { return call("ui", map[string]any{}) },
+		},
+		{
+			// One complete agent step, as an agent loop does it: find "Network & internet" in the
+			// UI tree, tap its centre, wait until the next screen shows "Internet", take a
+			// screenshot. The baseline does the same with the standard tools (uiautomator dump to
+			// find the element and to poll for the next screen, input tap, screencap). Before every
+			// iteration (untimed) Settings is restarted on its home screen. uiautomator and the
+			// agemu agent cannot hold UiAutomation at once, so Setup stops the agent and the
+			// baseline runs first; the agent is restarted (untimed) before the agemu iterations.
+			Name: "agent step: find + tap + wait for next screen + screenshot", N: 10,
+			Setup: func() error {
+				stepCalls = 0
+				if err := native(); err != nil {
+					return err
+				}
+				return adb("shell", "for p in $(pidof agemu-agent); do kill $p; done")
+			},
+			Before: func() error {
+				stepCalls++
+				if stepCalls <= 10 {
+					return adb("shell", "am", "start", "-S", "-W", "-n", settingsComp)
+				}
+				if stepCalls == 11 {
+					if err := ag("ui"); err != nil {
+						return err
+					}
+				}
+				return settingsHome()
+			},
+			BaseDesc: "uiautomator dump + input tap + uiautomator dump until next screen + screencap",
+			Baseline: func() error {
+				dump := func() (string, error) {
+					if err := adb("shell", "uiautomator", "dump", "/sdcard/agemu-step.xml"); err != nil {
+						return "", err
+					}
+					return adbOut("exec-out", "cat", "/sdcard/agemu-step.xml")
+				}
+				deadline := time.Now().Add(20 * time.Second)
+				var x, y int
+				for {
+					xml, err := dump()
+					if err != nil {
+						return err
+					}
+					if m := stepBounds.FindStringSubmatch(xml); m != nil {
+						x1, _ := strconv.Atoi(m[1])
+						y1, _ := strconv.Atoi(m[2])
+						x2, _ := strconv.Atoi(m[3])
+						y2, _ := strconv.Atoi(m[4])
+						x, y = (x1+x2)/2, (y1+y2)/2
+						break
+					}
+					if time.Now().After(deadline) {
+						return fmt.Errorf("Network & internet not found")
+					}
+				}
+				if err := adb("shell", "input", "tap", strconv.Itoa(x), strconv.Itoa(y)); err != nil {
+					return err
+				}
+				for {
+					xml, err := dump()
+					if err != nil {
+						return err
+					}
+					if strings.Contains(xml, `text="Internet"`) {
+						break
+					}
+					if time.Now().After(deadline) {
+						return fmt.Errorf("next screen did not appear")
+					}
+				}
+				f, err := os.Create(shot(&si))
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				c := exec.Command(adbBin, "-s", serial(), "exec-out", "screencap", "-p")
+				c.Stdout = f
+				return c.Run()
+			},
+			AgemDesc: "agemu tap --text + agemu wait --text + agemu screenshot",
+			Agemu: func() error {
+				if err := ag("tap", "--text", "Network & internet"); err != nil {
+					return err
+				}
+				if err := ag("wait", "--text", "Internet", "--timeout-ms", "20000"); err != nil {
+					return err
+				}
+				return ag("screenshot", "-o", shot(&si))
+			},
+			Daemon: func() error {
+				if err := call("tap", map[string]any{"selector": map[string]any{"text": "Network & internet"}}); err != nil {
+					return err
+				}
+				if err := call("wait", map[string]any{"selector": map[string]any{"text": "Internet"}, "timeoutMs": 20000}); err != nil {
+					return err
+				}
+				return call("screenshot", map[string]any{"path": shot(&si)})
+			},
 		},
 		{
 			// An empty spot of the home screen: taps there change nothing, so every iteration
