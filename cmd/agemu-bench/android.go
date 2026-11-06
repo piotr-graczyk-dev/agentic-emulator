@@ -123,7 +123,12 @@ func androidSuite(cfg Config) ([]Op, error) {
 	native := func() error { return call("set_profile", map[string]any{"profile": "pixel-9"}) }
 
 	uiCalls := 0
+	// plainField opens an empty new-contact form (Contacts is force-stopped first, so no text
+	// from an earlier run is left and the cursor starts at the end) and focuses "First name".
 	plainField := func() error {
+		if err := call("terminate", map[string]any{"app": "com.google.android.contacts"}); err != nil {
+			return err
+		}
 		if err := adb("shell", "am", "start", "-W", "-a", "android.intent.action.INSERT", "-t", "vnd.android.cursor.dir/contact"); err != nil {
 			return err
 		}

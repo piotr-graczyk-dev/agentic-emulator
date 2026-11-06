@@ -263,11 +263,12 @@ public final class Agent {
                 sb.append("true");
                 return;
             case "text": {
-                tFind = tFocus = tSet = 0;
+                tFind = tFocus = tSet = tSel = 0;
                 long t0 = SystemClock.uptimeMillis();
                 String mode = typeText(req.getString("text"), req.optBoolean("keys", false));
                 sb.append("{\"mode\":"); str(sb, mode);
                 sb.append(",\"ms\":").append(SystemClock.uptimeMillis() - t0);
+                sb.append(",\"selMs\":").append(tSel).append(",\"sel\":"); str(sb, lastSel);
                 sb.append(",\"findMs\":").append(tFind).append(",\"focusMs\":").append(tFocus).append(",\"setMs\":").append(tSet).append('}');
                 return;
             }
@@ -700,7 +701,8 @@ public final class Agent {
         }
     }
 
-    static long tFind, tFocus, tSet; // phase timings of the last setText (reported by "text")
+    static long tFind, tFocus, tSet, tSel; // phase timings of the last setText (reported by "text")
+    static String lastSel = "";
 
     static Method aicGetInstance, aicFind;
     static Field fConn, fWin, fSrc;
@@ -773,11 +775,14 @@ public final class Agent {
         tSet += SystemClock.uptimeMillis() - t1;
         if (!done) return false;
         int caret = a + text.length();
+        lastSel = a + "," + b + "/" + cur.length();
         if (caret != next.length()) { // SET_TEXT leaves the cursor at the end; put it after the insert
+            long t2 = SystemClock.uptimeMillis();
             Bundle sel = new Bundle();
             sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, caret);
             sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, caret);
             f.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel);
+            tSel += SystemClock.uptimeMillis() - t2;
         }
         return true;
     }
