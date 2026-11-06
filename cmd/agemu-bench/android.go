@@ -407,6 +407,10 @@ func androidSuite(cfg Config) ([]Op, error) {
 				if err := settingsHome(); err != nil {
 					return err
 				}
+				// launch returns once Settings has drawn; its search bar may come a moment later.
+				if err := call("wait", map[string]any{"selector": map[string]any{"text": "Search Settings"}, "timeoutMs": 10000}); err != nil {
+					return err
+				}
 				if err := call("tap", map[string]any{"selector": map[string]any{"text": "Search Settings"}}); err != nil {
 					return err
 				}
