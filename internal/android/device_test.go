@@ -530,3 +530,96 @@ func TestDeviceTypePhases(t *testing.T) {
 		t.Logf("type %d: %v round trip, agent %v (err %v)", i, time.Since(t0).Round(time.Millisecond), res, err)
 	}
 }
+
+// TestDevicePauseResume pauses the VM for AGEMU_TEST_PAUSE_S seconds, resumes it, and watches
+// the guest's uptime for a reboot.
+func TestDevicePauseResume(t *testing.T) {
+	avd := env("AGEMU_TEST_AVD", "agemu-pixel")
+	r, ok := findRunning(avd)
+	if !ok {
+		t.Skipf("%s not running", avd)
+	}
+	e, err := dialEmu(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ctx := context.Background()
+	uptime := func() string {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		out, err := adbShellOK(c, r.serial(), "cat /proc/uptime")
+		if err != nil {
+			return "err: " + err.Error()
+		}
+		return strings.Fields(out)[0]
+	}
+	pause := time.Duration(envInt("AGEMU_TEST_PAUSE_S", 30)) * time.Second
+	t.Logf("before pause: uptime %s", uptime())
+	if err := e.setVM(ctx, emupb.VmRunState_PAUSED); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(pause)
+	if err := e.setVM(ctx, emupb.VmRunState_RUNNING); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now()
+	for i := 0; i < envInt("AGEMU_TEST_WATCH_S", 60)/5; i++ {
+		time.Sleep(5 * time.Second)
+		t.Logf("+%v after resume: uptime %s", time.Since(t0).Round(time.Second), uptime())
+	}
+}
+
+// TestDeviceSaveThenRender saves a throwaway snapshot (deleted afterwards), then drives Settings
+// search for a while, watching for a guest reboot.
+func TestDeviceSaveThenRender(t *testing.T) {
+	avd := env("AGEMU_TEST_AVD", "agemu-pixel")
+	if _, ok := findRunning(avd); !ok {
+		t.Skipf("%s not running", avd)
+	}
+	ctx := context.Background()
+	b := New()
+	defer b.Close()
+	id := "android:" + avd
+	d, _ := b.devFor(id)
+	e, a, err := d.conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uptime := func() float64 {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		out, err := adbShellOK(c, d.run.serial(), "cat /proc/uptime")
+		if err != nil {
+			return -1
+		}
+		v, _ := strconv.ParseFloat(strings.Fields(out)[0], 64)
+		return v
+	}
+	for round := 0; round < envInt("AGEMU_TEST_N", 2); round++ {
+		a.Close()
+		if a.rd != nil {
+			a.rd.drop(ctx)
+		}
+		t0 := time.Now()
+		if err := e.saveSnapshot(ctx, "agemu-probe"); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("round %d: saved in %v, uptime %.1f", round, time.Since(t0).Round(time.Millisecond), uptime())
+		start := time.Now()
+		for time.Since(start) < 60*time.Second {
+			_ = b.Terminate(ctx, id, "com.android.settings")
+			_ = b.Launch(ctx, id, "com.android.settings")
+			_, _ = b.UITree(ctx, id)
+			_ = b.Swipe(ctx, id, 540, 1800, 540, 900, 150)
+			_ = b.Swipe(ctx, id, 540, 900, 540, 1800, 150)
+			u := uptime()
+			t.Logf("  +%v uptime %.1f", time.Since(start).Round(time.Second), u)
+			if u >= 0 && u < 60 {
+				t.Errorf("guest rebooted (uptime %.1f)", u)
+				break
+			}
+		}
+	}
+	_ = e.deleteSnapshot(ctx, "agemu-probe")
+}
