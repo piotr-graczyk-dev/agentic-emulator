@@ -88,8 +88,8 @@ per-step times and an earlier series: [docs/IOS.md](docs/IOS.md#a-real-app-again
 
 | | agemu (action and wait in one call) | Argent 0.32 | agent-device 0.21 |
 |---|---|---|---|
-| whole flow | **29.7 s** | 38.8 s (1.31× slower) | 65.5 s (2.20× slower) |
-| after the app is up (14-17 s launch excluded) | **15.8 s** | 21.1 s (1.34×) | 47.6 s (3.02×) |
+| whole flow | **29.7 s** | 38.8 s (1.31× slower) | 65.5 s (2.21× slower) |
+| after the app is up (14-17 s launch excluded) | **15.8 s** | 21.1 s (1.34×) | 47.6 s (3.01×) |
 | tool calls (agent turns) | **26** | 51 | 36 |
 | one UI tree / one screenshot | 24-122 ms / 18-26 ms | 188-513 ms / 159-212 ms | 304-455 ms / 484-700 ms |
 

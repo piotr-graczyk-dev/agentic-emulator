@@ -407,11 +407,11 @@ the element of the screen it leads to is there, so all tools do the same work.
 | min-max | 26.2-35.4 s | 28.7-60.2 s | 34.1-41.2 s | 60.0-69.2 s |
 | after launch (launch step excluded) | **15.8 s** | 16.9 s | 21.1 s | 47.6 s |
 | tool calls per run | **26** | 39 | 51 | 36 |
-| agemu compound is faster by (whole / after launch) | - | 1.10× / 1.07× | **1.31× / 1.34×** | **2.20× / 3.02×** |
+| agemu compound is faster by (whole / after launch) | - | 1.10× / 1.07× | **1.31× / 1.34×** | **2.21× / 3.01×** |
 
 An earlier series of the same kind, at load 2.6-8.5 and one commit before the final code,
 gave 28.2 s (compound), 27.9 s (agemu), 32.2 s (Argent) and 59.1 s (agent-device): compound
-was 1.14× faster than Argent and 2.10× faster than agent-device (1.26× and 3.11× after launch).
+was 1.14× faster than Argent and 2.10× faster than agent-device (1.27× and 3.11× after launch).
 
 **Time per step.** Medians; the observation rows are the tools' own cost.
 
