@@ -379,7 +379,7 @@ func iosSuite(cfg Config) ([]Op, error) {
 			// A profile switch to another device type is a cold boot of that type's simulator
 			// (iOS has no runtime resolution change). Starts from this device booted and the
 			// other one shut down.
-			Name: "profile switch (to iphone-se-3, cold)", N: 2,
+			Name: "profile switch to iphone-se-3 (cold)", N: 2,
 			Before: func() error {
 				se, err := b.otherProfile()
 				if err != nil {

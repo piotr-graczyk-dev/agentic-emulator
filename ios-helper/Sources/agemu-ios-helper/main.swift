@@ -485,31 +485,50 @@ let firstBridgeRestartAfter: Double = {
 
 /// Waits until the simulator's accessibility service answers with a frontmost app, restarting
 /// CoreSimulatorBridge if it keeps saying "no frontmost application" (first after
-/// firstBridgeRestartAfter, then every 10 s, at most 3 times). One per device at a time; UI
-/// reads wait for a running warm-up instead of failing.
+/// firstBridgeRestartAfter, then every 10 s, at most 3 times). One per device and boot: it
+/// stops when the device shuts down or boots again. UI reads wait for a running warm-up
+/// instead of failing.
 final class AXWarmup {
     private static let lock = NSLock()
     private static var running: [String: AXWarmup] = [:]
 
     let udid: String
+    let boot: Date?
     private let done = DispatchSemaphore(value: 0)
     private let stateLock = NSLock()
     private var finished = false
+    private var cancelled = false
     private(set) var pid = 0
     private(set) var label = ""
     private(set) var restarts = 0
     private(set) var lastError = ""
 
-    private init(udid: String) { self.udid = udid }
+    private init(udid: String, boot: Date?) {
+        self.udid = udid
+        self.boot = boot
+    }
 
-    /// Starts a warm-up for d unless one is running; returns the running one.
+    private var isCancelled: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cancelled
+    }
+
+    /// Starts a warm-up for d's current boot unless one is running; returns the running one.
+    /// A warm-up left over from an earlier boot is stopped.
     static func start(_ d: AGDevice, trace: ReadyTrace, full: Bool, deadline: Date) -> AXWarmup {
+        let boot = d.lastBootedAt
         lock.lock()
         if let w = running[d.udid] {
-            lock.unlock()
-            return w
+            if w.boot == boot {
+                lock.unlock()
+                return w
+            }
+            w.stateLock.lock()
+            w.cancelled = true
+            w.stateLock.unlock()
         }
-        let w = AXWarmup(udid: d.udid)
+        let w = AXWarmup(udid: d.udid, boot: boot)
         running[d.udid] = w
         lock.unlock()
         Thread.detachNewThread { w.run(d, trace: trace, full: full, deadline: deadline) }
@@ -544,7 +563,7 @@ final class AXWarmup {
     private func run(_ d: AGDevice, trace: ReadyTrace, full: Bool, deadline: Date) {
         let started = Date()
         var lastRestartAt: Date?
-        while Date() < deadline {
+        while Date() < deadline, !isCancelled, d.state == 3, d.lastBootedAt == boot {
             do {
                 let front = try d.accessibilityFrontmost(withTimeout: max(0.05, min(1.5, deadline.timeIntervalSinceNow)), full: full)
                 let p = front["pid"] as? Int ?? 0
@@ -562,7 +581,7 @@ final class AXWarmup {
                 if msg != lastError { trace.mark("accessibilityFails", String(msg.prefix(120))) }
                 lastError = msg
             }
-            if restarts < 3, lastError.contains("no frontmost application") {
+            if restarts < 3, !isCancelled, lastError.contains("no frontmost application") {
                 let since = lastRestartAt ?? started
                 let wait: Double = restarts == 0 ? firstBridgeRestartAfter : 10
                 if Date().timeIntervalSince(since) >= wait {
@@ -576,14 +595,14 @@ final class AXWarmup {
             }
             sleepMs(100)
         }
-        if pid == 0 {
+        if pid == 0, !isCancelled, d.state == 3, d.lastBootedAt == boot {
             log("\(udid): accessibility did not answer within \(Int(Date().timeIntervalSince(started))) s after boot finished: \(lastError) [timeline: \(trace.summary)]")
         }
         stateLock.lock()
         finished = true
         stateLock.unlock()
         AXWarmup.lock.lock()
-        AXWarmup.running[udid] = nil
+        if AXWarmup.running[udid] === self { AXWarmup.running[udid] = nil }
         AXWarmup.lock.unlock()
         done.signal()
     }
@@ -616,6 +635,12 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
     verifiedLock.lock()
     let verified = boot != nil && verifiedBoots[d.udid] == boot
     verifiedLock.unlock()
+    // Only a boot in progress returns before accessibility answers; on a device that was already
+    // up, the check is one accessibility request.
+    let wasUp = d.state == 3 && ((d.bootStatusInfo?["terminal"] as? Bool) ?? true)
+    let returnEarly = !waitAccessibility && !wasUp
+    let deferFramebuffer = ProcessInfo.processInfo.environment["AGEMU_IOS_CONNECT_AFTER_BOOT"] != "0"
+    var fbStarted = false
 
     while true {
         let state = Int(d.state)
@@ -625,8 +650,12 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
         }
         if state == 3 {
             if bootedAt == nil { bootedAt = Date() }
-            if !connectStarted {
-                connectStarted = true
+            // The framebuffer is connected once boot finished: a framebuffer client makes the
+            // simulator render every boot frame for it, and with it connected during boot,
+            // boot finished up to 2x later on the loaded test host (docs/IOS.md); after boot
+            // the connection takes ~0.1-0.2 s. HID connects at once (no rendering).
+            if !fbStarted, !deferFramebuffer || warmup != nil {
+                fbStarted = true
                 if d.framebufferConnected {
                     trace.mark("framebuffer", "connected")
                 } else {
@@ -643,6 +672,9 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
                         }
                     }
                 }
+            }
+            if !connectStarted {
+                connectStarted = true
                 if d.hidConnected {
                     trace.mark("hid", "connected")
                 } else {
@@ -679,7 +711,7 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
                 warmup = AXWarmup.start(d, trace: trace, full: !verified, deadline: axDeadline)
             }
             let interactive = warmup != nil && trace.has("framebuffer") && trace.has("hid")
-            if interactive, let w = warmup, w.isDone || !waitAccessibility {
+            if interactive, let w = warmup, w.isDone || returnEarly {
                 if w.isDone && w.pid == 0 {
                     lastError = w.lastError
                 } else {
