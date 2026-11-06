@@ -807,37 +807,49 @@ func (b *Backend) paste(ctx context.Context, udid, text string) error {
 	if text == "" {
 		return nil
 	}
-	// Read the focused field while the pasteboard is set (no added latency), so a lost paste
-	// can be told apart from one the field transformed (a formatted phone number, a masked
-	// password, upper-casing): only a field that did not change at all gets a second paste.
+	return pasteVerified(
+		func() error { return simctlStdin(ctx, text, "pbcopy", udid) },
+		func() error { return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil) },
+		func() (string, bool) { return b.focusedFieldValue(ctx, udid) },
+		func() { log.Printf("ios type on %s: the focused field did not change; pasting again", udid) },
+	)
+}
+
+// pasteVerified sets the pasteboard (setPasteboard), pastes (paste) and checks that the
+// focused field changed, using read (ok=false: no literal text field in focus). The field is
+// read before the paste, while the pasteboard is set, so a lost paste can be told apart from
+// one the field transformed (a formatted phone number, upper-casing): only a field that did
+// not change at all gets a second paste. The first read finishes before the paste is sent, or
+// a late read could see the pasted text and trigger a duplicate.
+func pasteVerified(setPasteboard, paste func() error, read func() (string, bool), retrying func()) error {
 	type fieldState struct {
 		value string
 		ok    bool
 	}
 	before := make(chan fieldState, 1)
 	go func() {
-		v, ok := b.focusedFieldValue(ctx, udid)
+		v, ok := read()
 		before <- fieldState{v, ok}
 	}()
-	if err := simctlStdin(ctx, text, "pbcopy", udid); err != nil {
-		return err
-	}
-	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil); err != nil {
+	if err := setPasteboard(); err != nil {
+		<-before
 		return err
 	}
 	pre := <-before
+	if err := paste(); err != nil {
+		return err
+	}
 	if !pre.ok {
-		return nil // no literal text field in focus: nothing to compare
+		return nil
 	}
 	for _, pause := range []time.Duration{0, 150 * time.Millisecond} {
 		time.Sleep(pause)
-		v, ok := b.focusedFieldValue(ctx, udid)
-		if !ok || v != pre.value {
+		if v, ok := read(); !ok || v != pre.value {
 			return nil // the field changed: the paste arrived (possibly transformed)
 		}
 	}
-	log.Printf("ios type on %s: the focused field did not change; pasting again", udid)
-	return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil)
+	retrying()
+	return paste()
 }
 
 // focusedFieldValue returns the text of the focused text field. ok is false when there is no
