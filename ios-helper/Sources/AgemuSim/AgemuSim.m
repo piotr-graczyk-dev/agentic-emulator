@@ -608,6 +608,7 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
 // Display activity (see startDisplayMonitor): when the picture last changed.
 @property (atomic, assign) CFAbsoluteTime lastFrameAt;
 @property (atomic, assign) NSUInteger frameCount;
+@property (atomic, assign) CFAbsoluteTime lastBigChangeAt; // last frame that changed > AGBigChange of the screen
 @property (nonatomic, assign) BOOL monitorStarted;
 @property (nonatomic, strong, readonly) NSUUID *callbackUUID;
 // HID
@@ -996,6 +997,41 @@ static IOSurface *AGAsSurface(id candidate)
   return nil;
 }
 
+// Sparse grid sampled from every new frame to measure how much of the screen changed.
+static const NSUInteger AGGridW = 48, AGGridH = 104;
+static const double AGBigChange = 0.004;
+
+// Samples the grid from surface into cur and returns how many samples differ from prev.
+static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32_t *prev)
+{
+  if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+    return AGGridW * AGGridH;
+  }
+  const uint8_t *base = IOSurfaceGetBaseAddress(surface);
+  size_t bpr = IOSurfaceGetBytesPerRow(surface), w = IOSurfaceGetWidth(surface), h = IOSurfaceGetHeight(surface);
+  size_t bpe = IOSurfaceGetBytesPerElement(surface);
+  NSUInteger changed = 0;
+  if (base && w > 0 && h > 0 && bpe == 4) {
+    for (NSUInteger gy = 0; gy < AGGridH; gy++) {
+      size_t y = (gy * 2 + 1) * h / (AGGridH * 2);
+      const uint32_t *row = (const uint32_t *)(base + y * bpr);
+      for (NSUInteger gx = 0; gx < AGGridW; gx++) {
+        size_t x = (gx * 2 + 1) * w / (AGGridW * 2);
+        uint32_t v = row[x];
+        NSUInteger i = gy * AGGridW + gx;
+        if (v != prev[i]) {
+          changed++;
+        }
+        cur[i] = v;
+      }
+    }
+  } else {
+    changed = AGGridW * AGGridH;
+  }
+  IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+  return changed;
+}
+
 // The display monitor samples the framebuffer surface's seed (bumped on every write, i.e. every
 // new frame) every 8 ms on a background thread and records when the picture last changed, so
 // "has the screen been still for N ms?" is answered without waiting. (The display's frame
@@ -1009,10 +1045,13 @@ static IOSurface *AGAsSurface(id candidate)
     self.monitorStarted = YES;
   }
   self.lastFrameAt = CFAbsoluteTimeGetCurrent();
+  self.lastBigChangeAt = self.lastFrameAt;
   __weak AGDevice *weakSelf = self;
   [NSThread detachNewThreadWithBlock:^{
     IOSurface *last = nil;
     uint32_t lastSeed = 0;
+    uint32_t *prev = calloc(AGGridW * AGGridH, sizeof(uint32_t));
+    uint32_t *cur = calloc(AGGridW * AGGridH, sizeof(uint32_t));
     for (;;) {
       AGDevice *strong = weakSelf;
       if (!strong) {
@@ -1029,10 +1068,22 @@ static IOSurface *AGAsSurface(id candidate)
       }
       uint32_t seed = IOSurfaceGetSeed((__bridge IOSurfaceRef)current);
       if (current != last || seed != lastSeed) {
+        BOOL newSurface = current != last;
         last = current;
         lastSeed = seed;
-        strong.lastFrameAt = CFAbsoluteTimeGetCurrent();
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        strong.lastFrameAt = now;
         strong.frameCount += 1;
+        // A change counts as big when more than AGBigChange of a sparse grid of pixels differ:
+        // scrolling and screen transitions are big; a blinking cursor, a spinner or a ticking
+        // countdown are not, so waiting for "no big change" ends while they keep running.
+        NSUInteger changed = AGSampleGrid((__bridge IOSurfaceRef)current, cur, prev);
+        if (newSurface || changed > (NSUInteger)(AGGridW * AGGridH * AGBigChange)) {
+          strong.lastBigChangeAt = now;
+        }
+        uint32_t *t = prev;
+        prev = cur;
+        cur = t;
       }
       strong = nil;
       usleep(8000);
@@ -1061,6 +1112,25 @@ static IOSurface *AGAsSurface(id candidate)
         @"waitedMs" : @((now - start) * 1000),
         @"frames" : @(self.frameCount - framesBefore),
       };
+    }
+    usleep(4000);
+  }
+}
+
+- (NSDictionary *)waitForStillQuiet:(double)quietMs max:(double)maxMs
+{
+  NSError *err = nil;
+  if (![self framebufferWithError:&err]) {
+    return @{@"settled" : @NO, @"waitedMs" : @0, @"error" : err.localizedDescription ?: @"no framebuffer"};
+  }
+  [self startDisplayMonitor];
+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+  double quiet = quietMs / 1000, limit = maxMs / 1000;
+  for (;;) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL settled = now - self.lastBigChangeAt >= quiet;
+    if (settled || now - start >= limit) {
+      return @{@"settled" : @(settled), @"waitedMs" : @((now - start) * 1000)};
     }
     usleep(4000);
   }

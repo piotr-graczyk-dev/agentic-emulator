@@ -18,7 +18,7 @@ import (
 
 func tree() *api.UITree {
 	return &api.UITree{Width: 100, Height: 200, Root: &api.Element{Ref: "e0", Role: "window", Frame: api.Rect{W: 100, H: 200}, Children: []*api.Element{
-		{Ref: "e1", Role: "button", Text: "Log in", ID: "com.app:id/login", Frame: api.Rect{X: 10, Y: 20, W: 30, H: 10}},
+		{Ref: "e1", Role: "button", Text: "Log in", ID: "com.app:id/login", Frame: api.Rect{X: 10, Y: 20, W: 30, H: 10}, Enabled: true},
 		{Ref: "e2", Role: "text", Label: "Welcome back", Frame: api.Rect{X: 0, Y: 0, W: 100, H: 10}},
 		{Ref: "e3", Role: "button", Text: "Hidden", Frame: api.Rect{}},
 	}}}
@@ -154,37 +154,93 @@ func shortTempDir(t *testing.T) string {
 	return d
 }
 
-// settlingBackend records the order of Settle and UITree calls.
+// settlingBackend records the order of Settle, UITree and tap calls. still is what Settle
+// reports; frames, when set, are the "Log in" button's successive frames (one per tree read).
 type settlingBackend struct {
 	fakeBackend
-	calls []string
+	still         bool
+	frames        []api.Rect
+	disabledReads int // the button reads as disabled for this many tree reads
+	reads         int
+	calls         []string
 }
 
-func (s *settlingBackend) Settle(ctx context.Context, id string) error {
+func (s *settlingBackend) Settle(ctx context.Context, id string) (bool, error) {
 	s.calls = append(s.calls, "settle")
-	return nil
+	return s.still, nil
 }
 
 func (s *settlingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
 	s.calls = append(s.calls, "ui")
-	return tree(), nil
+	t := tree()
+	if len(s.frames) > 0 {
+		f := s.frames[min(s.reads, len(s.frames)-1)]
+		t.Root.Children[0].Frame = f
+	}
+	if s.reads < s.disabledReads {
+		t.Root.Children[0].Enabled = false
+	}
+	s.reads++
+	return t, nil
 }
 
-func TestTapBySelectorSettlesBeforeReadingTheTree(t *testing.T) {
-	sb := &settlingBackend{}
+func (s *settlingBackend) Tap(ctx context.Context, id string, x, y int) error {
+	s.calls = append(s.calls, fmt.Sprintf("tap %d,%d", x, y))
+	return nil
+}
+
+func (s *settlingBackend) TapNow(ctx context.Context, id string, x, y int) error {
+	s.calls = append(s.calls, fmt.Sprintf("tapnow %d,%d", x, y))
+	return nil
+}
+
+func TestTapBySelectorOnAStillScreen(t *testing.T) {
+	sb := &settlingBackend{still: true}
 	svc := NewService(t.TempDir(), sb)
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(sb.calls) < 2 || sb.calls[0] != "settle" || sb.calls[1] != "ui" {
-		t.Fatalf("calls = %v, want settle before ui", sb.calls)
+	want := []string{"settle", "ui", "tapnow 25,25"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}
 	sb.calls = nil
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(sb.calls) != 0 {
-		t.Fatalf("a tap at coordinates read the tree or settled: %v", sb.calls)
+	if fmt.Sprint(sb.calls) != "[tap 5,5]" {
+		t.Fatalf("a tap at coordinates: %v, want only the backend's own tap", sb.calls)
+	}
+}
+
+func TestTapBySelectorWaitsForTheElementToStopMoving(t *testing.T) {
+	// The screen never goes still (say, a spinner), and the button is still scrolling: its frame
+	// changes once and then repeats. The tap lands on the resting frame without waiting longer.
+	sb := &settlingBackend{still: false, frames: []api.Rect{{X: 10, Y: 300, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}}}
+	svc := NewService(t.TempDir(), sb)
+	start := time.Now()
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"settle", "ui", "ui", "ui", "tapnow 25,125"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("took %v", time.Since(start))
+	}
+}
+
+func TestTapBySelectorWaitsForTheElementToBeEnabled(t *testing.T) {
+	// A "send" button the app enables only once it has processed the typed text.
+	sb := &settlingBackend{still: true, disabledReads: 2}
+	svc := NewService(t.TempDir(), sb)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"settle", "ui", "ui", "ui", "tapnow 25,25"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}
 }
 

@@ -726,13 +726,33 @@ func typeable(s string) bool {
 	return true
 }
 
-// Settle waits until the screen has been still for 48 ms (at most 1 s).
-func (b *Backend) Settle(ctx context.Context, id string) error {
+// Settle waits until the screen has had no big change for 48 ms, at most 1.5 s, and reports
+// whether it got there. Big means more than 0.4% of a sparse pixel grid: scrolling (including
+// momentum) and transitions count, a blinking cursor, a spinner or a countdown do not, so
+// those no longer hold every tap for the full timeout.
+func (b *Backend) Settle(ctx context.Context, id string) (bool, error) {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	var r struct {
+		Settled bool `json:"settled"`
+	}
+	err = b.call(ctx, "settle", map[string]any{"udid": d.UDID, "quietMs": 48, "maxMs": 1500, "big": true}, &r)
+	return r.Settled, err
+}
+
+// TapNow taps without the helper's wait for a still screen (the daemon confirmed the target is
+// at rest).
+func (b *Backend) TapNow(ctx context.Context, id string, x, y int) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
 	}
-	return b.call(ctx, "settle", map[string]any{"udid": d.UDID, "quietMs": 48, "maxMs": 1000}, nil)
+	if x < 0 || y < 0 || (d.Width > 0 && (x >= d.Width || y >= d.Height)) {
+		return fmt.Errorf("tap (%d,%d) is outside the %dx%d screen", x, y, d.Width, d.Height)
+	}
+	return b.call(ctx, "tap", map[string]any{"udid": d.UDID, "x": x, "y": y, "settleMaxMs": 0}, nil)
 }
 
 // TypeText inserts text at the cursor of the focused field. More than one character is pasted
@@ -772,7 +792,50 @@ func (b *Backend) paste(ctx context.Context, udid, text string) error {
 	if err := simctlStdin(ctx, text, "pbcopy", udid); err != nil {
 		return err
 	}
-	return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil)
+	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil); err != nil {
+		return err
+	}
+	// A paste sent while a field is still becoming focused can be dropped. When the focused
+	// element is a text field that reports its text, check that the paste arrived and paste
+	// once more if it did not. (A one-time-code input reports "n of 6 digits", not its text;
+	// it is not checked.)
+	for attempt := 0; attempt < 2; attempt++ {
+		landed, checkable := b.focusedFieldHas(ctx, udid, text)
+		if !checkable || landed {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+		if landed, _ = b.focusedFieldHas(ctx, udid, text); landed {
+			return nil
+		}
+		if attempt == 0 {
+			log.Printf("ios type on %s: the paste did not arrive; pasting again", udid)
+			if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// focusedFieldHas reports whether the focused text field's text contains want. checkable is
+// false when no focused text field is found.
+func (b *Backend) focusedFieldHas(ctx context.Context, udid, want string) (landed, checkable bool) {
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	t, err := b.readTree(tctx, udid)
+	if err != nil {
+		return false, false
+	}
+	tree := convertTree(t, "")
+	tree.Walk(func(e *api.Element) {
+		if checkable || !e.Focused || e.Role != "textfield" {
+			return
+		}
+		checkable = true
+		landed = strings.Contains(e.Text, want) || strings.Contains(e.Value, want)
+	})
+	return landed, checkable
 }
 
 // Key presses a named key. iOS has no back key: "back" taps the navigation bar's back

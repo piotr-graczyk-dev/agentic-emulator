@@ -257,11 +257,16 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		}
 		return b.SetProfile(ctx, id, prof)
 	case "tap":
-		x, y, el, err := s.point(ctx, b, id, p)
+		x, y, el, atRest, err := s.point(ctx, b, id, p)
 		if err != nil {
 			return nil, err
 		}
-		if err := b.Tap(ctx, id, x, y); err != nil {
+		if st, ok := b.(backend.Settler); ok && atRest {
+			err = st.TapNow(ctx, id, x, y)
+		} else {
+			err = b.Tap(ctx, id, x, y)
+		}
+		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"x": x, "y": y, "element": el}, nil
@@ -311,30 +316,78 @@ func ok(err error) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-// point resolves tap coordinates from explicit x/y or a selector.
-func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Params) (int, int, *api.Element, error) {
+// restCheckFor bounds how long point re-reads the tree waiting for a moving element to stop;
+// enabledWaitFor how long it waits for a disabled element to become enabled.
+const (
+	restCheckFor   = 1500 * time.Millisecond
+	enabledWaitFor = 3 * time.Second
+)
+
+// point resolves tap coordinates from explicit x/y or a selector. atRest reports that the
+// element was confirmed at rest (by a still screen or by two equal reads of its frame), so the
+// tap needs no further wait for a still screen.
+func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Params) (x, y int, el *api.Element, atRest bool, err error) {
 	if p.X != nil && p.Y != nil {
-		return *p.X, *p.Y, nil, nil
+		return *p.X, *p.Y, nil, false, nil
 	}
 	if p.Selector == nil || p.Selector.Empty() {
-		return 0, 0, nil, fmt.Errorf("tap needs x,y or a selector")
+		return 0, 0, nil, false, fmt.Errorf("tap needs x,y or a selector")
 	}
 	// A frame read while the content still scrolls is stale by the time the tap lands (a
 	// "log out" button tapped right after a swipe was hit 200 px above its resting place).
-	if st, ok := b.(backend.Settler); ok {
-		_ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
+	st, settler := b.(backend.Settler)
+	still := false
+	if settler {
+		still, _ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
 	}
-	t, err := b.UITree(ctx, id)
-	if err != nil {
-		return 0, 0, nil, err
+	find := func() (*api.Element, error) {
+		t, err := b.UITree(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		m := Find(t, *p.Selector)
+		if len(m) <= p.Selector.Index {
+			return nil, fmt.Errorf("no element matches %s", describe(*p.Selector))
+		}
+		return m[p.Selector.Index], nil
 	}
-	m := Find(t, *p.Selector)
-	if len(m) <= p.Selector.Index {
-		return 0, 0, nil, fmt.Errorf("no element matches %s", describe(*p.Selector))
+	if el, err = find(); err != nil {
+		return 0, 0, nil, false, err
 	}
-	el := m[p.Selector.Index]
-	x, y := el.Frame.Center()
-	return x, y, el, nil
+	// Actionability: a disabled element ignores the tap (a "send" button enabled by text the
+	// app has not processed yet). Give it a moment to become enabled; tap it anyway after that.
+	if !el.Enabled {
+		deadline := time.Now().Add(enabledWaitFor)
+		for !el.Enabled && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return 0, 0, nil, false, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+			if again, ferr := find(); ferr == nil {
+				el = again
+			}
+		}
+	}
+	atRest = settler && still
+	if settler && !still {
+		// Something on screen keeps changing (a spinner, a blinking cursor): waiting for a
+		// still screen would only time out. The element is at rest once its frame repeats.
+		deadline := time.Now().Add(restCheckFor)
+		for time.Now().Before(deadline) {
+			again, ferr := find()
+			if ferr != nil {
+				break
+			}
+			if again.Frame == el.Frame {
+				el, atRest = again, true
+				break
+			}
+			el = again
+		}
+	}
+	x, y = el.Frame.Center()
+	return x, y, el, atRest, nil
 }
 
 func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Params) (any, error) {

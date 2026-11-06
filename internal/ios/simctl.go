@@ -19,8 +19,19 @@ func simctl(ctx context.Context, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// simctlPath is CoreSimulator's own simctl. Running it directly skips xcrun resolving the
+// developer directory, about 45 ms per call (pbcopy runs once per typed text).
+const simctlPath = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl"
+
+func simctlCommand(ctx context.Context, args ...string) *exec.Cmd {
+	if _, err := os.Stat(simctlPath); err == nil {
+		return exec.CommandContext(ctx, simctlPath, args...)
+	}
+	return exec.CommandContext(ctx, "xcrun", append([]string{"simctl"}, args...)...)
+}
+
 func simctlStdin(ctx context.Context, stdin string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "xcrun", append([]string{"simctl"}, args...)...)
+	cmd := simctlCommand(ctx, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("simctl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

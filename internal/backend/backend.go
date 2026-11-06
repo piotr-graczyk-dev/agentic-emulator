@@ -54,9 +54,14 @@ type Launcher interface {
 	LaunchWith(ctx context.Context, id string, appID string, o LaunchOptions) error
 }
 
-// Settler is implemented by backends that can wait until the screen stops changing. The daemon
-// settles before it resolves a tap selector, so the element's frame is read where it comes to
-// rest and not mid-scroll or mid-transition.
+// Settler is implemented by backends that can tell when the screen has stopped changing. The
+// daemon uses it to tap a selector where the element comes to rest, not mid-scroll or
+// mid-transition, without waiting out animations that never stop (a blinking cursor, a
+// spinner, a countdown):
+//   - Settle waits briefly for a still screen and reports whether it got one.
+//   - When it did not, the daemon reads the tree again until the element's frame repeats.
+//   - TapNow then taps without the backend's own wait for a still screen.
 type Settler interface {
-	Settle(ctx context.Context, id string) error
+	Settle(ctx context.Context, id string) (bool, error)
+	TapNow(ctx context.Context, id string, x, y int) error
 }
