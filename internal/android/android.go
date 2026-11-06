@@ -481,7 +481,7 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	if ram < 4096 {
 		args = append(args, "-lowram")
 	}
-	if loadBaseline {
+	if loadBaseline && !inPlaceBootLoad() {
 		args = append(args, "-snapshot", baselineSnapshot)
 	} else {
 		args = append(args, "-no-snapshot-load")
@@ -490,6 +490,14 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	args = append(args, strings.Fields(os.Getenv("AGEMU_ANDROID_EMULATOR_FLAGS"))...)
 	return args
 }
+
+// inPlaceBootLoad: a new emulator process starts without loading a snapshot and the baseline
+// is then restored in place (gRPC LoadSnapshot), as reset does. Restoring it while the process
+// starts (-snapshot) corrupts guest memory on this emulator (37.1, HVF, 16 KB-page image): the
+// guest kernel logs "BUG: Bad page map", oopses and reboots within seconds (3 of 3 boots, seen
+// with -show-kernel). In-place loads showed no such errors. AGEMU_ANDROID_BOOT_LOAD=startup
+// restores the old behaviour.
+func inPlaceBootLoad() bool { return env("AGEMU_ANDROID_BOOT_LOAD", "inplace") != "startup" }
 
 func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (api.Device, error) {
 	d, err := b.devFor(id)
@@ -538,6 +546,19 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		return api.Device{}, err
 	}
 	t1 := time.Now()
+	if loadBaseline && inPlaceBootLoad() {
+		d.mu.Lock()
+		e := d.emu
+		d.mu.Unlock()
+		lctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		err = e.loadSnapshot(lctx, baselineSnapshot)
+		cancel()
+		e.stream.invalidate()
+		if err != nil {
+			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
+		}
+		logf("%s: boot: baseline restored in place %v after gRPC came up", d.name, time.Since(t1).Round(time.Millisecond))
+	}
 	if loadBaseline {
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
 	} else {
