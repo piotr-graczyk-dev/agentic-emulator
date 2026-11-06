@@ -3,7 +3,7 @@
 #   make android-agent   rebuild internal/android/assets/agemu-agent.jar from android-agent/src
 #                        (needs a JDK + Android SDK; the jar is committed, so plain `go build`
 #                        never needs them)
-#   make android-build   bin/android/agemu + bin/android/agemu-bench (iOS backend compiled out)
+#   make android-build   bin/android/{agemu,agemud,agemu-bench} (iOS backend compiled out)
 #   make android-test    vet + unit tests for the Android backend
 #   make android-e2e     scripts/e2e-android.sh against a real agemu-* emulator
 #   make android-bench   benchmark table (standard tools vs agemu) on the same emulator
@@ -28,7 +28,8 @@ $(ANDROID_AGENT_JAR): $(ANDROID_AGENT_SRC) android-agent/build.sh
 	fi
 
 android-build: android-agent
-	go build -tags noios -o $(ANDROID_BIN)/agemu ./cmd/agemu
+	go build -o $(ANDROID_BIN)/agemu ./cmd/agemu
+	go build -tags noios -o $(ANDROID_BIN)/agemud ./cmd/agemud
 	go build -tags noios -o $(ANDROID_BIN)/agemu-bench ./cmd/agemu-bench
 
 android-test:

@@ -31,7 +31,7 @@ standard tooling is slow:
 agents ──► agemu CLI ─┐            (one short-lived process per command)
 agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.sock
                       ▼
-               agemu daemon (Go)  ── device registry, selectors, waits, per-device locks
+               agemud daemon (Go) ── device registry, selectors, waits, per-device locks
                ├── android backend (internal/android)
                │     ├── emulator gRPC (screenshots, touch, keys, snapshots)
                │     └── on-device agent (android-agent/, Java via app_process): UI tree, launch, ...

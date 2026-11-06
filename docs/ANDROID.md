@@ -23,7 +23,7 @@ agemu daemon (Go, internal/android)
 ## Run it
 
 ```sh
-go build -tags noios -o bin/android/agemu ./cmd/agemu          # or: make android-build
+make android-build                                              # bin/android/{agemu,agemud,agemu-bench}
 export AGEMU_HOME=$HOME/.agemu-dev-android                      # optional, default ~/.agemu
 bin/android/agemu create --platform android --name pixel        # -> android:agemu-pixel (no download)
 bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (~1 min)

@@ -50,8 +50,29 @@ func Dial() (*Client, error) {
 
 func logPath() string { return filepath.Join(daemon.Home(), "daemon.log") }
 
+// DaemonPath locates the agemud binary: $AGEMU_DAEMON, else next to the running
+// executable, else on $PATH.
+func DaemonPath() (string, error) {
+	if p := os.Getenv("AGEMU_DAEMON"); p != "" {
+		return p, nil
+	}
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		p := filepath.Join(filepath.Dir(exe), "agemud")
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	if p, err := exec.LookPath("agemud"); err == nil {
+		return p, nil
+	}
+	return "", errors.New("agemud not found next to agemu or on PATH (set AGEMU_DAEMON)")
+}
+
 func startDaemon() error {
-	exe, err := os.Executable()
+	exe, err := DaemonPath()
 	if err != nil {
 		return err
 	}
@@ -63,7 +84,7 @@ func startDaemon() error {
 		return err
 	}
 	defer lf.Close()
-	cmd := exec.Command(exe, "daemon")
+	cmd := exec.Command(exe)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

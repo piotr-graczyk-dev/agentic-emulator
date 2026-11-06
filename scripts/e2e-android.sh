@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end proof for the Android backend. Everything goes through bin/android/agemu
+# End-to-end proof for the Android backend. Everything goes through the agemu CLI
+# ($AGEMU_BIN, default bin/android/agemu; agemud must sit next to it)
 # (no adb, no emulator commands); `sips` only reads PNG sizes on the host.
 #
 #   scripts/e2e-android.sh [avd-name]        default: agemu-pixel
@@ -12,11 +13,11 @@ cd "$(dirname "$0")/.."
 AVD="${1:-agemu-pixel}"
 DEV="android:$AVD"
 export AGEMU_HOME="${AGEMU_HOME:-$HOME/.agemu-dev-android}"
-AG="$PWD/bin/android/agemu"
+AG="${AGEMU_BIN:-$PWD/bin/android/agemu}"
 OUT="$(mktemp -d /tmp/agemu-e2e-android.XXXXXX)"
 PASS=0
 
-[[ -x "$AG" ]] || { echo "build first: go build -tags noios -o bin/android/agemu ./cmd/agemu" >&2; exit 2; }
+[[ -x "$AG" ]] || { echo "build first: make android-build (or make build and AGEMU_BIN=bin/agemu)" >&2; exit 2; }
 
 step() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '   ok: %s\n' "$*"; }

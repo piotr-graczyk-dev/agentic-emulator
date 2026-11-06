@@ -1,17 +1,19 @@
-// Command agemu is an agent-first Android emulator / iOS Simulator runtime for macOS.
+// Command agemu is the CLI and MCP server of the agent-first Android emulator / iOS
+// Simulator runtime for macOS. It is a thin client: every command is one request to the
+// agemud daemon, which it starts on demand. Keeping the backends (gRPC, CoreSimulator
+// helper) out of this binary keeps its start-up time low, which matters because agents
+// run one process per action.
 //
-//	agemu daemon                 run the device daemon (auto-started by other commands)
+//	agemu daemon                 run agemud in the foreground
 //	agemu mcp                    serve the MCP protocol on stdio
 //	agemu <command> [flags]      talk to the daemon; prints JSON (ui/find print a text outline)
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,8 +62,12 @@ func main() {
 		fmt.Print(usage)
 		return
 	case "daemon":
-		runDaemon()
-		return
+		path, err := client.DaemonPath()
+		if err != nil {
+			log.Fatal(err)
+		}
+		// Replace this process so signals reach the daemon directly.
+		log.Fatal(syscall.Exec(path, []string{path}, os.Environ()))
 	case "mcp":
 		if err := mcp.Serve(os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)
@@ -71,18 +77,6 @@ func main() {
 	if err := runCommand(cmd, args); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
-	}
-}
-
-func runDaemon() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	tmp := filepath.Join(daemon.Home(), "tmp")
-	_ = os.MkdirAll(tmp, 0o755)
-	svc := daemon.NewService(tmp, backends()...)
-	defer svc.Close()
-	if err := daemon.Serve(ctx, svc); err != nil {
-		log.Fatal(err)
 	}
 }
 
