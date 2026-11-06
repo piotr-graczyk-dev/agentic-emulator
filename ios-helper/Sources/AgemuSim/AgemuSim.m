@@ -1422,8 +1422,7 @@ static BOOL AGAXBatching(id element);
 // So hit-test the screen centre. When the centre belongs to the reported frontmost process,
 // keep it (2 requests in all). Otherwise take the hit process's application element (request
 // type 1) if it covers at least 40% of the screen; that rejects hosted content such as a home
-// screen widget (WidgetRenderer, 260x260 pt) or the keyboard, and then four more points are
-// tried. Nothing found (right after a launch every hit test answers nothing for about a
+// screen widget (WidgetRenderer, 260x260 pt), and then four more points are tried. Nothing found (right after a launch every hit test answers nothing for about a
 // second): the reported frontmost application, as before, with *confirmed set to NO.
 - (id)screenOwnerForFrontmost:(id)frontmost
                         token:(NSString *)token
