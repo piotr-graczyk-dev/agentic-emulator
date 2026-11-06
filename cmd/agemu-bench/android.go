@@ -159,8 +159,12 @@ func androidSuite(cfg Config) ([]Op, error) {
 		if err != nil {
 			return err
 		}
+		gpu := os.Getenv("AGEMU_ANDROID_GPU")
+		if gpu == "" {
+			gpu = "host" // agemu's default; a snapshot only loads under the GPU mode it was taken with
+		}
 		cmd := exec.Command(emuBin, "-avd", avd, "-port", "5580", "-grpc", "8580", "-no-window", "-no-audio",
-			"-no-boot-anim", "-gpu", "auto", "-memory", "2048", "-lowram", "-no-snapshot-load", "-no-snapshot-save")
+			"-no-boot-anim", "-gpu", gpu, "-memory", "2048", "-lowram", "-no-snapshot-load", "-no-snapshot-save")
 		cmd.Stdout, cmd.Stderr = lf, lf
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := cmd.Start(); err != nil {

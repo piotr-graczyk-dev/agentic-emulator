@@ -57,13 +57,25 @@ type Backend struct {
 	apps map[string]map[int]string
 	// systemAppCache holds the built-in apps per runtime identifier.
 	systemAppCache map[string][]string
+	// lean maps udid -> the lean setting last applied to that device; leaning marks devices
+	// being reconciled and leanAgain a request that arrived meanwhile; wallGen numbers each
+	// device's cold boots for the wallpaper passes (see lean.go).
+	lean, leaning, leanAgain map[string]bool
+	wallGen                  map[string]int
+	// bg is cancelled by Close; bgWG tracks the background work that uses it.
+	bg     context.Context
+	stopBg context.CancelFunc
+	bgWG   sync.WaitGroup
+	closed bool
 }
 
 // New returns at once. The helper process is started in the background, so the first iOS
 // command does not pay for loading CoreSimulator (about 0.3 s on an idle Mac, several
 // seconds on a loaded one). AGEMU_IOS_PRESTART=0 starts it on first use instead.
 func New() *Backend {
-	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{}}
+	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
+		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, wallGen: map[string]int{}}
+	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -84,6 +96,9 @@ func (b *Backend) Platform() api.Platform { return api.IOS }
 func (b *Backend) helper() (*helper, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return nil, fmt.Errorf("the iOS backend is shutting down")
+	}
 	if b.h != nil && b.h.alive() {
 		return b.h, nil
 	}
@@ -105,12 +120,17 @@ func (b *Backend) call(ctx context.Context, cmd string, params map[string]any, o
 
 func (b *Backend) Close() error {
 	b.mu.Lock()
+	b.closed = true // no new helper and no new background work from here on
 	h := b.h
 	b.h = nil
 	b.mu.Unlock()
+	b.stopBg()
+	// Close the helper before waiting: a background call blocked writing to it fails then,
+	// instead of keeping Close waiting.
 	if h != nil {
 		h.close()
 	}
+	b.bgWG.Wait()
 	return nil
 }
 
@@ -483,10 +503,15 @@ func (b *Backend) bootReadyOnce(ctx context.Context, udid string, afterBootCall 
 		}
 		log.Printf("ios boot %s timeline: %s", udid, strings.Join(tl, ", "))
 	}
-	if r.Device.UDID == "" {
-		return b.describeSim(ctx, udid)
+	dev := r.Device
+	if dev.UDID == "" {
+		var err error
+		if dev, err = b.describeSim(ctx, udid); err != nil {
+			return simDevice{}, err
+		}
 	}
-	return r.Device, nil
+	b.leanDevice(dev, cold)
+	return dev, nil
 }
 
 func (b *Backend) describeSim(ctx context.Context, udid string) (simDevice, error) {
@@ -528,8 +553,8 @@ func (b *Backend) shutdown(ctx context.Context, udid string) error {
 
 // effectiveMaxBooted is how many agemu simulators may run at once: AGEMU_IOS_MAX_BOOTED if
 // set; otherwise 2, or 1 while memory is short (pressure warn/critical or under half
-// available): a booted simulator takes 1-2 GB, and a second one slows everything, including
-// the boot of the first.
+// available): a booted simulator takes 2.5-4 GB (lean, see lean.go; more with an app), and a
+// second one slows everything, including the boot of the first.
 func effectiveMaxBooted() int {
 	var n int
 	if _, err := fmt.Sscanf(os.Getenv("AGEMU_IOS_MAX_BOOTED"), "%d", &n); err == nil && n > 0 {

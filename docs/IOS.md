@@ -238,6 +238,66 @@ overloaded or stuck (the request may still complete in the background)`. `wait` 
 read by its own deadline (at least 1 s) and reports the last read error on timeout. Only a cold
 boot may take up to 10 minutes (a first boot migrates data).
 
+## Lean simulators
+
+A booted iOS 26.5 simulator runs the whole iOS userland. Measured headless on
+`agemu-iphone-17-pro` with no app:
+- about 240 processes and **4.0 GB** of memory (the sum of phys_footprint, which is what macOS
+  memory pressure counts);
+- 1.6 cores busy for the first minute after boot (media analysis, diagnostics, asset downloads,
+  Siri voices, the wallpaper gallery);
+- 20% of a core when idle.
+
+agemu's own helper and daemon take 21 MB and 0.1% of a core. Most of the rest serves features an
+app under test does not use, so agemu turns them off in its own simulators (`agemu-*`):
+
+1. **32 launchd jobs are off** (`internal/ios/lean.go`, grouped by feature). agemu runs
+   `launchctl disable` inside the device, so the override persists and later boots start without
+   the jobs, and `launchctl bootout` for the ones running at that moment. It runs in the background
+   after boot. The first time on a device it takes about 10 s (the helper runs launchctl in the
+   device, 8 at a time), and agemu reads the overrides back before it counts the device as lean.
+   Later boots check it with one call. `simctl boot --disabledJob` would be the documented way, but on
+   CoreSimulator 1051 it had no effect: 25 of the 32 jobs still ran.
+2. **The wallpaper gallery is stopped after a cold boot.** PosterBoard starts one extension per
+   wallpaper in its gallery (6-16 processes of 35-75 MB) within seconds of boot. agemu stops
+   them 3, 8, 20 and 45 s after the device is ready, and iOS relaunches the one the lock screen needs: after
+   a stop, the lock screen drew its wallpaper, clock and notifications. PosterBoard itself stays
+   on. With PosterBoard disabled, the lock screen was not drawn: the UI tree reported the lock
+   screen while the screenshot showed the home screen. PosterBoard starts some gallery
+   extensions again later for a while, and iOS ends them again.
+
+**What a lean simulator does not do.** These need `AGEMU_IOS_LEAN=0`; the jobs are back from the
+next boot:
+- home screen widgets (they show empty) and WidgetKit timelines;
+- Siri, App Intents donations, text-to-speech voices and speech recognition;
+- on-demand system assets (downloadable fonts, dictation and linguistic models). On a first boot
+  `mobileassetd` would also stage about 1 GB into the device;
+- News, HomeKit, Screen Time, significant locations and Apple Intelligence models;
+- photo analysis (memories, people), iCloud Mail and the music library.
+
+HealthKit (`healthd`), CoreSpotlight indexing, the share sheet, Wallet, notifications and push
+stay on.
+
+**Measured.** The same simulator, booted 3 times each way, interleaved, with the zuapp flow (see
+"A real app" below) run right after boot and once more, then the app left open:
+
+| | all jobs (`AGEMU_IOS_LEAN=0`) | lean |
+|---|---|---|
+| memory, the app open | 4.82 GB | **3.90 GB** |
+| processes | 219 | 169 |
+| simulator CPU during the flow right after boot (45 s window) | 148 s | **101 s** |
+| simulator CPU during the flow, settled | 34 s | 33 s |
+| cold boot until agent-ready | 9.3 s | 8.4 s |
+| the flow | 25.7 s | 25.9 s (the app's pace) |
+
+Without an app, in single runs: 4.0 GB and 20% of a core idle with all jobs; 2.5 GB and 1.5%
+lean. The first minute after a lean boot took 26-116% of a core, depending on how many
+wallpaper extensions that boot started.
+
+All 11 runs of the zuapp flow on lean simulators passed; 1 of them needed a retry (a tap with
+no effect, see "Taps that did nothing"). With all jobs, 9 of 10 passed and 1 failed: right after
+boot the app showed an empty screen for 30 s.
+
 ## Safety: which simulators agemu touches
 
 agemu lists and acts only on simulators whose name starts with **`agemu-`**. Devices created by
