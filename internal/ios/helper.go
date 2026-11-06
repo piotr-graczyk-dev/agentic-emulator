@@ -171,6 +171,7 @@ var callTimeouts = map[string]time.Duration{
 	"spawn":      30 * time.Second,
 	"notify":     15 * time.Second,
 	"settle":     10 * time.Second,
+	"nextframe":  3 * time.Second, // the helper waits at most the requested maxMs (<= 250 ms)
 }
 
 // waitingFor says, for a timeout error, what a command was waiting for.

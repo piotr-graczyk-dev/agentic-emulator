@@ -807,53 +807,60 @@ func (b *Backend) paste(ctx context.Context, udid, text string) error {
 	if text == "" {
 		return nil
 	}
+	// Read the focused field while the pasteboard is set (no added latency), so a lost paste
+	// can be told apart from one the field transformed (a formatted phone number, a masked
+	// password, upper-casing): only a field that did not change at all gets a second paste.
+	type fieldState struct {
+		value string
+		ok    bool
+	}
+	before := make(chan fieldState, 1)
+	go func() {
+		v, ok := b.focusedFieldValue(ctx, udid)
+		before <- fieldState{v, ok}
+	}()
 	if err := simctlStdin(ctx, text, "pbcopy", udid); err != nil {
 		return err
 	}
 	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil); err != nil {
 		return err
 	}
-	// A paste sent while a field is still becoming focused can be dropped. When the focused
-	// element is a text field that reports its text, check that the paste arrived and paste
-	// once more if it did not. (A one-time-code input reports "n of 6 digits", not its text;
-	// it is not checked.)
-	for attempt := 0; attempt < 2; attempt++ {
-		landed, checkable := b.focusedFieldHas(ctx, udid, text)
-		if !checkable || landed {
-			return nil
-		}
-		time.Sleep(150 * time.Millisecond)
-		if landed, _ = b.focusedFieldHas(ctx, udid, text); landed {
-			return nil
-		}
-		if attempt == 0 {
-			log.Printf("ios type on %s: the paste did not arrive; pasting again", udid)
-			if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil); err != nil {
-				return err
-			}
+	pre := <-before
+	if !pre.ok {
+		return nil // no literal text field in focus: nothing to compare
+	}
+	for _, pause := range []time.Duration{0, 150 * time.Millisecond} {
+		time.Sleep(pause)
+		v, ok := b.focusedFieldValue(ctx, udid)
+		if !ok || v != pre.value {
+			return nil // the field changed: the paste arrived (possibly transformed)
 		}
 	}
-	return nil
+	log.Printf("ios type on %s: the focused field did not change; pasting again", udid)
+	return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil)
 }
 
-// focusedFieldHas reports whether the focused text field's text contains want. checkable is
-// false when no focused text field is found.
-func (b *Backend) focusedFieldHas(ctx context.Context, udid, want string) (landed, checkable bool) {
+// focusedFieldValue returns the text of the focused text field. ok is false when there is no
+// focused text field, or when its value is not its literal text (a secure field).
+func (b *Backend) focusedFieldValue(ctx context.Context, udid string) (value string, ok bool) {
 	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	t, err := b.readTree(tctx, udid)
 	if err != nil {
-		return false, false
+		return "", false
 	}
-	tree := convertTree(t, "")
-	tree.Walk(func(e *api.Element) {
-		if checkable || !e.Focused || e.Role != "textfield" {
+	found := false
+	convertTree(t, "").Walk(func(e *api.Element) {
+		if found || !e.Focused || e.Role != "textfield" {
 			return
 		}
-		checkable = true
-		landed = strings.Contains(e.Text, want) || strings.Contains(e.Value, want)
+		found = true
+		if strings.Contains(strings.ToLower(e.Type), "secure") {
+			return
+		}
+		value, ok = e.Text+"\x00"+e.Value, true
 	})
-	return landed, checkable
+	return value, ok
 }
 
 // Key presses a named key. iOS has no back key: "back" taps the navigation bar's back

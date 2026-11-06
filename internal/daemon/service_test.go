@@ -161,6 +161,7 @@ type settlingBackend struct {
 	still         bool
 	frames        []api.Rect
 	disabledReads int // the button reads as disabled for this many tree reads
+	goneAfter     int // from this many reads on (when > 0), the button is gone
 	reads         int
 	calls         []string
 }
@@ -179,6 +180,9 @@ func (s *settlingBackend) UITree(ctx context.Context, id string) (*api.UITree, e
 	}
 	if s.reads < s.disabledReads {
 		t.Root.Children[0].Enabled = false
+	}
+	if s.goneAfter > 0 && s.reads >= s.goneAfter {
+		t.Root.Children = t.Root.Children[1:]
 	}
 	s.reads++
 	return t, nil
@@ -322,5 +326,47 @@ func TestActionCanReturnTheScreenItEndsOn(t *testing.T) {
 	m := res.(map[string]any)
 	if tr, _ := m["ui"].(*api.UITree); tr == nil || tr.Root == nil || m["waited"] == nil || m["result"] == nil {
 		t.Fatalf("got %#v, want result, waited and ui", res)
+	}
+}
+
+func TestTapBySelectorDoesNotTapAnElementThatWentAway(t *testing.T) {
+	for name, sb := range map[string]*settlingBackend{
+		"while moving":   {still: false, frames: []api.Rect{{X: 10, Y: 300, W: 30, H: 10}, {X: 10, Y: 200, W: 30, H: 10}}, goneAfter: 2},
+		"while disabled": {still: true, disabledReads: 5, goneAfter: 2},
+	} {
+		svc := NewService(t.TempDir(), sb)
+		_, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`))
+		if err == nil || !strings.Contains(err.Error(), "disappeared") {
+			t.Fatalf("%s: err = %v, want an error saying it disappeared", name, err)
+		}
+		for _, c := range sb.calls {
+			if strings.HasPrefix(c, "tap") {
+				t.Fatalf("%s: tapped anyway: %v", name, sb.calls)
+			}
+		}
+	}
+}
+
+// stuckFrames never delivers a frame: WaitFrame blocks until its context ends.
+type stuckFrames struct{ fakeBackend }
+
+func (s *stuckFrames) UITree(ctx context.Context, id string) (*api.UITree, error) { return tree(), nil }
+func (s *stuckFrames) WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error) {
+	if mark == 0 {
+		return 7, nil
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func TestWaitEndsOnTimeWhenFramesStall(t *testing.T) {
+	svc := NewService(t.TempDir(), &stuckFrames{})
+	start := time.Now()
+	_, err := svc.Call(context.Background(), "wait", json.RawMessage(`{"device":"android:x","selector":{"text":"never"},"timeoutMs":900}`))
+	if err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if el := time.Since(start); el > 4*time.Second {
+		t.Fatalf("wait took %v with a 900 ms timeout", el)
 	}
 }

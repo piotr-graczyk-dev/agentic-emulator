@@ -400,9 +400,11 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 				return 0, 0, nil, false, ctx.Err()
 			case <-time.After(50 * time.Millisecond):
 			}
-			if again, ferr := find(); ferr == nil {
-				el = again
+			again, ferr := find()
+			if ferr != nil {
+				return 0, 0, nil, false, fmt.Errorf("%w (it disappeared while disabled)", ferr)
 			}
+			el = again
 		}
 	}
 	atRest = settler && still
@@ -411,9 +413,14 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 		// still screen would only time out. The element is at rest once its frame repeats.
 		deadline := time.Now().Add(restCheckFor)
 		for time.Now().Before(deadline) {
+			if ctx.Err() != nil {
+				return 0, 0, nil, false, ctx.Err()
+			}
 			again, ferr := find()
 			if ferr != nil {
-				break
+				// The element went away while it moved (a transition replaced the screen):
+				// its last frame may now belong to another control, so do not tap it.
+				return 0, 0, nil, false, fmt.Errorf("%w (it disappeared while it was moving)", ferr)
 			}
 			if again.Frame == el.Frame {
 				el, atRest = again, true
@@ -448,7 +455,10 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		var mark uint64
 		if frames {
 			var ferr error
-			if mark, ferr = fw.WaitFrame(ctx, id, 0, 0); ferr != nil || mark == 0 {
+			fctx, cancel := context.WithDeadline(ctx, frameDeadline(deadline))
+			mark, ferr = fw.WaitFrame(fctx, id, 0, 0)
+			cancel()
+			if ferr != nil || mark == 0 {
 				frames = false // no frame counter (yet): poll on a timer
 			} else if mark != prevMark {
 				prevMark, lastChange = mark, time.Now()
@@ -489,10 +499,13 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		// since the tree can change without one), which saves reads while waiting for, say,
 		// the network.
 		if frames && time.Since(lastChange) > 600*time.Millisecond {
-			if _, ferr := fw.WaitFrame(ctx, id, mark, 250*time.Millisecond); ferr == nil {
+			fctx, cancel := context.WithDeadline(ctx, frameDeadline(deadline))
+			_, ferr := fw.WaitFrame(fctx, id, mark, 250*time.Millisecond)
+			cancel()
+			if ferr == nil {
 				continue
 			}
-			frames = false
+			frames = false // fall back to timer polling; the wait's own deadline still applies
 		}
 		select {
 		case <-ctx.Done():
@@ -500,6 +513,16 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// frameDeadline bounds one frame request: never past the wait's deadline (plus the 1 s a last
+// tree read gets), and never more than 2 s, so a stalled framebuffer cannot hold a wait.
+func frameDeadline(waitDeadline time.Time) time.Time {
+	d := time.Now().Add(2 * time.Second)
+	if limit := waitDeadline.Add(time.Second); limit.Before(d) {
+		d = limit
+	}
+	return d
 }
 
 func describe(s api.Selector) string {
