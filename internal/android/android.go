@@ -50,6 +50,8 @@ type device struct {
 	name string
 	life sync.Mutex // serializes boot / shutdown / reset / profile
 
+	dial sync.Mutex // serializes connecting to the emulator (connRaw)
+
 	mu      sync.Mutex // guards the fields below
 	booting bool
 	run     runningEmu
@@ -247,13 +249,24 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 
 // connRaw returns clients without checking the VM state or the agent.
 func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) {
-	d.mu.Lock()
-	if d.emu != nil && pidAlive(d.run.PID) && !isZombie(d) {
-		e, a := d.emu, d.agent
-		d.mu.Unlock()
+	cached := func() (*emuClient, *agentClient, bool) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.emu != nil && pidAlive(d.run.PID) && !isZombie(d) {
+			return d.emu, d.agent, true
+		}
+		return nil, nil, false
+	}
+	if e, a, ok := cached(); ok {
 		return e, a, nil
 	}
-	d.mu.Unlock()
+	// Concurrent first calls (UI reads and screenshots do not take the device lock) must not
+	// each dial and then close the other's clients while they are in use.
+	d.dial.Lock()
+	defer d.dial.Unlock()
+	if e, a, ok := cached(); ok {
+		return e, a, nil
+	}
 	r, ok := findRunning(d.name)
 	if !ok {
 		d.drop()
@@ -264,6 +277,10 @@ func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) 
 		return nil, nil, err
 	}
 	a := newAgent(d.name, r)
+	// Set up the framebuffer before publishing, so a client is never closed mid-setup.
+	if av, err := loadAVD(d.name); err == nil {
+		e.enableShm(filepath.Join(logDir(), d.name+".fb"), av.intCfg("hw.lcd.width"), av.intCfg("hw.lcd.height"))
+	}
 	d.mu.Lock()
 	if d.emu != nil {
 		d.emu.Close()
@@ -273,9 +290,6 @@ func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) 
 	}
 	d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, a, time.Time{}, false
 	d.mu.Unlock()
-	if av, err := loadAVD(d.name); err == nil {
-		e.enableShm(filepath.Join(logDir(), d.name+".fb"), av.intCfg("hw.lcd.width"), av.intCfg("hw.lcd.height"))
-	}
 	return e, a, nil
 }
 

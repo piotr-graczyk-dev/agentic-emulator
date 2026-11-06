@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"syscall"
 	"time"
 )
 
@@ -43,6 +46,16 @@ func Serve(ctx context.Context, svc *Service) error {
 	if err := os.MkdirAll(Home(), 0o755); err != nil {
 		return err
 	}
+	// Two agemu processes can both find no socket and each start a daemon. The second must
+	// not unlink the first one's socket, or two daemons would drive the same devices.
+	lock, err := os.OpenFile(filepath.Join(Home(), "agemud.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.New("another agemud already runs for " + Home())
+	}
 	sock := SocketPath()
 	if c, err := net.DialTimeout("unix", sock, 200*time.Millisecond); err == nil {
 		c.Close()
@@ -70,6 +83,18 @@ func Serve(ctx context.Context, svc *Service) error {
 	}
 }
 
+// safeCall runs one request and turns a panic into an error, so one bad request cannot take
+// down the daemon that every agent shares.
+func safeCall(ctx context.Context, svc *Service, req Request) (res any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic in %s: %v\n%s", req.Method, r, debug.Stack())
+			res, err = nil, fmt.Errorf("internal error in %s: %v", req.Method, r)
+		}
+	}()
+	return svc.Call(ctx, req.Method, req.Params)
+}
+
 func handle(ctx context.Context, svc *Service, conn net.Conn) {
 	defer conn.Close()
 	r := bufio.NewReaderSize(conn, 1<<20)
@@ -86,7 +111,7 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 			resp.Error = "bad request: " + jerr.Error()
 		} else {
 			resp.ID = req.ID
-			res, cerr := svc.Call(ctx, req.Method, req.Params)
+			res, cerr := safeCall(ctx, svc, req)
 			if cerr != nil {
 				resp.Error = cerr.Error()
 			} else {

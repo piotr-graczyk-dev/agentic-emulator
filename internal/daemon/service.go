@@ -166,6 +166,9 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 			return nil, fmt.Errorf("bad params: %w", err)
 		}
 	}
+	if p.Selector != nil && p.Selector.Index < 0 {
+		return nil, fmt.Errorf("selector index must be >= 0, got %d", p.Selector.Index)
+	}
 	switch method {
 	case "ping":
 		return map[string]any{"ok": true, "pid": os.Getpid()}, nil

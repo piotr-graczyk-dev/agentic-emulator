@@ -355,9 +355,19 @@ func (b *Backend) bootMakingRoom(ctx context.Context, udid string, booted bool) 
 		return b.bootReady(ctx, udid)
 	}
 	done := make(chan error, 1)
-	d, err := b.bootReadyThen(ctx, udid, func() { go func() { done <- shutdownAll() }() })
-	if serr := <-done; err == nil && serr != nil {
-		err = serr
+	started := false
+	d, err := b.bootReadyThen(ctx, udid, func() {
+		if !started {
+			started = true
+			go func() { done <- shutdownAll() }()
+		}
+	})
+	// The boot can fail before its boot call returns (describe or boot failed); then the
+	// shutdown never started and there is nothing to wait for.
+	if started {
+		if serr := <-done; err == nil && serr != nil {
+			err = serr
+		}
 	}
 	return d, err
 }
@@ -590,6 +600,9 @@ func (b *Backend) findOrCreateForProfile(ctx context.Context, p api.Profile) (si
 	var sameType *simDevice
 	for i, d := range ds {
 		if d.Name == name {
+			if d.DeviceType != p.DeviceType {
+				return simDevice{}, fmt.Errorf("simulator %s is a %s, not the %s that profile %s needs; delete or rename it", name, d.DeviceType, p.DeviceType, p.Name)
+			}
 			return d, nil
 		}
 		if managed(d.Name) && d.DeviceType == p.DeviceType && sameType == nil {
