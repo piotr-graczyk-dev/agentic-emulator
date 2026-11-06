@@ -264,6 +264,13 @@ func zeroRoot(_ tree: [String: Any]) -> Bool {
     return frame[2] <= 0 || frame[3] <= 0
 }
 
+// An iPad tree whose app no hit test confirmed as the screen's owner, and that has no elements.
+func unconfirmedEmpty(_ tree: [String: Any]) -> Bool {
+    guard tree["unconfirmed"] as? Bool == true else { return false }
+    let root = tree["root"] as? [String: Any]
+    return (root?["children"] as? [Any])?.isEmpty ?? true
+}
+
 // Reads the frontmost app's tree within timeout seconds. A live app with a zero-sized root has
 // no accessibility runtime loaded: switch app accessibility on and retry for up to 4 s.
 func readTree(_ d: AGDevice, maxDepth: Int, timeout: Double) throws -> [String: Any] {
@@ -278,6 +285,19 @@ func readTree(_ d: AGDevice, maxDepth: Int, timeout: Double) throws -> [String: 
     } catch {
         bridgeDoctor.noteResult(d, error: error)
         throw error
+    }
+    // iPad: for about a second after an app is launched, accessibility reports the dock's
+    // DockFolderViewService as the frontmost app and hit tests find nothing on the screen yet
+    // (AgemuSim's screenOwnerForFrontmost). Wait for the screen's owner (at most 3 s, within the
+    // budget) instead of returning that empty tree.
+    if unconfirmedEmpty(tree) {
+        let until = min(deadline, Date().addingTimeInterval(3))
+        while unconfirmedEmpty(tree), Date() < until {
+            sleepMs(100)
+            let left = deadline.timeIntervalSinceNow
+            if left <= 0 { break }
+            tree = try d.accessibilityTree(withMaxDepth: maxDepth, timeout: left) as! [String: Any]
+        }
     }
     if zeroRoot(tree), (tree["pid"] as? Int ?? 0) > 0, try ensureAppAccessibility(d, force: false) {
         let until = min(deadline, Date().addingTimeInterval(4))

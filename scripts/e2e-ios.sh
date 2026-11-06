@@ -162,10 +162,45 @@ for P in iphone-se-3 ipad-mini iphone-17-pro; do
   [[ "$got" == "$want" ]] && ok "$P.png is $got (profile $want)" || bad "$P.png is $got, profile says $want"
   if [[ "$P" == ipad-mini ]]; then
     # The UI tree answers right after a cold profile switch (it waits for accessibility).
-    # (On iPad, iOS reports the dock's DockFolderViewService as the frontmost app; see
-    # docs/IOS.md, so the content is not checked.)
+    # On iPad the accessibility bridge names the dock's DockFolderViewService as the frontmost
+    # app; agemu finds the app that owns the screen (docs/IOS.md, "iPad: the frontmost app").
     expect "iPad: UI tree read right after the switch" ui
     printf '%s\n' "$LAST" >"$OUT/ipad-mini-ui.txt"
+    has "iPad: the home screen (SpringBoard) is the tree's app" "app=com.apple.springboard"
+    has "iPad: home screen tree has the App Library button" "id=AppLibrary"
+    expect "iPad: launch Settings" launch com.apple.Preferences
+    expect "iPad: wait for the General row" wait --id com.apple.settings.general --timeout-ms 30000
+    ag ui
+    printf '%s\n' "$LAST" >"$OUT/ipad-mini-settings-ui.txt"
+    has "iPad: the tree's app is Settings" "app=com.apple.Preferences"
+    has "iPad: sidebar General row" 'label="General" id=com.apple.settings.general'
+    has "iPad: sidebar Accessibility row" 'label="Accessibility" id=com.apple.settings.accessibility'
+    has "iPad: sidebar Privacy & Security row" 'label="Privacy & Security"'
+    has "iPad: search field" "textfield"
+    expect "iPad: screenshot Settings" screenshot -o "$OUT/ipad-mini-settings.png"
+    # General is open when Settings starts on iPad: go to Accessibility first, so that About
+    # appearing proves the tap on General.
+    expect "iPad: tap --id com.apple.settings.accessibility" tap --id com.apple.settings.accessibility
+    expect "iPad: General's About is gone" wait --id About --gone --timeout-ms 10000
+    expect "iPad: tap --text General" tap --text General
+    has "iPad: tap resolved the sidebar General row" '"id":"com.apple.settings.general"'
+    x=$(json '["x"]')
+    y=$(json '["y"]')
+    ((x > 0 && x < 1488 && y > 0 && y < 2266)) && ok "iPad: tap point ($x,$y) is inside 1488x2266" || bad "iPad: tap point ($x,$y)"
+    expect "iPad: General screen (About) appears" wait --id About --timeout-ms 10000
+    expect "iPad: screenshot General" screenshot -o "$OUT/ipad-mini-general.png"
+    expect "iPad: key home" key home
+    expect "iPad: home screen (App Library button) appears" wait --id AppLibrary --timeout-ms 10000
+    ag ui
+    printf '%s\n' "$LAST" >"$OUT/ipad-mini-home-ui.txt"
+    has "iPad: SpringBoard is the tree's app after home" "app=com.apple.springboard"
+    expect "iPad: open Settings again (dirty state)" launch com.apple.Preferences
+    expect "iPad: wait for General" wait --id com.apple.settings.general --timeout-ms 30000
+    expect "iPad: reset (confirms SpringBoard)" reset
+    ag ui
+    printf '%s\n' "$LAST" >"$OUT/ipad-mini-after-reset-ui.txt"
+    has "iPad: SpringBoard is the tree's app after reset" "app=com.apple.springboard"
+    expect "iPad: screenshot after reset" screenshot -o "$OUT/ipad-mini-after-reset.png"
   fi
   if [[ "$P" == iphone-se-3 ]]; then
     # Tap by selector in a non-default profile (2x scale, 750x1334 pixels).

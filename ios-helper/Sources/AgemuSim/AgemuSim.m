@@ -318,17 +318,22 @@ static NSString *AGStringValue(id value)
 @end
 
 // Sends one translator request straight to the device (not through AXPTranslator), bounded
-// by the session. Returns the response's resultData.
-static id AGAXDirect(AGAXSession *session, id translation, unsigned long long requestType,
-                     unsigned long long attribute)
+// by the session. Returns the response's resultData. Request types (AXPTranslatorRequest):
+// 1 application by parameters[pid], 2 one attribute, 4 frontmost application, 5 multiple
+// attributes, 6 hit test.
+static id AGAXRequest(AGAXSession *session, id _Nullable translation, unsigned long long requestType,
+                      unsigned long long attribute, NSDictionary *_Nullable parameters)
 {
   Class requestClass = NSClassFromString(@"AXPTranslatorRequest");
-  if (!requestClass || !translation) {
+  if (!requestClass) {
     return nil;
   }
   id request = [(id<AGAXPTranslatorRequest>)requestClass requestWithTranslation:translation];
   [request setRequestType:requestType];
   [request setAttributeType:attribute];
+  if (parameters) {
+    [request setParameters:parameters];
+  }
   double wait = MIN(session.requestTimeout, session.deadline - CFAbsoluteTimeGetCurrent());
   session.requests += 1;
   if (wait <= 0) {
@@ -350,12 +355,29 @@ static id AGAXDirect(AGAXSession *session, id translation, unsigned long long re
   return [response respondsToSelector:@selector(resultData)] ? [response resultData] : nil;
 }
 
+static id AGAXDirect(AGAXSession *session, id translation, unsigned long long requestType,
+                     unsigned long long attribute)
+{
+  return translation ? AGAXRequest(session, translation, requestType, attribute, nil) : nil;
+}
+
 // The application's bundle identifier (AXPAttributeBundleIdentifier = 6), one request.
 static NSString *AGAXBundleIdentifier(AGAXSession *session, id element)
 {
   id translation = [(id<AGAXPMacPlatformElement>)element translation];
   id value = AGAXDirect(session, translation, 2 /* attribute */, 6 /* AXPAttributeBundleIdentifier */);
   return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+// The application element of a process: request type 1 with parameters {pid}, one request
+// (what idb's FBSimulatorAX sends for an explicit pid). nil when the process has none.
+static id AGAXApplicationTranslation(AGAXSession *session, int pid)
+{
+  id translation = AGAXRequest(session, nil, 1, 0, @{@"pid" : @(pid)});
+  if (![translation respondsToSelector:@selector(pid)] || [(id<AGAXPTranslationObject>)translation pid] != pid) {
+    return nil;
+  }
+  return translation;
 }
 
 static NSError *AGAXTimeoutError(AGAXSession *session, NSString *what, double budget)
@@ -390,6 +412,41 @@ typedef struct {
 } AGAXWalk;
 
 static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth);
+
+// iOS 26 collection views can be "opaque element providers" (AXPAttributeIsOpaqueElementProvider,
+// 29): they report no AXChildren and expose their cells only through
+// AXPAttributeVisibleOpaqueElements (58). The iPad Settings sidebar is one: AXChildren is empty
+// (batched or not), its rows name it as their parent, and attribute 58 returns its 16 visible
+// rows in one request. Hit tests found only the row on the sampled centre line.
+static NSArray *AGAXOpaqueChildren(id element, AGAXWalk *walk, NSInteger depth)
+{
+  id translation = [(id<AGAXPMacPlatformElement>)element translation];
+  id visible = AGAXDirect(walk->session, translation, 2 /* attribute */, 58 /* AXPAttributeVisibleOpaqueElements */);
+  if (![visible isKindOfClass:NSArray.class]) {
+    return @[];
+  }
+  id<AGAXPTranslator> translator = AGAXBridge.shared.translator;
+  unsigned long long selfID = [(id<AGAXPTranslationObject>)translation objectID];
+  NSMutableArray *out = [NSMutableArray arrayWithCapacity:[(NSArray *)visible count]];
+  for (id child in (NSArray *)visible) {
+    if (walk->session.timeouts > 0) {
+      break;
+    }
+    if (![child respondsToSelector:@selector(objectID)] || [(id<AGAXPTranslationObject>)child objectID] == selfID) {
+      continue;
+    }
+    [(id<AGAXPTranslationObject>)child setBridgeDelegateToken:walk->token];
+    id childElement = [translator macPlatformElementFromTranslation:child];
+    if (!childElement) {
+      continue;
+    }
+    NSDictionary *node = AGAXNode(childElement, walk, depth);
+    if (node) {
+      [out addObject:node];
+    }
+  }
+  return out;
+}
 
 // Some containers report no children although they have some (e.g. the iOS 26 Settings
 // toolbar that hosts the search field: both AXChildren and AXChildrenInNavigationOrder come
@@ -517,9 +574,19 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
       }
     }
     if (out.count == 0 && depth > 0 && [role isEqualToString:@"AXGroup"] && walk->session.timeouts == 0) {
-      [out addObjectsFromArray:AGAXHiddenChildren(frame, walk, depth + 1)];
+      // Sampling the centre line finds one row of content; a group taller than three 44 pt
+      // rows can hold more, so ask it for its opaque elements first. Shorter ones (the iPhone
+      // Settings toolbar, 86 pt) keep the centre-line sampling alone.
+      if (NSHeight(frame) > 132) {
+        [out addObjectsFromArray:AGAXOpaqueChildren(element, walk, depth + 1)];
+      }
       if (out.count) {
-        node[@"hitTested"] = @YES;
+        node[@"opaque"] = @YES;
+      } else if (walk->session.timeouts == 0) {
+        [out addObjectsFromArray:AGAXHiddenChildren(frame, walk, depth + 1)];
+        if (out.count) {
+          node[@"hitTested"] = @YES;
+        }
       }
     }
     if (out.count) {
@@ -1336,8 +1403,89 @@ static void *AGTouchMessage(double x, double y, BOOL down, uint32_t edge)
 
 #pragma mark Accessibility
 
-- (id)frontmostElementWithBridge:(AGAXBridge *)bridge token:(NSString *)token pid:(int *)pid error:(NSError **)error
+static BOOL AGAXBatching(id element);
+
+- (BOOL)isPad
 {
+  return [self.deviceTypeIdentifier containsString:@"iPad"];
+}
+
+// The application element of the process that owns the screen, on iPad.
+//
+// The bridge's frontmost application is the first of SpringBoard's focused applications (iOS
+// attribute 1102). On iPad (iOS 26.5) that list starts with the dock's
+// com.apple.DocumentManager.DockFolderViewService on the home screen and for about a second
+// after an app comes to the front, so its empty tree was read instead of the screen's. A
+// system-wide hit test (request type 6) is answered by the process whose window is at that
+// point: SpringBoard on the home screen, Settings while Settings is in front.
+//
+// So hit-test the screen centre. When the centre belongs to the reported frontmost process,
+// keep it (2 requests in all). Otherwise take the hit process's application element (request
+// type 1) if it covers at least 40% of the screen; that rejects hosted content such as a home
+// screen widget (WidgetRenderer, 260x260 pt) or the keyboard, and then four more points are
+// tried. Nothing found (right after a launch every hit test answers nothing for about a
+// second): the reported frontmost application, as before, with *confirmed set to NO.
+- (id)screenOwnerForFrontmost:(id)frontmost
+                        token:(NSString *)token
+                      session:(AGAXSession *)session
+                    confirmed:(BOOL *)confirmed
+{
+  *confirmed = NO;
+  id<AGAXPTranslator> translator = AGAXBridge.shared.translator;
+  double scale = self.screenScale > 0 ? self.screenScale : 1;
+  CGSize pixels = self.screenPixels;
+  NSRect screen = NSMakeRect(0, 0, pixels.width / scale, pixels.height / scale);
+  if (screen.size.width < 1 || screen.size.height < 1) {
+    return frontmost;
+  }
+  int frontPid = [(id<AGAXPTranslationObject>)frontmost pid];
+  NSMutableSet<NSNumber *> *rejected = [NSMutableSet set];
+  const double points[5][2] = {{0.5, 0.5}, {0.5, 0.3}, {0.5, 0.7}, {0.3, 0.5}, {0.7, 0.5}};
+  for (int i = 0; i < 5 && session.timeouts == 0; i++) {
+    CGPoint p = CGPointMake(points[i][0] * NSWidth(screen), points[i][1] * NSHeight(screen));
+    id hit = [translator objectAtPoint:p displayId:0 bridgeDelegateToken:token];
+    int pid = hit ? [(id<AGAXPTranslationObject>)hit pid] : 0;
+    if (pid <= 0 || [rejected containsObject:@(pid)]) {
+      continue;
+    }
+    if (pid == frontPid) {
+      *confirmed = YES;
+      return frontmost;
+    }
+    id app = AGAXApplicationTranslation(session, pid);
+    if (app) {
+      [(id<AGAXPTranslationObject>)app setBridgeDelegateToken:token];
+      id element = [translator macPlatformElementFromTranslation:app];
+      [(id<AGAXPTranslationObject>)[(id<AGAXPMacPlatformElement>)element translation] setBridgeDelegateToken:token];
+      NSRect frame = NSZeroRect;
+      if (AGAXBatching(element)) {
+        NSDictionary *v = [(id<AGAXPMacPlatformElement>)element accessibilityMultipleAttributes:@[ @"AXFrame" ]];
+        NSValue *fv = [v isKindOfClass:NSDictionary.class] ? v[@"AXFrame"] : nil;
+        frame = [fv isKindOfClass:NSValue.class] ? fv.rectValue : NSZeroRect;
+      } else if (element) {
+        frame = [(NSAccessibilityElement *)element accessibilityFrame];
+      }
+      NSRect covered = NSIntersectionRect(frame, screen);
+      if (NSWidth(covered) * NSHeight(covered) >= 0.4 * NSWidth(screen) * NSHeight(screen)) {
+        *confirmed = YES;
+        return app;
+      }
+    }
+    [rejected addObject:@(pid)];
+  }
+  return frontmost;
+}
+
+// The frontmost application's element. *confirmed is NO when, on iPad, no hit test found the
+// process that owns the screen (see screenOwnerForFrontmost:).
+- (id)frontmostElementWithBridge:(AGAXBridge *)bridge
+                           token:(NSString *)token
+                         session:(AGAXSession *)session
+                             pid:(int *)pid
+                       confirmed:(BOOL *)confirmed
+                           error:(NSError **)error
+{
+  *confirmed = YES;
   id<AGAXPTranslator> translator = bridge.translator;
   id translation = [translator frontmostApplicationWithDisplayId:0 bridgeDelegateToken:token];
   if (!translation) {
@@ -1345,6 +1493,9 @@ static void *AGTouchMessage(double x, double y, BOOL down, uint32_t edge)
     return nil;
   }
   [(id<AGAXPTranslationObject>)translation setBridgeDelegateToken:token];
+  if (self.isPad) {
+    translation = [self screenOwnerForFrontmost:translation token:token session:session confirmed:confirmed];
+  }
   *pid = [(id<AGAXPTranslationObject>)translation pid];
   id element = [translator macPlatformElementFromTranslation:translation];
   if (!element) {
@@ -1422,7 +1573,13 @@ static BOOL AGAXBatching(id element)
                        error:error
                         body:^id(AGAXBridge *bridge, NSString *token, AGAXSession *session, NSError **err) {
                           int pid = 0;
-                          id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:err];
+                          BOOL confirmed = YES;
+                          id element = [self frontmostElementWithBridge:bridge
+                                                                  token:token
+                                                                session:session
+                                                                    pid:&pid
+                                                              confirmed:&confirmed
+                                                                  error:err];
                           if (!element) {
                             return nil;
                           }
@@ -1438,6 +1595,7 @@ static BOOL AGAXBatching(id element)
                             @"elements" : @(walk.count),
                             @"requests" : @(session.requests),
                             @"batched" : @(walk.batched),
+                            @"unconfirmed" : @(!confirmed),
                           };
                         }];
 }
@@ -1483,12 +1641,18 @@ static BOOL AGAXBatching(id element)
                        error:error
                         body:^id(AGAXBridge *bridge, NSString *token, AGAXSession *session, NSError **err) {
                           int pid = 0;
-                          id element = [self frontmostElementWithBridge:bridge token:token pid:&pid error:err];
+                          BOOL confirmed = YES;
+                          id element = [self frontmostElementWithBridge:bridge
+                                                                  token:token
+                                                                session:session
+                                                                    pid:&pid
+                                                              confirmed:&confirmed
+                                                                  error:err];
                           if (!element) {
                             return nil;
                           }
                           if (!full) {
-                            return @{@"pid" : @(pid)};
+                            return @{@"pid" : @(pid), @"unconfirmed" : @(!confirmed)};
                           }
                           NSString *bundle = AGAXBundleIdentifier(session, element);
                           NSRect frame = NSZeroRect;
@@ -1510,6 +1674,7 @@ static BOOL AGAXBatching(id element)
                             @"frame" : @[ @(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height) ],
                             @"label" : label ?: @"",
                             @"bundleId" : bundle ?: @"",
+                            @"unconfirmed" : @(!confirmed),
                           };
                         }];
 }
