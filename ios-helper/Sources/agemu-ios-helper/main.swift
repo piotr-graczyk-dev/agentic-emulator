@@ -917,6 +917,8 @@ do {
     log("loading private frameworks failed: \(error.localizedDescription)")
 }
 
+DispatchQueue.global(qos: .utility).async { Screenshot.warmUp() }
+
 let reader = Thread {
     let stdin = FileHandle.standardInput
     var buffer = Data()

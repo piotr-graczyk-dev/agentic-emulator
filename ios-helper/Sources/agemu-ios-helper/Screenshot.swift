@@ -45,6 +45,22 @@ enum Screenshot {
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     static let ciContext = CIContext(options: [.cacheIntermediates: false])
 
+    /// AGEMU_IOS_JPEG=imageio selects ImageIO's JPEG encoder instead of Core Image's.
+    static let jpegEncoder = ProcessInfo.processInfo.environment["AGEMU_IOS_JPEG"] ?? "coreimage"
+
+    static func coreImageJPEG(_ px: PixelBuffer, quality: Double) -> Data? {
+        let ci = CIImage(bitmapData: px.data, bytesPerRow: px.bytesPerRow, size: CGSize(width: px.width, height: px.height),
+                         format: .BGRA8, colorSpace: sRGB)
+        let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        return ciContext.jpegRepresentation(of: ci, colorSpace: sRGB, options: [key: quality])
+    }
+
+    /// The first Core Image encode sets up its GPU pipeline (0.1-0.5 s); do it at start-up.
+    static func warmUp() {
+        let px = PixelBuffer(data: Data(count: 64 * 64 * 4), width: 64, height: 64, bytesPerRow: 64 * 4)
+        _ = coreImageJPEG(px, quality: 0.85)
+    }
+
     /// Copies the current framebuffer. The surface is locked only for the copy (~2 ms).
     static func pixels(_ surface: IOSurface) throws -> PixelBuffer {
         let width = surface.width, height = surface.height
@@ -74,7 +90,13 @@ enum Screenshot {
         }
         let jpeg = format == "jpeg" || format == "jpg"
         var size = 0
-        if jpeg {
+        if jpeg, jpegEncoder != "imageio", let data = coreImageJPEG(px, quality: quality) {
+            // Core Image's JPEG encoder: ~5 ms for 1206x2622 vs ~11 ms for ImageIO's, with the
+            // same fidelity (mean |diff| to the lossless frame 0.30 vs simctl's 0.29). It encodes
+            // the frame copied above, never the live surface.
+            try data.write(to: URL(fileURLWithPath: path))
+            size = data.count
+        } else if jpeg {
             let url = URL(fileURLWithPath: path)
             guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
                 throw HelperError("cannot write \(path)")
