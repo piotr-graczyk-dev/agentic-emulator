@@ -53,6 +53,11 @@ type Params struct {
 	Env      map[string]string `json:"env,omitempty"`      // launch: process environment
 	Relaunch bool              `json:"relaunch,omitempty"` // launch: terminate a running instance first
 
+	// actions (tap, swipe, type, key, launch) can wait for the next screen in the same call
+	WaitFor       *api.Selector `json:"waitFor,omitempty"`
+	WaitGone      bool          `json:"waitGone,omitempty"`
+	WaitTimeoutMs int           `json:"waitTimeoutMs,omitempty"`
+
 	// selectors / waits
 	Selector  *api.Selector `json:"selector,omitempty"`
 	TimeoutMs int           `json:"timeoutMs,omitempty"`
@@ -233,6 +238,23 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 	l.Lock()
 	defer l.Unlock()
 
+	res, err := s.act(ctx, b, id, method, p)
+	if err != nil || p.WaitFor == nil || p.WaitFor.Empty() {
+		return res, err
+	}
+	// The action succeeded; wait for its effect in the same call (one round trip, and one
+	// agent tool call, per step).
+	waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs})
+	if werr != nil {
+		return nil, fmt.Errorf("%s done, but: %w", method, werr)
+	}
+	return map[string]any{"result": res, "waited": waited}, nil
+}
+
+// act runs one device action (the caller holds the device lock).
+func (s *Service) act(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
+	var err error
+
 	switch method {
 	case "boot":
 		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
@@ -400,7 +422,24 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	fw, frames := b.(backend.FrameWaiter)
+	if os.Getenv("AGEMU_WAIT_MODE") == "poll" { // timer polling only, for comparisons
+		frames = false
+	}
+	var prevMark uint64
+	lastChange := time.Now()
 	for {
+		// The frame mark is taken before the read, so a change that shows during the read
+		// triggers the next read at once.
+		var mark uint64
+		if frames {
+			var ferr error
+			if mark, ferr = fw.WaitFrame(ctx, id, 0, 0); ferr != nil || mark == 0 {
+				frames = false // no frame counter (yet): poll on a timer
+			} else if mark != prevMark {
+				prevMark, lastChange = mark, time.Now()
+			}
+		}
 		// Each read is bounded by the wait's own deadline (at least 1 s), so a slow device
 		// cannot stretch a wait far past its timeout.
 		rdl := deadline
@@ -429,6 +468,17 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 				return nil, fmt.Errorf("timeout after %v waiting for %s to %s (last UI read failed: %v)", timeout, describe(*p.Selector), state, lastErr)
 			}
 			return nil, fmt.Errorf("timeout after %v waiting for %s to %s", timeout, describe(*p.Selector), state)
+		}
+		// While the screen is changing (and for 600 ms after), poll every 50 ms: the
+		// accessibility tree of a React Native app catches up with a frame some time after it
+		// is drawn. On a still screen, sleep until the next frame instead (at most 250 ms,
+		// since the tree can change without one), which saves reads while waiting for, say,
+		// the network.
+		if frames && time.Since(lastChange) > 600*time.Millisecond {
+			if _, ferr := fw.WaitFrame(ctx, id, mark, 250*time.Millisecond); ferr == nil {
+				continue
+			}
+			frames = false
 		}
 		select {
 		case <-ctx.Done():

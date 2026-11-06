@@ -742,6 +742,24 @@ func (b *Backend) Settle(ctx context.Context, id string) (bool, error) {
 	return r.Settled, err
 }
 
+// WaitFrame blocks until the screen shows a frame newer than mark and has then had no big
+// change for 16 ms (at most max); mark 0 returns the current frame counter at once.
+func (b *Backend) WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error) {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	var r struct {
+		Mark uint64 `json:"mark"`
+	}
+	req := map[string]any{"udid": d.UDID, "since": mark, "maxMs": max.Milliseconds(), "quietMs": 16}
+	if mark == 0 {
+		req["since"] = -1
+	}
+	err = b.call(ctx, "nextframe", req, &r)
+	return r.Mark, err
+}
+
 // TapNow taps without the helper's wait for a still screen (the daemon confirmed the target is
 // at rest).
 func (b *Backend) TapNow(ctx context.Context, id string, x, y int) error {

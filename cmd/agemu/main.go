@@ -46,6 +46,10 @@ Device commands (-d <device> optional when exactly one device is booted):
   launch <app-id> [--relaunch] [-- <process args...>]   (args/relaunch: iOS)
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
 
+Actions (tap, swipe, type, key, launch) also wait for their effect in the same call:
+  --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
+  e.g. agemu tap --text "Log in" --wait-id home-screen
+
 Servers:
   daemon                                    run the daemon in the foreground
   mcp                                       MCP server on stdio (for agent harnesses)
@@ -87,7 +91,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true}
+var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -128,6 +132,15 @@ func (c cli) int(name string) int { v, _ := strconv.Atoi(c.flags[name]); return 
 
 func (c cli) selector() *api.Selector {
 	s := api.Selector{Text: c.flags["text"], Contains: c.flags["contains"], ID: c.flags["id"], Role: c.flags["role"], Index: c.int("index")}
+	if s.Empty() {
+		return nil
+	}
+	return &s
+}
+
+// waitSelector builds the selector of an action's --wait-* flags (nil without any).
+func (c cli) waitSelector() *api.Selector {
+	s := api.Selector{Text: c.flags["wait-text"], Contains: c.flags["wait-contains"], ID: c.flags["wait-id"], Role: c.flags["wait-role"]}
 	if s.Empty() {
 		return nil
 	}
@@ -232,6 +245,13 @@ func runCommand(cmd string, args []string) error {
 		}
 	default:
 		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
+	}
+
+	switch cmd {
+	case "tap", "swipe", "type", "key", "launch":
+		if ws := c.waitSelector(); ws != nil {
+			p.WaitFor, p.WaitGone, p.WaitTimeoutMs = ws, c.flags["wait-gone"] == "true", c.int("wait-timeout-ms")
+		}
 	}
 
 	cl, err := client.Dial()

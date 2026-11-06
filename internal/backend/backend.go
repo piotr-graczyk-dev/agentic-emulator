@@ -3,6 +3,7 @@ package backend
 
 import (
 	"context"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 )
@@ -64,4 +65,13 @@ type Launcher interface {
 type Settler interface {
 	Settle(ctx context.Context, id string) (bool, error)
 	TapNow(ctx context.Context, id string, x, y int) error
+}
+
+// FrameWaiter is implemented by backends that can block until the screen shows a new frame.
+// The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
+// on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns
+// once a frame newer than mark has shown and the screen has had no big change for a moment,
+// or after max, with the newest mark.
+type FrameWaiter interface {
+	WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error)
 }

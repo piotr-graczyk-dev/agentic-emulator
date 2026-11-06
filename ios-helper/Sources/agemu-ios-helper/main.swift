@@ -983,6 +983,14 @@ func handle(_ req: [String: Any]) throws -> Any {
         let out = try d.spawnCapture(try req.string("path"), arguments: req["args"] as? [String] ?? [],
                                      timeout: req.optDouble("timeoutMs", 10000) / 1000)
         return ["stdout": out]
+    case "nextframe":
+        let d = try device(req)
+        let since = req.optDouble("since", -1)
+        if since < 0 {
+            let mark = d.inputFrameMark()
+            return ["mark": mark == UInt.max ? 0 : mark]
+        }
+        return d.waitForFrame(since: UInt(since), quiet: req.optDouble("quietMs", 16), max: req.optDouble("maxMs", 250))
     case "settle":
         let d = try device(req)
         if req.optBool("big") {

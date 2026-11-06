@@ -93,6 +93,9 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 /// Like waitForSettleQuiet, but only big changes count (more than 0.4% of a sparse pixel grid):
 /// a blinking cursor, a spinner or a countdown do not keep the screen from being still.
 - (NSDictionary *)waitForStillQuiet:(double)quietMs max:(double)maxMs;
+/// Waits for a frame newer than mark, then until there has been no big change for quietMs; at
+/// most maxMs in all. Returns @{@"mark": frame counter}.
+- (NSDictionary *)waitForFrameSince:(NSUInteger)mark quiet:(double)quietMs max:(double)maxMs;
 /// Frame counter to take before sending input (NSUIntegerMax without a framebuffer).
 - (NSUInteger)inputFrameMark;
 /// After input: waits for the first frame newer than `mark`, then for `quietMs` without frames;

@@ -60,6 +60,22 @@ var (
 	device = str("Device id or name (optional when exactly one device is booted)")
 )
 
+// waitProps are the optional "wait for the next screen in the same call" arguments of actions.
+var waitProps = map[string]any{
+	"waitFor": map[string]any{"type": "object", "description": "After the action, wait for an element matching this selector (fields: text, contains, id, role) in the same call", "properties": map[string]any{
+		"text": str("Exact text or label"), "contains": str("Substring of text or label"), "id": str("Identifier"), "role": str("Role"),
+	}},
+	"waitGone":      boolT("Wait for waitFor to disappear instead"),
+	"waitTimeoutMs": num("Timeout for waitFor, default 10000"),
+}
+
+func withWait(props map[string]any) map[string]any {
+	for k, v := range waitProps {
+		props[k] = v
+	}
+	return props
+}
+
 func selectorProps(extra map[string]any) map[string]any {
 	m := map[string]any{
 		"device":   device,
@@ -86,18 +102,18 @@ var tools = []tool{
 	{Name: "screenshot", method: "screenshot", Description: "Capture the screen. Returns the image plus its file path. Coordinates on a scale=1 image are tap coordinates.", InputSchema: obj(map[string]any{"device": device, "scale": num("Downscale factor 0-1 for the returned image (default 0.5)"), "format": str("png or jpeg")})},
 	{Name: "ui_tree", method: "ui", Description: "Accessibility/UI hierarchy as a compact outline: [ref] role \"text\" id=... @(x,y wxh). Frames are screenshot pixels.", InputSchema: obj(map[string]any{"device": device, "json": boolT("Return full JSON instead of the outline")})},
 	{Name: "find", method: "find", Description: "Find elements by text/label/id/role.", InputSchema: obj(selectorProps(nil))},
-	{Name: "tap", method: "tap", Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector.", InputSchema: obj(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")}))},
-	{Name: "swipe", method: "swipe", Description: "Swipe from (x,y) to (x2,y2) in screenshot pixels.", InputSchema: obj(map[string]any{"device": device, "x": num("start x"), "y": num("start y"), "x2": num("end x"), "y2": num("end y"), "durationMs": num("duration, default 300")}, "x", "y", "x2", "y2")},
-	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}, "text")},
-	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(map[string]any{"device": device, "key": str("Key name")}, "key")},
+	{Name: "tap", method: "tap", Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")})))},
+	{Name: "swipe", method: "swipe", Description: "Swipe from (x,y) to (x2,y2) in screenshot pixels.", InputSchema: obj(withWait(map[string]any{"device": device, "x": num("start x"), "y": num("start y"), "x2": num("end x"), "y2": num("end y"), "durationMs": num("duration, default 300")}), "x", "y", "x2", "y2")},
+	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
+	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name")}), "key")},
 	{Name: "install", method: "install", Description: "Install an app (.apk for Android, .app for iOS Simulator).", InputSchema: obj(map[string]any{"device": device, "path": str("Absolute path")}, "path")},
-	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id. iOS also takes process arguments (e.g. an Expo dev client's --initialUrl), environment and relaunch.", InputSchema: obj(map[string]any{
+	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id. iOS also takes process arguments (e.g. an Expo dev client's --initialUrl), environment and relaunch.", InputSchema: obj(withWait(map[string]any{
 		"device":   device,
 		"app":      str("Package name or bundle id"),
 		"args":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Process arguments (iOS)"},
 		"env":      map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Process environment (iOS)"},
 		"relaunch": boolT("Terminate a running instance first (iOS)"),
-	}, "app")},
+	}), "app")},
 	{Name: "terminate", method: "terminate", Description: "Force-stop an app.", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
 	{Name: "wait_for", method: "wait", Description: "Wait until an element matching the selector appears (or disappears with gone=true).", InputSchema: obj(selectorProps(map[string]any{"gone": boolT("Wait for disappearance"), "timeoutMs": num("Timeout, default 10000")}))},
 }

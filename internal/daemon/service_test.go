@@ -291,3 +291,23 @@ func TestLaunchOptionsNeedALauncher(t *testing.T) {
 		t.Fatalf("LaunchWith got %+v (plain launches %v)", ol.got, ol.launched)
 	}
 }
+
+func TestActionWaitsForItsEffectInTheSameCall(t *testing.T) {
+	sb := &settlingBackend{still: true}
+	svc := NewService(t.TempDir(), sb)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"},"waitFor":{"contains":"welcome"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok || m["result"] == nil || m["waited"] == nil {
+		t.Fatalf("result = %#v, want result and waited", res)
+	}
+	if el, _ := m["waited"].(*api.Element); el == nil || el.Ref != "e2" {
+		t.Fatalf("waited = %#v, want e2", m["waited"])
+	}
+	_, err = svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":1,"y":1,"waitFor":{"text":"never"},"waitTimeoutMs":100}`))
+	if err == nil || !strings.Contains(err.Error(), "tap done, but") {
+		t.Fatalf("err = %v, want the action to report the failed wait", err)
+	}
+}
