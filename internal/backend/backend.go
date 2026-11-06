@@ -40,3 +40,23 @@ type Backend interface {
 	// Close releases helper processes and connections (devices keep running).
 	Close() error
 }
+
+// LaunchOptions are extra launch parameters. A development client, for example, needs the
+// URL of its dev server as a process argument (Expo: --initialUrl http://localhost:8081).
+type LaunchOptions struct {
+	Args     []string          // process arguments
+	Env      map[string]string // process environment
+	Relaunch bool              // terminate a running instance first
+}
+
+// Launcher is implemented by backends that support LaunchOptions.
+type Launcher interface {
+	LaunchWith(ctx context.Context, id string, appID string, o LaunchOptions) error
+}
+
+// Settler is implemented by backends that can wait until the screen stops changing. The daemon
+// settles before it resolves a tap selector, so the element's frame is read where it comes to
+// rest and not mid-scroll or mid-transition.
+type Settler interface {
+	Settle(ctx context.Context, id string) error
+}

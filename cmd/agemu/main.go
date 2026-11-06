@@ -42,7 +42,8 @@ Device commands (-d <device> optional when exactly one device is booted):
   swipe <x1> <y1> <x2> <y2> [--ms 300]
   type <text> [--keys]                      type into the focused field (--keys: per-key events)
   key home|back|enter|delete|tab|escape|lock
-  install <path.apk|path.app>  launch <app-id>  terminate <app-id>
+  install <path.apk|path.app>  terminate <app-id>
+  launch <app-id> [--relaunch] [-- <process args...>]   (args/relaunch: iOS)
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
 
 Servers:
@@ -86,7 +87,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true}
+var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -225,6 +226,10 @@ func runCommand(cmd string, args []string) error {
 			return fmt.Errorf("%s needs an app id", cmd)
 		}
 		p.App = c.pos[0]
+		if cmd == "launch" {
+			p.Args = c.pos[1:] // agemu launch <app> -- <process arguments...>
+			p.Relaunch = c.flags["relaunch"] == "true"
+		}
 	default:
 		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
 	}

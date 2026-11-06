@@ -90,6 +90,11 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 - (BOOL)prepareHIDWithError:(NSError **)error;
 /// Waits until the display shows no new frame for quietMs (max maxMs): {settled, waitedMs, frames}.
 - (NSDictionary *)waitForSettleQuiet:(double)quietMs max:(double)maxMs;
+/// Frame counter to take before sending input (NSUIntegerMax without a framebuffer).
+- (NSUInteger)inputFrameMark;
+/// After input: waits for the first frame newer than `mark`, then for `quietMs` without frames;
+/// at most `maxMs` in all.
+- (NSDictionary *)waitForChangeSince:(NSUInteger)mark quiet:(double)quietMs max:(double)maxMs;
 /// YES when the framebuffer surface / HID client of the current boot are connected.
 @property (nonatomic, readonly) BOOL framebufferConnected;
 @property (nonatomic, readonly) BOOL hidConnected;

@@ -1066,6 +1066,39 @@ static IOSurface *AGAsSurface(id candidate)
   }
 }
 
+- (NSUInteger)inputFrameMark
+{
+  NSError *err = nil;
+  if (![self framebufferWithError:&err]) {
+    return NSUIntegerMax;
+  }
+  [self startDisplayMonitor];
+  return self.frameCount;
+}
+
+- (NSDictionary *)waitForChangeSince:(NSUInteger)mark quiet:(double)quietMs max:(double)maxMs
+{
+  if (mark == NSUIntegerMax) {
+    return @{@"changed" : @NO, @"waitedMs" : @0};
+  }
+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+  double quiet = quietMs / 1000, limit = maxMs / 1000;
+  while (self.frameCount == mark) {
+    if (CFAbsoluteTimeGetCurrent() - start >= limit) {
+      return @{@"changed" : @NO, @"waitedMs" : @((CFAbsoluteTimeGetCurrent() - start) * 1000)};
+    }
+    usleep(2000);
+  }
+  for (;;) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL settled = now - self.lastFrameAt >= quiet;
+    if (settled || now - start >= limit) {
+      return @{@"changed" : @YES, @"settled" : @(settled), @"waitedMs" : @((now - start) * 1000)};
+    }
+    usleep(4000);
+  }
+}
+
 - (void)setLiveSurface:(id)candidate
 {
   IOSurface *surface = AGAsSurface(candidate);

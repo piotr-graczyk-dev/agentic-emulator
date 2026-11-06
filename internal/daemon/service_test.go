@@ -152,3 +152,37 @@ func shortTempDir(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
 }
+
+// settlingBackend records the order of Settle and UITree calls.
+type settlingBackend struct {
+	fakeBackend
+	calls []string
+}
+
+func (s *settlingBackend) Settle(ctx context.Context, id string) error {
+	s.calls = append(s.calls, "settle")
+	return nil
+}
+
+func (s *settlingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	s.calls = append(s.calls, "ui")
+	return tree(), nil
+}
+
+func TestTapBySelectorSettlesBeforeReadingTheTree(t *testing.T) {
+	sb := &settlingBackend{}
+	svc := NewService(t.TempDir(), sb)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sb.calls) < 2 || sb.calls[0] != "settle" || sb.calls[1] != "ui" {
+		t.Fatalf("calls = %v, want settle before ui", sb.calls)
+	}
+	sb.calls = nil
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sb.calls) != 0 {
+		t.Fatalf("a tap at coordinates read the tree or settled: %v", sb.calls)
+	}
+}

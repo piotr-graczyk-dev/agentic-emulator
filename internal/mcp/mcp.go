@@ -91,7 +91,13 @@ var tools = []tool{
 	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Android: send one key event per character through the keyboard (slower) instead of setting the field's text")}, "text")},
 	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(map[string]any{"device": device, "key": str("Key name")}, "key")},
 	{Name: "install", method: "install", Description: "Install an app (.apk for Android, .app for iOS Simulator).", InputSchema: obj(map[string]any{"device": device, "path": str("Absolute path")}, "path")},
-	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id.", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
+	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id. iOS also takes process arguments (e.g. an Expo dev client's --initialUrl), environment and relaunch.", InputSchema: obj(map[string]any{
+		"device":   device,
+		"app":      str("Package name or bundle id"),
+		"args":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Process arguments (iOS)"},
+		"env":      map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Process environment (iOS)"},
+		"relaunch": boolT("Terminate a running instance first (iOS)"),
+	}, "app")},
 	{Name: "terminate", method: "terminate", Description: "Force-stop an app.", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
 	{Name: "wait_for", method: "wait", Description: "Wait until an element matching the selector appears (or disappears with gone=true).", InputSchema: obj(selectorProps(map[string]any{"gone": boolT("Wait for disappearance"), "timeoutMs": num("Timeout, default 10000")}))},
 }

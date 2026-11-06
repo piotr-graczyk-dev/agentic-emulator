@@ -15,3 +15,19 @@ func TestParse(t *testing.T) {
 		t.Fatalf("selector: %#v", s)
 	}
 }
+
+func TestParseLaunchArgs(t *testing.T) {
+	c := parse([]string{"pl.app", "--relaunch", "-d", "ios:x", "--", "--initialUrl", "http://localhost:8081", "-EXDevMenuShowsAtLaunch", "NO"})
+	if c.flags["relaunch"] != "true" || c.flags["device"] != "ios:x" {
+		t.Fatalf("flags: %#v", c.flags)
+	}
+	want := []string{"pl.app", "--initialUrl", "http://localhost:8081", "-EXDevMenuShowsAtLaunch", "NO"}
+	if len(c.pos) != len(want) {
+		t.Fatalf("pos: %#v", c.pos)
+	}
+	for i := range want {
+		if c.pos[i] != want[i] {
+			t.Fatalf("pos: %#v", c.pos)
+		}
+	}
+}
