@@ -61,40 +61,62 @@ func leanOn() bool {
 	return true
 }
 
-// leanDevice applies the lean job set to a booted agemu simulator, or with AGEMU_IOS_LEAN=0
-// undoes it, in the background: the first time on a device it takes ~11 s (64 launchctl runs),
-// and the device works meanwhile. A device is checked once per daemon and again after every
-// cold boot; after a cold boot of a lean device the wallpaper gallery is stopped too. Failures
-// are logged: a device that is not lean still works.
+// leanDevice brings a booted agemu simulator to the lean setting (or, with AGEMU_IOS_LEAN=0,
+// back to the full one) in the background: the first time on a device it takes ~10 s (64
+// launchctl runs), and the device works meanwhile. A device is checked once per daemon and
+// again after every cold boot; a request that arrives while the device is being reconciled runs
+// once that finishes. After a cold boot of a lean device the wallpaper gallery is stopped too,
+// on its own schedule (a newer boot restarts it). Failures are logged and leave the device
+// unchecked, so the next boot tries again: a device that is not lean still works.
 func (b *Backend) leanDevice(d simDevice, cold bool) {
 	if !managed(d.Name) {
 		return
 	}
 	on := leanOn()
 	b.mu.Lock()
-	state, checked := b.lean[d.UDID]
-	if b.leaning[d.UDID] || (checked && state == on && !cold) {
-		b.mu.Unlock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	if on && cold {
+		b.wallGen[d.UDID]++
+		gen := b.wallGen[d.UDID]
+		b.bgWG.Add(1)
+		go func() {
+			defer b.bgWG.Done()
+			b.stopWallpaperGallery(d, gen)
+		}()
+	}
+	if state, checked := b.lean[d.UDID]; checked && state == on && !cold {
+		return
+	}
+	if b.leaning[d.UDID] {
+		b.leanAgain[d.UDID] = true
 		return
 	}
 	b.leaning[d.UDID] = true
-	b.mu.Unlock()
+	b.bgWG.Add(1)
 	go func() {
-		defer func() {
+		defer b.bgWG.Done()
+		for {
+			ctx, cancel := context.WithTimeout(b.bg, 2*time.Minute)
+			b.applyLean(ctx, d, on)
+			cancel()
 			b.mu.Lock()
-			delete(b.leaning, d.UDID)
+			again := b.leanAgain[d.UDID] && !b.closed
+			delete(b.leanAgain, d.UDID)
+			if !again {
+				delete(b.leaning, d.UDID)
+				b.mu.Unlock()
+				return
+			}
 			b.mu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		b.applyLean(ctx, d, on)
-		if on && cold {
-			stopWallpaperGallery(d.UDID, d.Name)
 		}
 	}()
 }
 
-// applyLean makes the device's launchd overrides match on (see leanDevice).
+// applyLean makes the device's launchd overrides match on (see leanDevice), then reads them
+// back: the device is marked as checked only when every lean job matches.
 func (b *Backend) applyLean(ctx context.Context, d simDevice, on bool) {
 	start := time.Now()
 	out, err := b.launchctl(ctx, d.UDID, "print-disabled", "system")
@@ -102,53 +124,61 @@ func (b *Backend) applyLean(ctx context.Context, d simDevice, on bool) {
 		log.Printf("ios lean %s: reading launchd overrides: %v", d.Name, err)
 		return
 	}
-	disabled := disabledJobs(out)
-	var todo []string
-	for _, j := range leanJobs {
-		if on != disabled[j] {
-			todo = append(todo, j)
+	todo := leanMismatches(disabledJobs(out), on)
+	if len(todo) > 0 {
+		// Each launchctl run in the device takes ~175 ms, so they run 8 at a time.
+		var wg sync.WaitGroup
+		slots := make(chan struct{}, 8)
+		verb := "enable"
+		if on {
+			verb = "disable"
 		}
-	}
-	// Each launchctl run in the device takes ~175 ms, so they run 8 at a time.
-	var (
-		mu      sync.Mutex
-		changed []string
-		wg      sync.WaitGroup
-		slots   = make(chan struct{}, 8)
-	)
-	for _, j := range todo {
-		wg.Add(1)
-		slots <- struct{}{}
-		go func(j string) {
-			defer func() { <-slots; wg.Done() }()
-			verb := "enable"
-			if on {
-				verb = "disable"
-			}
-			if _, err := b.launchctl(ctx, d.UDID, verb, "system/"+j); err != nil {
-				log.Printf("ios lean %s: %s %s: %v", d.Name, verb, j, err)
-				return
-			}
-			if on {
-				// Stops the job if it runs now; for a job that is not loaded it only reports so.
-				_, _ = b.launchctl(ctx, d.UDID, "bootout", "system/"+j)
-			}
-			mu.Lock()
-			changed = append(changed, j)
-			mu.Unlock()
-		}(j)
-	}
-	wg.Wait()
-	if len(changed) > 0 {
-		verb := "turned off"
+		for _, j := range todo {
+			wg.Add(1)
+			slots <- struct{}{}
+			go func(j string) {
+				defer func() { <-slots; wg.Done() }()
+				if _, err := b.launchctl(ctx, d.UDID, verb, "system/"+j); err != nil {
+					log.Printf("ios lean %s: %s %s: %v", d.Name, verb, j, err)
+					return
+				}
+				if on {
+					// Stops the job if it runs now; for a job that is not loaded it only reports so.
+					_, _ = b.launchctl(ctx, d.UDID, "bootout", "system/"+j)
+				}
+			}(j)
+		}
+		wg.Wait()
+		// launchctl's exit status does not come back through the helper, so check the result.
+		if out, err = b.launchctl(ctx, d.UDID, "print-disabled", "system"); err != nil {
+			log.Printf("ios lean %s: reading launchd overrides back: %v", d.Name, err)
+			return
+		}
+		if left := leanMismatches(disabledJobs(out), on); len(left) > 0 {
+			log.Printf("ios lean %s: %d of %d launchd jobs did not change (tried again at the next boot): %s",
+				d.Name, len(left), len(todo), strings.Join(left, ", "))
+			return
+		}
+		what := "turned off"
 		if !on {
-			verb = "turned back on (they start at the next boot)"
+			what = "turned back on (they start at the next boot)"
 		}
-		log.Printf("ios lean %s: %d launchd jobs %s in %.0f ms", d.Name, len(changed), verb, ms(time.Since(start)))
+		log.Printf("ios lean %s: %d launchd jobs %s in %.0f ms", d.Name, len(todo), what, ms(time.Since(start)))
 	}
 	b.mu.Lock()
 	b.lean[d.UDID] = on
 	b.mu.Unlock()
+}
+
+// leanMismatches lists the lean jobs whose override does not match on yet.
+func leanMismatches(disabled map[string]bool, on bool) []string {
+	var m []string
+	for _, j := range leanJobs {
+		if on != disabled[j] {
+			m = append(m, j)
+		}
+	}
+	return m
 }
 
 // launchctl runs the simulator's own launchctl in the device.
@@ -175,24 +205,35 @@ func disabledJobs(out string) map[string]bool {
 // starts one per wallpaper in its gallery (6-16 processes of 35-75 MB, each rendering for 1-3
 // s of CPU) and keeps them. iOS relaunches the one the lock screen shows when it is needed (the
 // lock screen drew normally right after); the others stay stopped. They usually start within
-// 3 s of the device being ready, in some boots later, hence passes at 3, 8, 20 and 45 s.
-func stopWallpaperGallery(udid, name string) {
+// 3 s of the device being ready, in some boots later, hence passes 3, 8, 20 and 45 s after the
+// device is ready. A newer cold boot of the device (gen) or the backend closing ends it.
+func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 	n := 0
 	for _, wait := range []time.Duration{3 * time.Second, 5 * time.Second, 12 * time.Second, 25 * time.Second} {
-		time.Sleep(wait)
-		out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
-		if err != nil {
-			log.Printf("ios lean %s: ps: %v", name, err)
+		select {
+		case <-b.bg.Done():
+			return
+		case <-time.After(wait):
+		}
+		b.mu.Lock()
+		current := b.wallGen[d.UDID] == gen
+		b.mu.Unlock()
+		if !current {
 			return
 		}
-		for _, pid := range wallpaperExtensions(string(out), udid) {
+		out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+		if err != nil {
+			log.Printf("ios lean %s: ps: %v", d.Name, err)
+			return
+		}
+		for _, pid := range wallpaperExtensions(string(out), d.UDID) {
 			if syscall.Kill(pid, syscall.SIGTERM) == nil {
 				n++
 			}
 		}
 	}
 	if n > 0 {
-		log.Printf("ios lean %s: stopped %d wallpaper gallery extensions", name, n)
+		log.Printf("ios lean %s: stopped %d wallpaper gallery extensions", d.Name, n)
 	}
 }
 

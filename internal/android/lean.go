@@ -84,16 +84,20 @@ func (d *device) applyAnimations(ctx context.Context) {
 	serial := d.run.serial()
 	d.mu.Unlock()
 	cmd := "settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0"
-	deadline := time.Now().Add(10 * time.Second)
+	// Bounded as a whole: the caller holds the device's lifecycle lock, and an adb read without
+	// a deadline could block.
+	actx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	for {
-		_, err := adbShellOK(ctx, serial, cmd)
+		_, err := adbShellOK(actx, serial, cmd)
 		if err == nil {
 			return
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		select {
+		case <-actx.Done():
 			logf("%s: could not turn animations off: %v", d.name, err)
 			return
+		case <-time.After(100 * time.Millisecond):
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }

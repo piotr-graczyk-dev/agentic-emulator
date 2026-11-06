@@ -253,13 +253,14 @@ app under test does not use, so agemu turns them off in its own simulators (`age
 
 1. **32 launchd jobs are off** (`internal/ios/lean.go`, grouped by feature). agemu runs
    `launchctl disable` inside the device, so the override persists and later boots start without
-   the jobs, and `launchctl bootout` for the ones running at that moment. The first time on a
-   device this takes about 6 s (the helper runs launchctl in the device, 8 at a time); later
-   boots check it with one call. `simctl boot --disabledJob` would be the documented way, but on
+   the jobs, and `launchctl bootout` for the ones running at that moment. It runs in the background
+   after boot. The first time on a device it takes about 10 s (the helper runs launchctl in the
+   device, 8 at a time), and agemu reads the overrides back before it counts the device as lean.
+   Later boots check it with one call. `simctl boot --disabledJob` would be the documented way, but on
    CoreSimulator 1051 it had no effect: 25 of the 32 jobs still ran.
 2. **The wallpaper gallery is stopped after a cold boot.** PosterBoard starts one extension per
    wallpaper in its gallery (6-16 processes of 35-75 MB) within seconds of boot. agemu stops
-   them 3, 8, 20 and 45 s after the boot, and iOS relaunches the one the lock screen needs: after
+   them 3, 8, 20 and 45 s after the device is ready, and iOS relaunches the one the lock screen needs: after
    a stop, the lock screen drew its wallpaper, clock and notifications. PosterBoard itself stays
    on. With PosterBoard disabled, the lock screen was not drawn: the UI tree reported the lock
    screen while the screenshot showed the home screen. PosterBoard starts some gallery

@@ -58,15 +58,24 @@ type Backend struct {
 	// systemAppCache holds the built-in apps per runtime identifier.
 	systemAppCache map[string][]string
 	// lean maps udid -> the lean setting last applied to that device; leaning marks devices
-	// whose lean setting is being applied (see lean.go).
-	lean, leaning map[string]bool
+	// being reconciled and leanAgain a request that arrived meanwhile; wallGen numbers each
+	// device's cold boots for the wallpaper passes (see lean.go).
+	lean, leaning, leanAgain map[string]bool
+	wallGen                  map[string]int
+	// bg is cancelled by Close; bgWG tracks the background work that uses it.
+	bg     context.Context
+	stopBg context.CancelFunc
+	bgWG   sync.WaitGroup
+	closed bool
 }
 
 // New returns at once. The helper process is started in the background, so the first iOS
 // command does not pay for loading CoreSimulator (about 0.3 s on an idle Mac, several
 // seconds on a loaded one). AGEMU_IOS_PRESTART=0 starts it on first use instead.
 func New() *Backend {
-	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{}, lean: map[string]bool{}, leaning: map[string]bool{}}
+	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
+		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, wallGen: map[string]int{}}
+	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -87,6 +96,9 @@ func (b *Backend) Platform() api.Platform { return api.IOS }
 func (b *Backend) helper() (*helper, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return nil, fmt.Errorf("the iOS backend is shutting down")
+	}
 	if b.h != nil && b.h.alive() {
 		return b.h, nil
 	}
@@ -107,6 +119,12 @@ func (b *Backend) call(ctx context.Context, cmd string, params map[string]any, o
 }
 
 func (b *Backend) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	// Background lean work stops on cancellation; its helper calls fail once closed is set.
+	b.stopBg()
+	b.bgWG.Wait()
 	b.mu.Lock()
 	h := b.h
 	b.h = nil

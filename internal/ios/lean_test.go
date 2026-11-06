@@ -44,3 +44,37 @@ func TestWallpaperExtensions(t *testing.T) {
 		t.Fatalf("unknown device: %v, want none", got)
 	}
 }
+
+func TestLeanMismatches(t *testing.T) {
+	all := map[string]bool{}
+	for _, j := range leanJobs {
+		all[j] = true
+	}
+	if m := leanMismatches(all, true); len(m) != 0 {
+		t.Fatalf("all disabled, lean on: %v, want none", m)
+	}
+	if m := leanMismatches(all, false); len(m) != len(leanJobs) {
+		t.Fatalf("all disabled, lean off: %d mismatches, want %d", len(m), len(leanJobs))
+	}
+	delete(all, leanJobs[3])
+	if m := leanMismatches(all, true); fmt.Sprint(m) != "["+leanJobs[3]+"]" {
+		t.Fatalf("one still enabled: %v", m)
+	}
+}
+
+func TestClosedBackendStartsNothing(t *testing.T) {
+	t.Setenv("AGEMU_IOS_PRESTART", "0")
+	b := New()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.helper(); err == nil {
+		t.Fatal("helper() after Close started a helper")
+	}
+	b.leanDevice(simDevice{UDID: "U", Name: NamePrefix + "x"}, true)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.leaning) != 0 || len(b.wallGen) != 0 {
+		t.Fatalf("background work started after Close: leaning %v, wallGen %v", b.leaning, b.wallGen)
+	}
+}
