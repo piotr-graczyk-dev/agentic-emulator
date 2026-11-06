@@ -274,6 +274,7 @@ func readTree(_ d: AGDevice, maxDepth: Int, timeout: Double) throws -> [String: 
     do {
         tree = try d.accessibilityTree(withMaxDepth: maxDepth, timeout: max(0.1, deadline.timeIntervalSinceNow)) as! [String: Any]
         bridgeDoctor.noteResult(d, error: nil)
+        noteAccessibilityAnswered(d)
     } catch {
         bridgeDoctor.noteResult(d, error: error)
         throw error
@@ -469,9 +470,24 @@ func bootStatusName(_ status: Int64) -> String {
 }
 
 /// Boots that have already been verified agent-ready (udid -> -[SimDevice lastBootedAt]); a
-/// ready check on them only asks for the frontmost app's pid (one accessibility request).
+/// ready check on them only asks for the frontmost app's pid (one accessibility request), and
+/// nothing at all when accessibility answered within the last 5 s (axAnsweredAt).
 let verifiedLock = NSLock()
 var verifiedBoots: [String: Date] = [:]
+var axAnsweredAt: [String: (boot: Date?, at: Date)] = [:]
+
+func noteAccessibilityAnswered(_ d: AGDevice) {
+    verifiedLock.lock()
+    axAnsweredAt[d.udid] = (d.lastBootedAt, Date())
+    verifiedLock.unlock()
+}
+
+func accessibilityAnsweredRecently(_ d: AGDevice, within: TimeInterval) -> Bool {
+    verifiedLock.lock()
+    defer { verifiedLock.unlock() }
+    guard let a = axAnsweredAt[d.udid] else { return false }
+    return a.boot == d.lastBootedAt && Date().timeIntervalSince(a.at) < within
+}
 
 /// How long after boot finished accessibility may keep saying "no frontmost application"
 /// before the bridge is restarted. Measured (docs/IOS.md): the bridge retries finding
@@ -573,6 +589,7 @@ final class AXWarmup {
                     label = front["label"] as? String ?? ""
                     trace.mark("accessibility", "frontmost pid \(p)")
                     bridgeDoctor.noteResult(d, error: nil)
+                    noteAccessibilityAnswered(d)
                     break
                 }
                 lastError = "frontmost application has no frame yet"
@@ -639,6 +656,9 @@ func waitReady(_ d: AGDevice, timeoutMs: Double, waitAccessibility: Bool) throws
     // up, the check is one accessibility request.
     let wasUp = d.state == 3 && ((d.bootStatusInfo?["terminal"] as? Bool) ?? true)
     let returnEarly = !waitAccessibility && !wasUp
+    if wasUp, verified, accessibilityAnsweredRecently(d, within: 5), d.framebufferConnected, d.hidConnected {
+        return ["readyMs": trace.ms(), "accessibility": "ready", "cached": true, "bridgeRestarts": 0, "device": describe(d)]
+    }
     let deferFramebuffer = ProcessInfo.processInfo.environment["AGEMU_IOS_CONNECT_AFTER_BOOT"] != "0"
     var fbStarted = false
 
@@ -864,6 +884,7 @@ func handle(_ req: [String: Any]) throws -> Any {
             let front = try d.accessibilityFrontmost(
                 withTimeout: max(0.1, deadline.timeIntervalSinceNow), full: !req.optBool("pidOnly"))
             bridgeDoctor.noteResult(d, error: nil)
+            noteAccessibilityAnswered(d)
             return front
         } catch {
             bridgeDoctor.noteResult(d, error: error)

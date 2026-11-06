@@ -30,11 +30,16 @@ func pressureLevel() uint32 {
 	return v
 }
 
-// memoryPressured: macOS reports warn or critical memory pressure.
-func memoryPressured() bool { return pressureLevel() >= 2 }
-
-// memoryCritical: macOS reports critical memory pressure.
-func memoryCritical() bool { return pressureLevel() >= 4 }
+// memoryPressured: macOS reports warn or critical memory pressure, or less than half of the
+// memory is available (a second simulator booting next to a running one competes for it: on
+// the test host an iPhone SE booted in 18.5 s next to a running iPhone 17 Pro, 6.3 s alone).
+func memoryPressured() bool {
+	if pressureLevel() >= 2 {
+		return true
+	}
+	avail, ok := sysctlUint32("kern.memorystatus_level")
+	return ok && avail < 50
+}
 
 func memoryState() string {
 	names := map[uint32]string{1: "normal", 2: "warn", 4: "critical"}

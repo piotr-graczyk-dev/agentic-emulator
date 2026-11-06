@@ -511,8 +511,9 @@ func (b *Backend) shutdown(ctx context.Context, udid string) error {
 }
 
 // effectiveMaxBooted is how many agemu simulators may run at once: AGEMU_IOS_MAX_BOOTED if
-// set; otherwise 2, or 1 while macOS reports memory pressure (a booted simulator takes 1-2 GB,
-// and a second one on a swapping Mac slows everything, including the first).
+// set; otherwise 2, or 1 while memory is short (pressure warn/critical or under half
+// available): a booted simulator takes 1-2 GB, and a second one slows everything, including
+// the boot of the first.
 func effectiveMaxBooted() int {
 	var n int
 	if _, err := fmt.Sscanf(os.Getenv("AGEMU_IOS_MAX_BOOTED"), "%d", &n); err == nil && n > 0 {
