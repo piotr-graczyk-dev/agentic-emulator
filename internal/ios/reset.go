@@ -207,8 +207,10 @@ func (b *Backend) goHome(ctx context.Context, udid string, ipad bool) error {
 			return nil
 		case front.BundleID == springboardBundle:
 			// SpringBoard reports itself frontmost before it has finished handling the
-			// press; an app launched in that window starts in the background. Let it settle.
-			time.Sleep(300 * time.Millisecond)
+			// press, and apps just terminated may still be exiting; an app launched in that
+			// window starts in the background or fails to launch. Wait until the screen has
+			// been still for 300 ms (at most 2 s).
+			_ = b.call(ctx, "settle", map[string]any{"udid": udid, "quietMs": 300, "maxMs": 2000}, nil)
 			return nil
 		default:
 			last = fmt.Sprintf("frontmost is %q (pid %d)", front.BundleID, front.Pid)

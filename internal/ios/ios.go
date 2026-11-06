@@ -775,8 +775,25 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	var r struct {
 		Pid int `json:"pid"`
 	}
-	if err := b.call(ctx, "launch", map[string]any{"udid": d.UDID, "bundleId": app}, &r); err != nil {
-		return err
+	// Right after the app was terminated (reset, terminate) its process may still be exiting,
+	// and CoreSimulator then answers "failed to launch": retry twice.
+	var lerr error
+	for attempt, wait := range []time.Duration{0, 300 * time.Millisecond, 700 * time.Millisecond} {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		if lerr = b.call(ctx, "launch", map[string]any{"udid": d.UDID, "bundleId": app}, &r); lerr == nil {
+			if attempt > 0 {
+				log.Printf("ios launch %s on %s: succeeded on attempt %d", app, d.UDID, attempt+1)
+			}
+			break
+		}
+		if !strings.Contains(lerr.Error(), "failed to launch") || !b.installed(ctx, d.UDID, app) {
+			return lerr
+		}
+	}
+	if lerr != nil {
+		return lerr
 	}
 	b.mu.Lock()
 	if b.apps[d.UDID] == nil {
@@ -785,6 +802,33 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	b.apps[d.UDID][r.Pid] = app
 	b.mu.Unlock()
 	return nil
+}
+
+// installed reports whether app is installed (a built-in app or a user app), so a launch of a
+// missing app fails at once instead of being retried.
+func (b *Backend) installed(ctx context.Context, udid, app string) bool {
+	var user []string
+	if err := b.call(ctx, "userapps", map[string]any{"udid": udid}, &user); err == nil {
+		for _, u := range user {
+			if u == app {
+				return true
+			}
+		}
+	}
+	d, err := b.describeSim(ctx, udid)
+	if err != nil {
+		return true
+	}
+	system, err := b.systemApps(ctx, d)
+	if err != nil {
+		return true
+	}
+	for _, s := range system {
+		if s == app {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Backend) Terminate(ctx context.Context, id, app string) error {
