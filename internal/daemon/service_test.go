@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -184,5 +185,53 @@ func TestTapBySelectorSettlesBeforeReadingTheTree(t *testing.T) {
 	}
 	if len(sb.calls) != 0 {
 		t.Fatalf("a tap at coordinates read the tree or settled: %v", sb.calls)
+	}
+}
+
+// launchBackend records plain launches; like the Android backend it has no LaunchWith.
+type launchBackend struct {
+	fakeBackend
+	launched []string
+}
+
+func (l *launchBackend) Launch(ctx context.Context, id, app string) error {
+	l.launched = append(l.launched, app)
+	return nil
+}
+
+// optionsLauncher implements backend.Launcher, like the iOS backend.
+type optionsLauncher struct {
+	launchBackend
+	got backend.LaunchOptions
+}
+
+func (o *optionsLauncher) LaunchWith(ctx context.Context, id, app string, opts backend.LaunchOptions) error {
+	o.got = opts
+	return nil
+}
+
+func TestLaunchOptionsNeedALauncher(t *testing.T) {
+	lb := &launchBackend{}
+	svc := NewService(t.TempDir(), lb)
+	if _, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []string{`"args":["-x"]`, `"env":{"A":"1"}`, `"relaunch":true`} {
+		_, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app",`+extra+`}`))
+		if err == nil || !strings.Contains(err.Error(), "not supported on android") {
+			t.Fatalf("%s: err = %v, want not supported", extra, err)
+		}
+	}
+	if len(lb.launched) != 1 {
+		t.Fatalf("launched %v, want only the plain launch", lb.launched)
+	}
+
+	ol := &optionsLauncher{}
+	svc = NewService(t.TempDir(), ol)
+	if _, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app","args":["--initialUrl","http://localhost:8081"],"env":{"A":"1"},"relaunch":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(ol.got.Args) != 2 || ol.got.Args[1] != "http://localhost:8081" || ol.got.Env["A"] != "1" || !ol.got.Relaunch || len(ol.launched) != 0 {
+		t.Fatalf("LaunchWith got %+v (plain launches %v)", ol.got, ol.launched)
 	}
 }

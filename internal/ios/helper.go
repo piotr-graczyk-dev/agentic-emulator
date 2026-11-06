@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -198,14 +199,25 @@ func waitingFor(cmd string, params map[string]any) string {
 	return "CoreSimulator (" + cmd + ")"
 }
 
+// keyBudget is the time the helper may take per character of `type --keys`: the gap it sleeps
+// after each key (AGEMU_IOS_KEY_GAP_MS, default 10; the helper reads the same environment) plus
+// 40 ms for the key's acknowledgement.
+func keyBudget() time.Duration {
+	gap := 10
+	if v, err := strconv.Atoi(os.Getenv("AGEMU_IOS_KEY_GAP_MS")); err == nil && v >= 0 {
+		gap = v
+	}
+	return time.Duration(gap+40) * time.Millisecond
+}
+
 // call sends one request. params may be nil. out (optional) receives the result.
 func (h *helper) call(ctx context.Context, cmd string, params map[string]any, out any) error {
 	if _, ok := ctx.Deadline(); !ok {
 		if d, ok := callTimeouts[cmd]; ok {
 			if t, isText := params["text"].(string); isText && cmd == "type" {
-				// type --keys paces every key (acknowledged, then a 10 ms gap): long text must
-				// not time out while the helper is still typing it.
-				d += time.Duration(len(t)) * 50 * time.Millisecond
+				// type --keys paces every key: long text must not time out while the helper is
+				// still typing it.
+				d += time.Duration(len(t)) * keyBudget()
 			}
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, d)
