@@ -97,6 +97,39 @@ After launch, most of agemu's time is the app's own transitions: a tap returns w
 changed frame shows, and a wait ends on the first read that has the next screen. Compared with
 agemu before this round of work, the flow after launch went from 18.9 s to 15.2 s.
 
+### Lighter devices, against the standard emulators
+
+Each device runs a full guest OS, so most of its memory and CPU is iOS's or Android's, not
+agemu's (agemu's daemon and iOS helper take 21 MB together). agemu cuts what an app under test
+does not use. All figures were measured on one Apple M2 Pro (16 GB).
+
+**iOS.** These are the summed processes of one simulator; see
+[docs/IOS.md](docs/IOS.md#lean-simulators).
+
+| per simulator | all services (Simulator default) | agemu, lean |
+|---|---|---|
+| memory, no app / React Native dev app open | 4.0 GB / 4.8 GB | **2.5 GB / 3.9 GB** |
+| idle CPU, no app | 20% of a core | **1.5%** |
+| simulator CPU during an app flow right after boot | 148 s | **101 s** |
+| cold boot to agent-ready | 9.3 s | 8.4 s |
+
+Three lean simulators at once took 7.7 GB and 19% of one core together.
+
+**Android.** These are the emulator process of one AVD; see
+[docs/ANDROID.md](docs/ANDROID.md#host-gpu-and-lean-devices-2026-11-06-evening).
+
+| per emulator | as Android Studio runs it (window, 4 GB guest) | agemu before | agemu now (host GPU, lean) |
+|---|---|---|---|
+| memory | 7.5 GB | 5.9 GB | **5.4 GB** |
+| idle CPU | 86% of a core | 54-79% | **24%** |
+| agent step: find + tap + wait for next screen + screenshot | - | 1506 ms | **866 ms**; 358 ms with `AGEMU_ANDROID_ANIMATIONS=0` |
+| cold app launch (Settings) | - | 602 ms | **151 ms** |
+
+**Scale.** The floor is the guest OS: about 2.5 GB per idle iOS simulator and 4.3-5.4 GB per
+Android emulator (2 GB of guest RAM, plus the emulator and GPU). A hundred devices would need
+250-540 GB of memory. A 16 GB Mac that also runs other apps fits 3 lean iOS simulators
+(measured together) or, estimated from the per-device figures, 1-2 Android emulators.
+
 ## Install
 
 Requirements:
@@ -156,6 +189,19 @@ The tools are `devices`, `profiles`, `create`, `boot`, `shutdown`, `reset`, `set
 |---|---|---|
 | Android | `pixel-9-pro`, `pixel-9`, `galaxy-s24`, `small-phone`, `pixel-fold-inner`, `pixel-tablet`, custom `WxH@dpi` | At runtime with a display size and density override; no reboot. |
 | iOS | `iphone-17-pro-max`, `iphone-17-pro`, `iphone-17`, `iphone-air`, `iphone-16e`, `iphone-se-3`, `ipad-mini`, `ipad-pro-11` | The screen is fixed per simulator device type, so agemu switches to an `agemu-<profile>` simulator. |
+
+### Lighter devices
+
+- iOS: agemu turns off 32 launchd jobs an app under test does not use (widgets, Siri, photo
+  analysis, asset downloads, ...) in its simulators, and stops the wallpaper gallery after boot.
+  `AGEMU_IOS_LEAN=0` keeps the full system.
+- Android: `-gpu host` by default, and 14 Google apps are turned off in the baseline (Play
+  services and the Play Store stay). `AGEMU_ANDROID_LEAN=0` keeps them;
+  `AGEMU_ANDROID_GPU=auto` goes back to software rendering.
+- Android: `AGEMU_ANDROID_ANIMATIONS=0` turns system animations off, so screen changes finish
+  at once. It is off by default.
+
+These are daemon settings: set them where `agemu` first starts the daemon.
 
 ### Safety
 
