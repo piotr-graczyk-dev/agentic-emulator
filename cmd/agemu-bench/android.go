@@ -206,6 +206,17 @@ func androidSuite(cfg Config) ([]Op, error) {
 			return then()
 		}
 	}
+	// spaced: before every reset iteration (both tools, untimed) the device is booted and 3 s
+	// pass. Emulator 37.1 deadlocks when an in-place snapshot load starts while the previous
+	// load still restores textures in the background; agemu itself keeps loads 3 s apart, and
+	// this keeps that wait out of the timed part, as an agent's work between resets would.
+	spaced := func() error {
+		if err := ensureBooted(); err != nil {
+			return err
+		}
+		time.Sleep(3 * time.Second)
+		return nil
+	}
 	waitAdbReady := func() error {
 		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
@@ -523,7 +534,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			Name: "reset to clean state", N: 3, BaseN: 3,
-			Before:   ensureBooted,
+			Before:   spaced,
 			BaseDesc: "adb emu kill + emulator cold boot until sys.boot_completed=1",
 			Baseline: func() error {
 				_, pid, err := androidSerial(avd)
@@ -544,7 +555,7 @@ func androidSuite(cfg Config) ([]Op, error) {
 		},
 		{
 			Name: "reset vs emulator snapshot load", N: 3, BaseN: 3,
-			Before:   ensureBooted,
+			Before:   spaced,
 			BaseDesc: "adb emu avd snapshot load agemu-baseline until sys.boot_completed=1",
 			Baseline: func() error {
 				out, err := adbOut("emu", "avd", "snapshot", "load", "agemu-baseline")

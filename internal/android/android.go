@@ -64,6 +64,43 @@ type device struct {
 	// lastInput is when agemu last sent input (unix ns); screenshots taken right after an
 	// input wait for the frame that shows its effect (see frameStream.get).
 	lastInput atomic.Int64
+
+	lastLoad time.Time // when the last in-place snapshot load finished (see loadBaseline)
+}
+
+// loadSpacing is the minimum time between the end of an in-place snapshot load and the start of
+// the next one. After a load, the emulator restores GPU textures in a background thread
+// (gfxstream GLBackgroundLoader). A load started while it runs deadlocks emulator 37.1: the
+// LoadSnapshot handler waits in snapshot::Loader::~Loader for that thread, which waits on the
+// texture file's lock (seen with `sample` on a hung emulator: a reset started 0.1 s after the
+// previous one; resets 2.2 s apart did not hang).
+const loadSpacing = 3 * time.Second
+
+// loadBaseline restores the baseline in place, keeping loads loadSpacing apart, with a timeout:
+// a hung emulator surfaces as an error instead of a reset that never returns.
+func (d *device) loadBaseline(ctx context.Context, e *emuClient) error {
+	d.mu.Lock()
+	wait := loadSpacing - time.Since(d.lastLoad)
+	d.mu.Unlock()
+	if wait > 0 && wait <= loadSpacing {
+		logf("%s: waiting %v before the next snapshot load (emulator texture loader)", d.name, wait.Round(time.Millisecond))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	lctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	err := e.loadSnapshot(lctx, baselineSnapshot)
+	e.stream.invalidate()
+	d.mu.Lock()
+	d.lastLoad = time.Now()
+	d.mu.Unlock()
+	if err != nil && lctx.Err() != nil && ctx.Err() == nil {
+		return fmt.Errorf("the emulator did not finish loading %s in 2 minutes (it may be hung; `agemu shutdown` twice powers it off): %w", baselineSnapshot, err)
+	}
+	return err
 }
 
 func (d *device) markInput() { d.lastInput.Store(time.Now().UnixNano()) }
@@ -550,10 +587,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		d.mu.Lock()
 		e := d.emu
 		d.mu.Unlock()
-		lctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-		err = e.loadSnapshot(lctx, baselineSnapshot)
-		cancel()
-		e.stream.invalidate()
+		err = d.loadBaseline(ctx, e)
 		if err != nil {
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
 		}
@@ -691,6 +725,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 				d.agent.Close()
 			}
 			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, newAgent(d.name, r), time.Time{}, false
+			d.lastLoad = time.Time{} // a new emulator process has no texture loader running
 			d.mu.Unlock()
 			e.enableShm(filepath.Join(logDir(), d.name+".fb"), a.intCfg("hw.lcd.width"), a.intCfg("hw.lcd.height"))
 			return nil
@@ -965,9 +1000,7 @@ func (d *device) enterStandby(ctx context.Context) error {
 		return d.shutdown(ctx)
 	}
 	t := time.Now()
-	err = e.loadSnapshot(ctx, baselineSnapshot)
-	e.stream.invalidate()
-	if err != nil {
+	if err := d.loadBaseline(ctx, e); err != nil {
 		logf("%s: loading %s for standby failed (%v); powering off", d.name, baselineSnapshot, err)
 		return d.shutdown(ctx)
 	}
@@ -1062,9 +1095,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	t0 := time.Now()
 	prev, _ := d.display(ctx, ag, 0)
 	t1 := time.Now()
-	err = e.loadSnapshot(ctx, baselineSnapshot)
-	e.stream.invalidate()
-	if err != nil {
+	if err := d.loadBaseline(ctx, e); err != nil {
 		return err
 	}
 	t2 := time.Now()
