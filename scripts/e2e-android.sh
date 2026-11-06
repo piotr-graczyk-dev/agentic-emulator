@@ -48,7 +48,9 @@ ag profile pixel-9 >/dev/null
 ok "profile pixel-9 (native)"
 
 step "launch Settings and read the UI tree"
+# Settings' search screen belongs to another package and survives a force-stop of Settings.
 ag terminate com.android.settings >/dev/null
+ag terminate com.google.android.settings.intelligence >/dev/null
 timed ag launch com.android.settings >/dev/null
 ag ui >"$OUT/ui-settings.txt"
 head -1 "$OUT/ui-settings.txt"
