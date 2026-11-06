@@ -25,7 +25,7 @@ agemu CLI / MCP ──unix socket──► agemu daemon (Go, internal/ios)
 | tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has been still for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition (an e2e run lost one ~0.3 s after a navigation pop). A background thread samples the framebuffer surface's seed every 8 ms, so on a still screen the wait is 0 ms. `AGEMU_IOS_TAP_SETTLE=0` turns it off. |
 | type | Maestro `inputText` | HID keyboard events (US layout, shift handled). Text the US keyboard cannot produce (accents, emoji, other scripts) is put on the simulator pasteboard (`simctl pbcopy`) and pasted with Cmd-V. |
 | key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
-| UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
+| UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. |
 | boot | `simctl boot` + `simctl bootstatus -b` | `-[SimDevice bootWithOptions:]` (persisted, headless), then agemu returns once the device is **interactive**: CoreSimulator's boot status is "finished" (what `bootstatus` waits for), the framebuffer is readable and the HID client is connected; accessibility finishes warming up in the background and UI reads wait for it (see "Cold boot"). A device that is already booted is ready in milliseconds, and agemu keeps devices booted (see below). |
 | reset | `simctl shutdown` + `simctl erase` + boot | A soft reset of the running device; see below. |
@@ -54,12 +54,21 @@ so adjacent elements stay adjacent (`internal/ios/uitree.go`, tested in `uitree_
 | clickable | interactive roles (button, cell, link, switch, textfield, ...) |
 
 Elements that lie entirely off screen (e.g. the previous page during a navigation transition)
-and zero-sized leaves are dropped. Two quirks of the iOS 26 accessibility tree are handled:
+and zero-sized leaves are dropped. Three quirks of the iOS 26 accessibility tree are handled:
 
 - Some containers report no children although they have some (the toolbar hosting the
   Settings search field reports empty `AXChildren` and `AXChildrenInNavigationOrder`). For an
   `AXGroup` with no children the helper hit-tests three points along its centre line and adds
   the distinct elements it finds inside the group.
+- Some collection views are **opaque element providers**: they report no `AXChildren` (batched
+  or one attribute at a time) and expose their cells only through
+  `AXPAttributeVisibleOpaqueElements` (AXP attribute 58; `AXPAttributeIsOpaqueElementProvider`,
+  29, answers 1). The iPad Settings sidebar is one: its rows name it as their parent, but the
+  centre-line hit tests found only the one row on that line; attribute 58 returns its 16
+  visible rows in one request. A childless `AXGroup` taller than 132 pt (three 44 pt rows) is
+  asked for its opaque elements first; shorter ones (the iPhone toolbar, 86 pt) keep the
+  hit-test sampling alone, so the iPhone read did not change (38 requests, byte-identical
+  output).
 - Apps load their accessibility runtime only while `ApplicationAccessibilityEnabled` is on in
   the simulator. XCUITest-based tools (Maestro, `xcodebuild test`) switch it on for their
   session and **off** when they finish, after which newly launched apps expose an empty tree.
@@ -100,6 +109,44 @@ What agemu does now:
   "no frontmost application" for 2 s while SpringBoard has run for 2 s, the bridge is restarted
   (at most twice per SpringBoard instance, not within 15 s of the previous restart). A failing
   read returns its error at once instead of waiting for `launchctl`.
+
+### iPad: the app that owns the screen
+
+The bridge's frontmost application is the **first** of SpringBoard's focused applications
+(iOS attribute 1102; `-[AXPTranslator_iOS processFrontMostApp:]` passes 0x44e to
+`processFrontMostApp:withiOSAttribute:`, which takes `firstObject`). On iPad (iOS 26.5) that
+list starts with the dock's `com.apple.DocumentManager.DockFolderViewService`: always on the
+home screen (3 of 3 tries) and for about a second after an app comes to the front, after
+which the app is first (3 of 3 launches). Its tree is one empty application element, so
+`agemu ui` was empty, `tap --text` found nothing and `reset` could not confirm SpringBoard.
+On iPhones the bridge reports the app itself.
+
+A **system-wide hit test** (translator request type 6, `objectAtPoint:displayId:`) is answered
+by the process whose window is at that point: on the iPad home screen SpringBoard (a home
+screen icon, the page indicator, a dock icon) or, over a widget, the widget's renderer
+(`com.apple.chrono.WidgetRenderer-Default`); in front of Settings, Settings. (The old note that
+hit tests also go to the dock's service was wrong.) An application element for any pid is one
+request (type 1 with parameters `{pid}`, as idb's FBSimulatorAX sends for an explicit pid;
+`-[AXPTranslator translationApplicationObjectForPid:]` returned nil through a token delegate).
+Measured application frames: SpringBoard and Settings 744x1133 pt (the whole iPad mini screen),
+the widget renderer 260x260 pt, a suspended app 0x0.
+
+So on iPad the helper:
+
+1. asks for the frontmost application (1 request), as on iPhone,
+2. hit-tests the screen centre (1 request). If the hit belongs to that process, it is kept,
+3. otherwise reads the hit process's application element and its frame (3 requests: the
+   element, the frame, the translator's remote-element check) and uses
+   it if it covers at least 40% of the screen (a widget or other hosted content does not; the
+   next of four more points, at 30% and 70% across and down, is tried),
+4. finds nothing (right after a launch every hit test answers nothing for about a second):
+   keeps the reported application and marks the read unconfirmed. `ui` then reads again every
+   100 ms, at most 3 s within its budget, while the unconfirmed tree is empty. `ui` right after
+   `launch com.apple.Preferences` took 2.7-4.6 s and returned Settings (3 of 3); Settings'
+   own first reads took 0.7-1.1 s of that. Before, it returned the empty tree at once.
+
+iPhones skip steps 2-4. `reset` waits for SpringBoard on iPad as on iPhone; the old iPad
+exception (accept a frontmost `...ViewService` once the screen was still) is gone.
 
 ## Fast boot and reset
 
@@ -165,7 +212,8 @@ cleans the running device instead:
 3. resets privacy permissions (`simctl privacy reset all`), the keychain
    (`simctl keychain reset`) and the pasteboard, in parallel with 1-2,
 4. presses home, waits until accessibility reports SpringBoard (`com.apple.springboard`) as the
-   frontmost app, then until the screen has been still for 300 ms. The screen moves for ~1.3 s
+   frontmost app (on iPad too, found by the hit test above), then until the screen has been
+   still for 300 ms. The screen moves for ~1.3 s
    after the press; an app launched sooner (the old fixed 300 ms) sometimes started in the
    background, or failed to launch while a terminated process was still exiting. `launch` also
    retries a "failed to launch" twice (after 0.3 s and 0.7 s) when the app is installed.
@@ -270,13 +318,37 @@ The "before" UI-tree and screenshot numbers came from a more loaded host (load ~
 than the "after" ones (load 47-78); the request counts and the per-step timelines are what
 attribute the gains to agemu.
 
+### iPad UI tree (2026-11-06, commit 60c8a22)
+
+`ui` 20 times through the CLI and 20 times over the daemon socket, on the same screens of
+`agemu-ipad-mini`, the build of 01237d3 and the build of 60c8a22 back to back (load average
+5-8). The "before" trees were the wrong app or incomplete, so they are cheaper:
+
+| screen | before: tree | before: daemon / CLI | after: tree | after: daemon / CLI |
+|---|---|---|---|---|
+| home screen | DockFolderViewService, 1 element | 2.8 / 7.7 ms | SpringBoard, 16 elements (icons, widgets, dock) | 24.2 / 29.8 ms |
+| Settings root | Settings, 17 elements (1 of 16 sidebar rows) | 38.3 / 44.8 ms | Settings, 32 elements (all sidebar rows) | 58.9 / 62.1 ms |
+
+On `agemu-iphone-17-pro` (Settings root, load 34-52) the two builds read the same 16 elements
+with the same 38 requests and byte-identical `ui --json`: daemon 26.1 / 25.1 ms before and
+25.3 / 24.5 ms after (two rounds), CLI 31.5 / 30.4 ms before and 30.8 / 30.8 ms after.
+
 ### End-to-end run
 
-`scripts/e2e-ios.sh` (78 checks, including a UI-tree read on iPad right after the switch)
-passed on commit eab26c6 in about 1.5 minutes (load average 6 at the start, 57 at the end).
-The long tails of the previous run (load ~400) against this one:
+`scripts/e2e-ios.sh` (103 checks) passed on commit 60c8a22 (load average 17 at the start; the
+agemu commands took 104 s in all). Its iPad section reads the home screen (SpringBoard, the
+App Library button), launches Settings and checks the sidebar rows in the tree, taps
+Accessibility by id and General by text (the sidebar row, at 300,725 of 1488x2266) and waits
+for About, presses home and waits for the home screen, and resets (SpringBoard confirmed, 2.1
+s). The iPhone resets took 2109 / 1823 ms and the profile switches to iphone-se-3 / ipad-mini
+/ iphone-17-pro 8786 / 15764 / 8928 ms (cold boots; the iPad's was slower than the 8815 ms
+of the run below).
 
-| step | previous e2e | this e2e |
+Before that, the script (78 checks, with an unchecked UI-tree read on iPad) passed on commit
+eab26c6 in about 1.5 minutes (load average 6 at the start, 57 at the end). The long tails of
+the run before it (load ~400) against that one:
+
+| step | earlier e2e | eab26c6 e2e |
 |---|---|---|
 | `reset` (first / after the profile loop) | 12483 / 11637 ms | 1766 / 1752 ms |
 | `ui` right after reset | 27615 ms | 141 ms |
@@ -328,14 +400,11 @@ keeps one simulator booted while memory is short.
   call agemu does one 0.1-0.2 ms device lookup, so the CLI adds only its process start. The
   call is bounded by FrontBoard starting the process. What an app does after launch (Settings
   takes ~2 s to show its list on this host) is the app's own time.
-- **iPad: the frontmost app.** On iPad (iOS 26.5) the bridge reports the dock's
-  `com.apple.DocumentManager.DockFolderViewService` as the frontmost application, on the home
-  screen and in front of apps alike (it is first in SpringBoard's focused applications, and
-  hit tests go to it too). `agemu ui` then shows that empty service instead of the app, and
-  `reset` cannot confirm SpringBoard: after pressing home it accepts a frontmost
-  `...ViewService` once the screen has been still. Terminating the service made the report
-  correct until SpringBoard relaunched it seconds later, so agemu does not do that. iPhones are
-  not affected.
+- **iPad: one app per screen.** On iPad the bridge's frontmost application is often the dock's
+  view service; agemu reads the app that owns the screen centre instead (see "iPad: the app
+  that owns the screen"). With two apps on screen (Split View, Slide Over) `ui` shows the one
+  at the centre, or the first of four more points that hits an app covering 40% of the screen;
+  that was not tested.
 - **Accessibility shows what iOS exposes.** Lists expose their visible cells only; scroll to see
   more. Elements without accessibility (custom drawing) are invisible to `ui`; use screenshots.
 - **Rotation** is not handled: frames and taps assume portrait.
