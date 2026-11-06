@@ -43,7 +43,9 @@ Environment variables (read by the daemon):
 | Variable | Default | Meaning |
 |---|---|---|
 | `AGEMU_ANDROID_AVDS` | `agemu-` | Comma-separated AVD name prefixes agemu manages (`*` = all). |
-| `AGEMU_ANDROID_GPU` | `auto` | Emulator `-gpu` mode. `host` is faster but was unstable here. |
+| `AGEMU_ANDROID_GPU` | `host` | Emulator `-gpu` mode. `auto` picks software rendering (SwiftShader) without a window; see "Host GPU and lean devices". |
+| `AGEMU_ANDROID_LEAN` | `1` | `0`: leave on the Google apps a lean baseline turns off (applies when a baseline is taken). |
+| `AGEMU_ANDROID_ANIMATIONS` | `1` | `0`: set the window, transition and animator scales to 0 after every boot and reset (screen changes finish at once). |
 | `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
@@ -127,7 +129,8 @@ Any TCP failure falls back to adb.
   - display = the profile (default `pixel-9`, 1080x2424@420), `hw.ramSize=2048`;
   - phone hardware: `hw.keyboard=no`, `hw.mainKeys=no` (gesture navigation), no dpad, trackball or SD card;
   - quickboot auto-snapshots off.
-- **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu auto -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
+- **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu host -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
+  - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 45 s once).
   - With a baseline, agemu restores it in place (gRPC `LoadSnapshot`) as soon as gRPC answers, before the cold boot gets anywhere. Restoring it at startup (`-snapshot`) corrupts guest memory on this emulator; see Guest restarts.
   - The process is detached from the daemon.
   - Ports are taken from 5580/8580 upward and skip ports used by any running emulator.
@@ -357,12 +360,92 @@ after 2 minutes with an error. Twelve spaced resets and three back-to-back ones 
 ~2.8 s) did not hang. The bench's reset rows pause 3 s between iterations (untimed, both
 tools) to measure the reset rather than the spacing.
 
+### Host GPU and lean devices (2026-11-06, evening)
+
+**Why the default changed.** An idle headless emulator with `-gpu auto` used about half a core
+while the guest itself was idle (guest `top`: system_server 1%, surfaceflinger 3%). A 3 s
+`sample` of the emulator process showed the cause. Without a window, `auto` selects SwiftShader
+(`vulkan_mode_selected:swiftshader gles_mode_selected:swangle`), and two of SwiftShader's
+worker threads spin while they wait for work (`marl::Scheduler::Worker::spinForWork` ->
+`cthread_yield`), each about a third of a core. The vCPU threads were waiting (`pselect`).
+
+Idle CPU of the emulator process, a read-only cold-booted instance, 60 s after boot:
+
+| `-gpu` / flags | idle CPU (% of a core) | memory | SwiftShader loaded |
+|---|---|---|---|
+| `auto` (the old default) | 42% | 4.45 GB | yes, spinning |
+| `auto -feature -Vulkan` | 51% | 4.42 GB | yes (GLES runs on it) |
+| `swiftshader_indirect` | 55% | 4.42 GB | yes |
+| **`host`** | **19%** | 4.26 GB | no |
+| `auto -cores 2` | 45% | 4.45 GB | yes |
+| `auto -vsync-rate 30` | 46% | 4.46 GB | yes |
+
+**Host GPU re-tested.** The earlier instability (below) was seen at load average 40-230, next to
+the startup snapshot restore bug that has since been found. On emulator 37.1.11 with `-gpu host`:
+- `scripts/e2e-android.sh` passed 3 times (20/20 each). The first run also showed the new
+  baseline retake from a renderer mismatch.
+- The benchmark rows below all completed. Six resets in a row kept the emulator's memory flat
+  (5403 -> 5422 MB).
+- The emulator log had no `error null ctx`, `EGL fence` or kernel errors. After snapshot loads it
+  had 4 `bad color buffer handle` and 2 `stale colorbuffers` lines, with no visible effect: the
+  screenshot after a reset showed Settings correctly.
+
+**Lean devices.** The Play image starts Google apps an app under test does not need. agemu turns
+14 of them off before it takes the baseline (`internal/android/lean.go`; 12 exist in this
+image):
+- Messages, Photos, device restore, the Google app, Android System Intelligence;
+- Digital Wellbeing, YouTube, YouTube Music, Gmail, Maps, Calendar, Drive, Meet, Device Health.
+
+Google Play services, the Play Store (Play Billing, Play Integrity), WebView, the keyboard, the
+launcher and the system UI stay on. On a cold boot, turning these apps off took the first
+minute from 196% to 120% of a core and gave the guest 120 MB more free memory; idle CPU did not
+change (that cost was the GPU's).
+
+**In agemu's own flow.** Each configuration was booted from its own baseline, then reset twice
+with Settings opened, sent home, and measured in two 30 s windows:
+
+| | before (`auto`, apps on) | now (`host`, lean) |
+|---|---|---|
+| emulator memory | 5.94 GB | **5.44-5.51 GB** |
+| idle CPU | 54-79% of a core | **24-25%** |
+
+| operation (`agemu-bench`, daemon) | before (`auto`, results above) | now (`host`, lean) |
+|---|---|---|
+| agent step: find + tap + wait for next screen + screenshot | 1506 ms | **866 ms** |
+| launch app (cold start) | 602 ms | **151 ms** |
+| launch app (warm start) | 79 ms | **32 ms** |
+| reset to clean state | 2141 ms | **2035 ms** |
+| boot to agent-ready (powered off) | 5552 ms | **5116 ms** |
+| screenshot | 4.4 ms | 3.9 ms |
+
+The adb baselines got faster too (cold launch 601 -> 186 ms), because both tools drive the same
+emulator.
+
+**Animations off (opt-in).** With `AGEMU_ANDROID_ANIMATIONS=0`, agemu sets
+`window_animation_scale`, `transition_animation_scale` and `animator_duration_scale` to 0 after
+every boot, resume and reset, as Espresso setups do. A reset restores the baseline's settings,
+hence the re-apply. adb reconnects 0.2-0.6 s after a snapshot load, and agemu retries until it
+answers. The agent step, alternating 1x / off / 1x / off: 867, 379, 899 and 357 ms. A cold app
+launch did not change (130-145 ms). Apps then behave as on a phone with animations turned off in
+the developer options, so it is not the default.
+
+**Against the standard emulator.** For comparison, the same AVD as Android Studio runs it: a
+window, audio, the boot animation, and no `-lowram` (emulator 37 then gives an API 37 image
+4 GB of RAM). This is a read-only cold-booted instance, measured the same way:
+
+| | standard emulator | agemu |
+|---|---|---|
+| cold boot to `sys.boot_completed` | 19.3 s | 9.0-12.6 s; agent-ready from agemu's baseline in 5.1 s |
+| first minute after boot | 202% of a core | 120% (lean, cold boot) |
+| emulator memory | **7.5 GB** | 4.3 GB cold boot, 5.4 GB after baseline loads |
+| idle CPU | **86% of a core** | 19% cold boot, 24% after baseline loads |
+
 ### Earlier supplementary run: `AGEMU_ANDROID_GPU=host` (previous version, 2026-11-05)
 
 These are the cheap operations the previous version measured (22:11–22:16, load 40–230, from a fresh reset) with the host GPU (gfxstream). They are faster, mostly because
 screenshots read back from the host GPU in about 9 ms. With the host GPU this emulator was
 not stable on this machine: gfxstream `error null ctx` / `Failed to create EGL fence sync`, a
-guest that stopped answering adb, and repeated guest restarts. So the default is `-gpu auto`. The guest restarts of that time are now explained by the startup snapshot restore (see Guest restarts), not by the GPU; the gfxstream errors are not. The host GPU was not re-tested in this round, so `-gpu auto` stays the default. The
+guest that stopped answering adb, and repeated guest restarts. So the default is `-gpu auto`. The guest restarts of that time are now explained by the startup snapshot restore (see Guest restarts), not by the GPU; the gfxstream errors are not. The host GPU was not re-tested in that round; it was later, see "Host GPU and lean devices", and `-gpu host` is now the default. The
 boot and reset rows of this run did not complete; the cold boot hung.
 
 ```

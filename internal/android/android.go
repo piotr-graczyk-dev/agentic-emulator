@@ -523,7 +523,7 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	}
 	args := []string{
 		"-avd", name, "-port", strconv.Itoa(p.console), "-grpc", strconv.Itoa(p.grpc),
-		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "auto"),
+		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "host"),
 		"-memory", strconv.Itoa(ram), "-no-snapshot-save",
 	}
 	// Emulator 37 raises guest RAM to 4096 MB for API > 36 images; -lowram is the only switch
@@ -572,6 +572,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			if _, err := d.refreshDisplay(ctx); err != nil {
 				return api.Device{}, err
 			}
+			d.applyAnimations(ctx)
 			return b.device(id)
 		}
 		if !opts.Cold {
@@ -581,6 +582,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			if _, err := d.refreshDisplay(ctx); err != nil {
 				return api.Device{}, err
 			}
+			d.applyAnimations(ctx)
 			return b.device(id)
 		}
 		if err := d.shutdown(ctx); err != nil {
@@ -592,6 +594,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	defer d.setBooting(false)
 
 	loadBaseline := !opts.Cold && a.hasBaseline()
+	retake := false
 	t0 := time.Now()
 	if err := d.launch(ctx, a, loadBaseline); err != nil {
 		return api.Device{}, err
@@ -602,10 +605,18 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 		e := d.emu
 		d.mu.Unlock()
 		err = d.loadBaseline(ctx, e)
-		if err != nil {
+		switch {
+		case err != nil && rendererMismatch(err):
+			// The baseline was taken with another -gpu mode (AGEMU_ANDROID_GPU changed, or an
+			// agemu upgrade changed the default). The emulator refuses it before touching the
+			// guest, which keeps cold-booting (-no-snapshot-load); the baseline is retaken below.
+			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it", d.name, baselineSnapshot, err)
+			loadBaseline, retake = false, true
+		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
+		default:
+			logf("%s: boot: baseline restored in place %v after gRPC came up", d.name, time.Since(t1).Round(time.Millisecond))
 		}
-		logf("%s: boot: baseline restored in place %v after gRPC came up", d.name, time.Since(t1).Round(time.Millisecond))
 	}
 	if loadBaseline {
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
@@ -663,7 +674,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if !loadBaseline || restarted {
 		d.checkGuest(ctx)
 	}
-	if !a.hasBaseline() || stale {
+	if !a.hasBaseline() || stale || retake {
 		if err := d.makeBaseline(ctx); err != nil {
 			return api.Device{}, fmt.Errorf("creating baseline snapshot: %w", err)
 		}
@@ -671,6 +682,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if _, err := d.refreshDisplay(ctx); err != nil {
 		return api.Device{}, err
 	}
+	d.applyAnimations(ctx)
 	d.setBooting(false)
 	return b.device(id)
 }
@@ -852,6 +864,9 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	d.mu.Unlock()
 	if _, err := adbShellOK(ctx, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
 		logf("%s: could not turn off stylus handwriting: %v", d.name, err)
+	}
+	if leanOn() {
+		d.disableLeanPackages(ctx, serial)
 	}
 	d.warmUpKeyboard(ctx, e, a)
 	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
@@ -1131,6 +1146,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 		}
 		d.setDisplay(di)
 	}
+	d.applyAnimations(ctx)
 	return nil
 }
 
