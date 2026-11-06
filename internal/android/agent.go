@@ -290,19 +290,36 @@ var errNoAgent = errors.New("agent not connected")
 
 // agentToken returns the per-AVD secret for the agent's TCP listener, creating it once. It is
 // stable so that the agent inside the baseline snapshot and a restarted agent accept it alike.
+// It lives in the AVD directory, next to the snapshot that embeds it, so every daemon
+// (whatever its $AGEMU_HOME) agrees with the snapshot. A token from the old location
+// ($AGEMU_HOME/android) is moved there once.
 func agentToken(avd string) string {
-	path := filepath.Join(logDir(), avd+".agent-token")
-	if b, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(b))) >= 32 {
-		return strings.TrimSpace(string(b))
+	read := func(p string) string {
+		if b, err := os.ReadFile(p); err == nil && len(strings.TrimSpace(string(b))) >= 32 {
+			return strings.TrimSpace(string(b))
+		}
+		return ""
+	}
+	legacy := filepath.Join(logDir(), avd+".agent-token")
+	a, err := loadAVD(avd)
+	if err != nil {
+		return read(legacy)
+	}
+	path := filepath.Join(a.Dir, "agemu-agent-token")
+	if tok := read(path); tok != "" {
+		return tok
+	}
+	if tok := read(legacy); tok != "" {
+		if os.WriteFile(path, []byte(tok+"\n"), 0o600) == nil {
+			_ = os.Remove(legacy)
+		}
+		return tok
 	}
 	var r [16]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		return ""
 	}
 	tok := hex.EncodeToString(r[:])
-	if err := os.MkdirAll(logDir(), 0o755); err != nil {
-		return ""
-	}
 	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
 		return ""
 	}

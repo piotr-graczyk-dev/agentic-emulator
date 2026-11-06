@@ -157,6 +157,10 @@ for P in iphone-se-3 ipad-mini iphone-17-pro; do
   NID=$(json '["id"]')
   [[ "$(json '["profile"]')" == "$P" ]] && ok "device $(json '["name"]') has profile $P" || bad "profile: $LAST"
   [[ -n "$NID" ]] && export AGEMU_DEVICE="$NID"
+  # boot (and so a profile switch) returns once the home screen is drawn, not while iOS still
+  # shows its boot spinner: SpringBoard's tree must answer right away.
+  expect "$P: UI tree right after the switch" ui
+  has "$P: home screen (SpringBoard) is up when the switch returns" "app=com.apple.springboard"
   expect "screenshot in $P" screenshot -o "$OUT/$P.png"
   got=$(png_size "$OUT/$P.png")
   [[ "$got" == "$want" ]] && ok "$P.png is $got (profile $want)" || bad "$P.png is $got, profile says $want"

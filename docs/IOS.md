@@ -168,16 +168,17 @@ daemon log (`ios boot <name>: ... timeline: ...`):
 | boot status: waiting on data migration, then on SpringBoard | 1250-2900 |
 | boot status finished (what `simctl bootstatus -b` waits for) | 4350-10550 |
 | framebuffer connected | finished + 10-120 |
-| **interactive: `boot` returns** | framebuffer + 0-6 |
-| accessibility answers (frontmost app) | finished + 1.5-5.5 s |
+| interactive (screenshots, taps, launches work) | framebuffer + 0-6 |
+| **accessibility answers (SpringBoard drawn): `boot` returns** | finished + 1.5-5.5 s |
 
 - The framebuffer is connected only once boot finished: a framebuffer client makes the
   simulator render every boot frame. In one comparison round, boot finished at 12.7 s with the
   framebuffer connected during boot and at 4.7 s with it connected after; after boot the
   connection takes 10-200 ms. (`AGEMU_IOS_CONNECT_AFTER_BOOT=0` connects during boot.)
-- `boot` returns when the device is interactive: screenshots, taps, typing and app launches
-  work. Accessibility warms up in the background; `ui`, `find`, `wait` and `tap` by selector
-  wait for it within their own timeout. `AGEMU_IOS_BOOT_WAIT_AX=1` makes `boot` wait for it too.
+- `boot` returns when SpringBoard's accessibility tree answers, i.e. the home screen is drawn.
+  Returning at "interactive" instead was 1.5-5.5 s faster, but a screenshot taken right after
+  showed the boot spinner (seen in the integration e2e on the iPhone SE), which misleads an
+  agent. `AGEMU_IOS_BOOT_WAIT_AX=0` restores the early return for callers that only launch apps.
 - `boot` of a device that is already booted asks accessibility once (one request), or not at
   all when it answered for this boot in the last 5 s.
 - A boot that comes up without a display (seen once, after an overlapped profile switch) is

@@ -381,12 +381,17 @@ type readyResult struct {
 	Device simDevice `json:"device"`
 }
 
-// waitAccessibilityOnBoot: AGEMU_IOS_BOOT_WAIT_AX=1 makes boot wait until the UI tree is
-// readable too. By default boot returns once the device is interactive (boot finished,
-// framebuffer readable, HID connected) and accessibility finishes warming up in the background,
-// typically 1.5-3 s later; UI reads wait for it, while screenshots, taps and app launches
-// already work.
-func waitAccessibilityOnBoot() bool { return envOn("AGEMU_IOS_BOOT_WAIT_AX") }
+// waitAccessibilityOnBoot: by default boot waits until SpringBoard's UI tree is readable, so
+// the home screen is drawn when boot returns. Without that wait (AGEMU_IOS_BOOT_WAIT_AX=0) boot
+// returns once the device is interactive (boot finished, framebuffer readable, HID connected),
+// 1.5-5.5 s earlier, but a screenshot taken right away can still show the boot spinner.
+func waitAccessibilityOnBoot() bool {
+	switch strings.ToLower(os.Getenv("AGEMU_IOS_BOOT_WAIT_AX")) {
+	case "0", "false", "no":
+		return false
+	}
+	return true
+}
 
 // bootReady boots the simulator (headless, persisted) if needed and waits until it is
 // interactive (see waitAccessibilityOnBoot). Cold boots log their readiness timeline to the
