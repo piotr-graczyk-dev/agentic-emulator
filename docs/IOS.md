@@ -22,7 +22,7 @@ agemu CLI / MCP ──unix socket──► agemud daemon (Go, internal/ios)
 | Operation | Standard tool | agemu |
 |---|---|---|
 | screenshot | `simctl io screenshot`: new process, connects to the device, renders, encodes | The helper keeps the main display's framebuffer **IOSurface** (and its change callbacks) for the life of the process. A screenshot copies the surface (~2 ms) and encodes the copy: PNG with agemu's parallel encoder (`AGPNG.c`: the image is cut into 12 bands that are filtered and deflated on separate cores at zlib level 1, then joined into one valid zlib stream, as pigz does), JPEG with Core Image's encoder (~7 ms for 1206×2622 vs ~10 ms with ImageIO; its distance to the lossless frame, mean abs. difference 0.30, matches simctl's own JPEG at 0.29; `AGEMU_IOS_JPEG=imageio` selects ImageIO). Core Image is warmed up when the helper starts. |
-| tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, waits up to 3 s for a disabled element to become enabled, and then taps without settling again. `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
+| tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, and waits up to 3 s for a disabled element to become enabled. On a still screen the tap then keeps the helper's settle, which returns at once unless a transition started during the tree read. An element confirmed at rest by its repeating frame is tapped at once, since a second settle on a screen that keeps changing would only time out. `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
 | type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (`simctl pbcopy`, then Cmd-V): the app gets the whole text in one change, as with Android's set-text path. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is checked against the focused text field's text and repeated once if it did not arrive. Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
 | key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
@@ -368,11 +368,142 @@ were CoreSimulator's own `launchApplicationWithID` call on a just-booted device 
 another booted simulator at load ~400; agemu now caps a launch at 60 s with an error, and
 keeps one simulator booted while memory is short.
 
+### A real app, against agent-device and Argent
+
+**The flow.** 23 steps through a React Native app (an Expo development build loading its bundle
+from Metro, staging backend, a test account whose one-time code is fixed):
+- launch the app;
+- sign in with e-mail and code;
+- open the Discover tab, search, open a result and go back;
+- open two more tabs and a list entry;
+- scroll to the sign-out button and sign out.
+
+Nine steps only observe: five UI-tree reads and four screenshots. Every acting step ends when
+the element of the screen it leads to is there, so all tools do the same work.
+
+**The tools.** All three drive the same `agemu-iphone-17-pro` simulator (iOS 26.5):
+- **agent-device 0.21.31**, one CLI call per action, wait and observation;
+- **Argent 0.32.0**, through its CLI (`argent run <tool>`), one call per action, wait and
+  observation. Its taps take normalized coordinates, so each tap first reads `describe` to find
+  the element. Text goes in with `fill`, waits use `await-ui-element`, and the scroll is
+  `gesture-swipe` with `momentum: false`;
+- **agemu**, one call per action, wait and observation (39 calls);
+- **agemu compound**, with each action waiting for its effect in the same call (`--wait-*`; 26
+  calls).
+
+**How it was run.**
+- 5 rounds; each round runs the four variants one after another, with 20 s pauses because the
+  backend allows 3 codes a minute.
+- Before each run, an untimed reset makes sure the app is signed out.
+- A failed step is retried once after 3 s, as an agent following agent-device's hint would; the
+  failed attempt's time counts.
+- Apple M2 Pro. Other work ran on the host (load average 5.9-19.3). No recording during the
+  timed runs.
+
+| | agemu compound | agemu | Argent | agent-device |
+|---|---|---|---|---|
+| runs ok | 5/5 | 5/5 (1 retried step) | 5/5 | 5/5 |
+| whole flow (median) | **29.7 s** | 32.6 s | 38.8 s | 65.5 s |
+| min-max | 26.2-35.4 s | 28.7-60.2 s | 34.1-41.2 s | 60.0-69.2 s |
+| after launch (launch step excluded) | **15.8 s** | 16.9 s | 21.1 s | 47.6 s |
+| tool calls per run | **26** | 39 | 51 | 36 |
+| agemu compound is faster by (whole / after launch) | - | 1.10× / 1.07× | **1.31× / 1.34×** | **2.20× / 3.02×** |
+
+An earlier series of the same kind, at load 2.6-8.5 and one commit before the final code,
+gave 28.2 s (compound), 27.9 s (agemu), 32.2 s (Argent) and 59.1 s (agent-device): compound
+was 1.14× faster than Argent and 2.10× faster than agent-device (1.26× and 3.11× after launch).
+
+**Time per step.** Medians; the observation rows are the tools' own cost.
+
+| step | agemu compound | agemu | Argent | agent-device |
+|---|---|---|---|---|
+| launch app (dev client, Metro) -> login screen | 13946 ms | 13967 ms | 15075 ms | 16594 ms |
+| observe: UI tree (login) | 24 ms | 29 ms | 188 ms | 324 ms |
+| enter e-mail | 960 ms | 975 ms | 790 ms | 2681 ms |
+| tap 'send code' -> code screen | 728 ms | 777 ms | 1208 ms | 2959 ms |
+| enter code -> home | 2122 ms | 2218 ms | 2861 ms | 6960 ms |
+| observe: UI tree (home) | 76 ms | 72 ms | 280 ms | 350 ms |
+| observe: screenshot (home) | 22 ms | 21 ms | 212 ms | 700 ms |
+| tab Discover -> search field | 1940 ms | 2280 ms | 2180 ms | 3800 ms |
+| observe: UI tree (discover) | 122 ms | 136 ms | 513 ms | 455 ms |
+| observe: screenshot (discover) | 18 ms | 25 ms | 161 ms | 510 ms |
+| search -> results | 2169 ms | 1944 ms | 1996 ms | 5148 ms |
+| open company -> profile | 1260 ms | 1449 ms | 2081 ms | 3790 ms |
+| observe: UI tree (company) | 116 ms | 82 ms | 280 ms | 342 ms |
+| observe: screenshot (company) | 26 ms | 16 ms | 159 ms | 579 ms |
+| back -> discover | 650 ms | 840 ms | 853 ms | 2100 ms |
+| tab Cases -> scopes | 954 ms | 938 ms | 1298 ms | 3181 ms |
+| History -> past booking | 583 ms | 682 ms | 659 ms | 1693 ms |
+| observe: UI tree (history) | 51 ms | 37 ms | 204 ms | 304 ms |
+| tab Profile -> profile | 613 ms | 588 ms | 1144 ms | 2198 ms |
+| scroll -> sign-out button | 399 ms | 388 ms | 662 ms | 1778 ms |
+| tap sign-out -> confirm dialog | 948 ms | 1020 ms | 654 ms | 2317 ms |
+| confirm -> login screen | 1202 ms | 848 ms | 1539 ms | 2534 ms |
+| observe: screenshot (login) | 19 ms | 17 ms | 164 ms | 484 ms |
+
+**What the numbers show.**
+- **The launch is the app's.** 14-17 s is the development client loading its JavaScript bundle,
+  for every tool.
+- **The rest is mostly the app's.** After launch, agemu's acting steps are bounded by the app's
+  transitions: a tap returns when the first changed frame shows, and the wait ends on the first
+  UI-tree read that has the next screen. Argent is closest. It is faster on two steps:
+  - entering the e-mail (`fill` 790 ms vs a verified paste, 960 ms);
+  - opening the sign-out dialog. Argent's scroll has no momentum. agemu's swipe flings, and
+    its selector tap waits for the list's bounce to end before it reads where the button is.
+- **Fewer calls.** The compound variant saves 13 of 39 calls, and some wall time. Every call is
+  one more turn for an agent, so its model time is multiplied by the call count. Not measured:
+  at 2 s of model time per call the flow would take about 82 s (compound), 111 s (agemu), 141 s
+  (Argent) and 138 s (agent-device).
+
+**Before and after this round of work.** agemu from `main` (48246de) and from this work (one
+commit before the final code), plain variant, interleaved: two series, 9 runs each, load
+average 3.5-11.3.
+
+| | main | this work |
+|---|---|---|
+| whole flow (median) | 31.6 s (28.3-37.6) | **29.5 s** (26.5-59.5) |
+| after launch | 18.9 s | **15.2 s** |
+| runs with a retried step | 0 | 1 |
+| enter code -> home | 4708 ms | **1904 ms** |
+| tab Profile -> profile | 999 ms | **554 ms** |
+| History -> past booking | 752 ms | **529 ms** |
+| enter e-mail | 1081 ms | **922 ms** |
+
+The code step shows the main change. Before a tap or a paste, `main` waited for a screen with
+no change at all, which a blinking cursor never gives. That cost the 1 s timeout on the tap and
+again on the paste. Now only big changes count (see "How each operation works").
+
+**Taps that did nothing.** In 52 runs of this work's builds, 5 had one tap that the app did not
+act on. Each came right after a new view appeared:
+- the Cases tab after going back;
+- the History toggle right after the Cases tab opened;
+- the sign-out confirmation.
+
+Each time the retry worked, and the 30 s wait before it counts in the times above. For
+comparison:
+- `main`: none in 9 runs;
+- Argent: 2 in 23 (the sign-out dialog);
+- agent-device: none in 20. It is about twice as slow, so the screen has settled before each of
+  its taps.
+
+The cause is not known. Repeating those steps alone missed none: 25 tab taps after going back,
+and 8 History taps sent 0-1.6 s after the tab opened.
+
+**What did not help.**
+- **Speeding up animations** with `UIAnimationDragCoefficient` (Simulator.app's slow-animation
+  switch, set lower): no effect on iOS 26.5.
+- **Waiting only for the tapped element's region to go still.** UIKit ignores touches for the
+  whole length of a screen transition, also where the target region is already still. One step
+  missed its tap and took 34 s with the retry, so taps wait for the whole screen again.
+- **A swipe that holds still before lifting**, to end without momentum. It could not be shown to
+  stop the app's lists, so it was not kept.
+
 ## Caveats
 
 - **Taps by selector settle first.** Before it resolves a selector, agemu waits until the
-  screen has been still for 48 ms (at most 1 s), so a button that is still scrolling into place
-  is tapped where it comes to rest.
+  screen has had no big change for 48 ms (at most 1.5 s), so a button that is still scrolling
+  into place is tapped where it comes to rest. A tap with a selector that matches nothing still
+  fails at once; add `--wait-*` to the previous action, or `wait`, when the element comes later.
 - **Simulator, not a device.** The Simulator runs the iOS userland natively on the Mac's CPU.
   There is no cellular, no real camera, no Secure Enclave-backed Face ID (it can be simulated),
   push notifications must be simulated, GPU and memory limits differ, and performance is the
