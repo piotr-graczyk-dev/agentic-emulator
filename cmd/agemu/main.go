@@ -48,7 +48,8 @@ Device commands (-d <device> optional when exactly one device is booted):
 
 Actions (tap, swipe, type, key, launch) also wait for their effect in the same call:
   --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
-  e.g. agemu tap --text "Log in" --wait-id home-screen
+  --ui prints the screen the action ends on (outline), so one call acts, waits and observes
+  e.g. agemu tap --text "Log in" --wait-id home-screen --ui
 
 Servers:
   daemon                                    run the daemon in the foreground
@@ -91,7 +92,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true}
+var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -252,6 +253,7 @@ func runCommand(cmd string, args []string) error {
 		if ws := c.waitSelector(); ws != nil {
 			p.WaitFor, p.WaitGone, p.WaitTimeoutMs = ws, c.flags["wait-gone"] == "true", c.int("wait-timeout-ms")
 		}
+		p.ReturnUI = c.flags["ui"] == "true"
 	}
 
 	cl, err := client.Dial()
@@ -270,6 +272,25 @@ func runCommand(cmd string, args []string) error {
 		}
 		fmt.Print(outline.Render(&t))
 		return nil
+	}
+	if p.ReturnUI && textOut {
+		// An action with --ui prints the screen it ends on as an outline (after a JSON line
+		// with the action's result); --json prints everything as JSON.
+		var r struct {
+			Result json.RawMessage `json:"result"`
+			Waited json.RawMessage `json:"waited,omitempty"`
+			UI     *api.UITree     `json:"ui"`
+		}
+		if err := json.Unmarshal(raw, &r); err == nil && r.UI != nil {
+			head := map[string]json.RawMessage{"result": r.Result}
+			if len(r.Waited) > 0 {
+				head["waited"] = r.Waited
+			}
+			b, _ := json.Marshal(head)
+			fmt.Println(string(b))
+			fmt.Print(outline.Render(r.UI))
+			return nil
+		}
 	}
 	if (cmd == "find") && textOut {
 		var els []*api.Element

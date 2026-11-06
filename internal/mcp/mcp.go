@@ -67,6 +67,7 @@ var waitProps = map[string]any{
 	}},
 	"waitGone":      boolT("Wait for waitFor to disappear instead"),
 	"waitTimeoutMs": num("Timeout for waitFor, default 10000"),
+	"returnUi":      boolT("Also return the UI outline of the screen the action ends on (act, wait and observe in one call)"),
 }
 
 func withWait(props map[string]any) map[string]any {
@@ -288,6 +289,21 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 			{"type": "image", "data": base64.StdEncoding.EncodeToString(data), "mimeType": mime},
 			{"type": "text", "text": fmt.Sprintf("%s %dx%d (scale %.2f: multiply image coordinates by %.2f to get tap coordinates) in %.0fms", s.Path, s.Width, s.Height, scale, 1/scale, ms)},
 		}}
+	}
+	if p.ReturnUI {
+		var r struct {
+			Result json.RawMessage `json:"result"`
+			Waited json.RawMessage `json:"waited,omitempty"`
+			UI     *api.UITree     `json:"ui"`
+		}
+		if err := json.Unmarshal(raw, &r); err == nil && r.UI != nil {
+			head := map[string]json.RawMessage{"result": r.Result}
+			if len(r.Waited) > 0 {
+				head["waited"] = r.Waited
+			}
+			b, _ := json.Marshal(head)
+			return text(fmt.Sprintf("%s (%.0fms)\n%s", b, ms, outline.Render(r.UI)))
+		}
 	}
 	return text(fmt.Sprintf("%s (%.0fms)", string(raw), ms))
 }

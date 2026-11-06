@@ -311,3 +311,16 @@ func TestActionWaitsForItsEffectInTheSameCall(t *testing.T) {
 		t.Fatalf("err = %v, want the action to report the failed wait", err)
 	}
 }
+
+func TestActionCanReturnTheScreenItEndsOn(t *testing.T) {
+	sb := &settlingBackend{still: true}
+	svc := NewService(t.TempDir(), sb)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"},"waitFor":{"contains":"welcome"},"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := res.(map[string]any)
+	if tr, _ := m["ui"].(*api.UITree); tr == nil || tr.Root == nil || m["waited"] == nil || m["result"] == nil {
+		t.Fatalf("got %#v, want result, waited and ui", res)
+	}
+}

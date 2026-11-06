@@ -57,6 +57,8 @@ type Params struct {
 	WaitFor       *api.Selector `json:"waitFor,omitempty"`
 	WaitGone      bool          `json:"waitGone,omitempty"`
 	WaitTimeoutMs int           `json:"waitTimeoutMs,omitempty"`
+	// ReturnUI makes an action return the UI tree of the screen it ends on.
+	ReturnUI bool `json:"returnUi,omitempty"`
 
 	// selectors / waits
 	Selector  *api.Selector `json:"selector,omitempty"`
@@ -239,16 +241,28 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 	defer l.Unlock()
 
 	res, err := s.act(ctx, b, id, method, p)
-	if err != nil || p.WaitFor == nil || p.WaitFor.Empty() {
+	compound := p.WaitFor != nil && !p.WaitFor.Empty()
+	if err != nil || (!compound && !p.ReturnUI) {
 		return res, err
 	}
-	// The action succeeded; wait for its effect in the same call (one round trip, and one
-	// agent tool call, per step).
-	waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs})
-	if werr != nil {
-		return nil, fmt.Errorf("%s done, but: %w", method, werr)
+	// The action succeeded; wait for its effect and/or read the screen it ends on in the same
+	// call (one round trip, and one agent tool call, per step).
+	out := map[string]any{"result": res}
+	if compound {
+		waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs})
+		if werr != nil {
+			return nil, fmt.Errorf("%s done, but: %w", method, werr)
+		}
+		out["waited"] = waited
 	}
-	return map[string]any{"result": res, "waited": waited}, nil
+	if p.ReturnUI {
+		t, terr := b.UITree(ctx, id)
+		if terr != nil {
+			return nil, fmt.Errorf("%s done, but reading the screen failed: %w", method, terr)
+		}
+		out["ui"] = t
+	}
+	return out, nil
 }
 
 // act runs one device action (the caller holds the device lock).
