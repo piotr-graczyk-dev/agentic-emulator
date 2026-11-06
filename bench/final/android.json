@@ -1,0 +1,546 @@
+{
+  "device": "android:agemu-pixel",
+  "host": "Apple M2 Pro, macOS 26.6, arm64",
+  "platform": "android",
+  "results": [
+    {
+      "op": "screenshot",
+      "baseline": {
+        "n": 20,
+        "minMs": 138.269,
+        "medianMs": 152.872,
+        "p95Ms": 1013.387,
+        "meanMs": 203.85975000000002
+      },
+      "baselineTool": "adb exec-out screencap -p \u003e f.png",
+      "agemu": {
+        "n": 20,
+        "minMs": 7.204,
+        "medianMs": 8.376,
+        "p95Ms": 28.671,
+        "meanMs": 9.256249999999998
+      },
+      "agemuTool": "agemu screenshot -o f.png",
+      "daemon": {
+        "n": 20,
+        "minMs": 3.489,
+        "medianMs": 4.374,
+        "p95Ms": 5.086,
+        "meanMs": 4.341149999999999
+      },
+      "speedupCli": 18.251193887297042,
+      "speedupDaemon": 34.950160036579796
+    },
+    {
+      "op": "screenshot (small-phone profile)",
+      "baseline": {
+        "n": 20,
+        "minMs": 95.749,
+        "medianMs": 111.123,
+        "p95Ms": 240.838,
+        "meanMs": 127.52280000000003
+      },
+      "baselineTool": "adb exec-out screencap -p \u003e f.png",
+      "agemu": {
+        "n": 20,
+        "minMs": 6.658,
+        "medianMs": 7.463,
+        "p95Ms": 20.951,
+        "meanMs": 8.0521
+      },
+      "agemuTool": "agemu screenshot -o f.png",
+      "daemon": {
+        "n": 20,
+        "minMs": 3.05,
+        "medianMs": 3.692,
+        "p95Ms": 4.288,
+        "meanMs": 3.6382499999999993
+      },
+      "speedupCli": 14.889856626021707,
+      "speedupDaemon": 30.098320693391116
+    },
+    {
+      "op": "screenshot (after a screen change)",
+      "baseline": {
+        "n": 20,
+        "minMs": 153.408,
+        "medianMs": 177.409,
+        "p95Ms": 488.365,
+        "meanMs": 189.29014999999998
+      },
+      "baselineTool": "adb exec-out screencap -p \u003e f.png",
+      "agemu": {
+        "n": 20,
+        "minMs": 11.556,
+        "medianMs": 22.123,
+        "p95Ms": 92.005,
+        "meanMs": 24.41605
+      },
+      "agemuTool": "agemu screenshot -o f.png",
+      "daemon": {
+        "n": 20,
+        "minMs": 4.578,
+        "medianMs": 13.282,
+        "p95Ms": 21.934,
+        "meanMs": 12.87645
+      },
+      "speedupCli": 8.019210776115354,
+      "speedupDaemon": 13.357099834362295
+    },
+    {
+      "op": "ui tree",
+      "baseline": {
+        "n": 20,
+        "minMs": 1953.622,
+        "medianMs": 1994.718,
+        "p95Ms": 2751.599,
+        "meanMs": 2028.0176500000002
+      },
+      "baselineTool": "adb shell uiautomator dump + adb exec-out cat",
+      "agemu": {
+        "n": 20,
+        "minMs": 5.456,
+        "medianMs": 5.923,
+        "p95Ms": 7.857,
+        "meanMs": 6.057550000000001
+      },
+      "agemuTool": "agemu ui --json",
+      "daemon": {
+        "n": 20,
+        "minMs": 1.531,
+        "medianMs": 1.898,
+        "p95Ms": 3.233,
+        "meanMs": 1.94985
+      },
+      "speedupCli": 336.7749451291575,
+      "speedupDaemon": 1050.9578503688094
+    },
+    {
+      "op": "agent step: find + tap + wait for next screen + screenshot",
+      "baseline": {
+        "n": 10,
+        "minMs": 5014.765,
+        "medianMs": 5390.747,
+        "p95Ms": 5633.434,
+        "meanMs": 5304.0612
+      },
+      "baselineTool": "uiautomator dump + input tap + uiautomator dump until next screen + screencap",
+      "agemu": {
+        "n": 10,
+        "minMs": 1364.426,
+        "medianMs": 1495.57,
+        "p95Ms": 1668.538,
+        "meanMs": 1495.0711000000001
+      },
+      "agemuTool": "agemu tap --text + agemu wait --text + agemu screenshot",
+      "daemon": {
+        "n": 10,
+        "minMs": 1371.882,
+        "medianMs": 1506.002,
+        "p95Ms": 1694.896,
+        "meanMs": 1508.6514
+      },
+      "speedupCli": 3.604476554089745,
+      "speedupDaemon": 3.579508526549102
+    },
+    {
+      "op": "tap",
+      "baseline": {
+        "n": 20,
+        "minMs": 28.604,
+        "medianMs": 52.694,
+        "p95Ms": 123.674,
+        "meanMs": 58.83645
+      },
+      "baselineTool": "adb shell input tap 800 1100",
+      "agemu": {
+        "n": 20,
+        "minMs": 4.028,
+        "medianMs": 4.737,
+        "p95Ms": 12.488,
+        "meanMs": 5.25425
+      },
+      "agemuTool": "agemu tap 800 1100",
+      "daemon": {
+        "n": 20,
+        "minMs": 0.277,
+        "medianMs": 0.306,
+        "p95Ms": 0.446,
+        "meanMs": 0.31919999999999993
+      },
+      "speedupCli": 11.123918091619169,
+      "speedupDaemon": 172.202614379085
+    },
+    {
+      "op": "swipe (300 ms gesture)",
+      "baseline": {
+        "n": 20,
+        "minMs": 332.011,
+        "medianMs": 383.94,
+        "p95Ms": 574.644,
+        "meanMs": 388.71965000000006
+      },
+      "baselineTool": "adb shell input swipe 540 1800 540 1000 300",
+      "agemu": {
+        "n": 20,
+        "minMs": 305.958,
+        "medianMs": 309.403,
+        "p95Ms": 316.341,
+        "meanMs": 309.5426000000001
+      },
+      "agemuTool": "agemu swipe 540 1800 540 1000 --ms 300",
+      "daemon": {
+        "n": 20,
+        "minMs": 300.745,
+        "medianMs": 302.441,
+        "p95Ms": 314.568,
+        "meanMs": 302.97985000000006
+      },
+      "speedupCli": 1.2409058735694223,
+      "speedupDaemon": 1.2694707397475873,
+      "inherentMs": 300,
+      "overheadSpeedupCli": 8.926938211209169,
+      "overheadSpeedupDaemon": 34.38754608766935
+    },
+    {
+      "op": "swipe (50 ms gesture)",
+      "baseline": {
+        "n": 20,
+        "minMs": 107.899,
+        "medianMs": 129.195,
+        "p95Ms": 528.251,
+        "meanMs": 147.45884999999998
+      },
+      "baselineTool": "adb shell input swipe 540 1800 540 1000 50",
+      "agemu": {
+        "n": 20,
+        "minMs": 55.682,
+        "medianMs": 58.839,
+        "p95Ms": 62.226,
+        "meanMs": 58.85815
+      },
+      "agemuTool": "agemu swipe 540 1800 540 1000 --ms 50",
+      "daemon": {
+        "n": 20,
+        "minMs": 50.57,
+        "medianMs": 51.9,
+        "p95Ms": 55.741,
+        "meanMs": 52.1044
+      },
+      "speedupCli": 2.1957375210319685,
+      "speedupDaemon": 2.4893063583815027,
+      "inherentMs": 50,
+      "overheadSpeedupCli": 8.959723950673153,
+      "overheadSpeedupDaemon": 41.68157894736845
+    },
+    {
+      "op": "type text (plain field)",
+      "baseline": {
+        "n": 20,
+        "minMs": 42.896,
+        "medianMs": 72.01,
+        "p95Ms": 166.34,
+        "meanMs": 74.66535
+      },
+      "baselineTool": "adb shell input text hello",
+      "agemu": {
+        "n": 20,
+        "minMs": 32.915,
+        "medianMs": 50.532,
+        "p95Ms": 77.521,
+        "meanMs": 52.986700000000006
+      },
+      "agemuTool": "agemu type hello (sets the field's text)",
+      "daemon": {
+        "n": 20,
+        "minMs": 21.209,
+        "medianMs": 41.621,
+        "p95Ms": 61.918,
+        "meanMs": 41.275999999999996
+      },
+      "speedupCli": 1.425037599936674,
+      "speedupDaemon": 1.7301362293073208
+    },
+    {
+      "op": "type text --keys (plain field)",
+      "baseline": {
+        "n": 20,
+        "minMs": 44.382,
+        "medianMs": 62.596,
+        "p95Ms": 85.205,
+        "meanMs": 64.10274999999999
+      },
+      "baselineTool": "adb shell input text hello",
+      "agemu": {
+        "n": 20,
+        "minMs": 18.379,
+        "medianMs": 56.195,
+        "p95Ms": 102.548,
+        "meanMs": 56.980000000000004
+      },
+      "agemuTool": "agemu type --keys hello",
+      "daemon": {
+        "n": 20,
+        "minMs": 9.915,
+        "medianMs": 32.885,
+        "p95Ms": 125.133,
+        "meanMs": 44.328700000000005
+      },
+      "speedupCli": 1.113906931221639,
+      "speedupDaemon": 1.9034818306218642
+    },
+    {
+      "op": "type text (Settings search)",
+      "baseline": {
+        "n": 20,
+        "minMs": 38.32,
+        "medianMs": 68.768,
+        "p95Ms": 302.56,
+        "meanMs": 79.65015000000001
+      },
+      "baselineTool": "adb shell input text hello",
+      "agemu": {
+        "n": 20,
+        "minMs": 10.966,
+        "medianMs": 28.829,
+        "p95Ms": 49.62,
+        "meanMs": 28.8331
+      },
+      "agemuTool": "agemu type hello (sets the field's text)",
+      "daemon": {
+        "n": 20,
+        "minMs": 14.028,
+        "medianMs": 21.823,
+        "p95Ms": 49.362,
+        "meanMs": 26.04815
+      },
+      "speedupCli": 2.3853758368309688,
+      "speedupDaemon": 3.151170783118728
+    },
+    {
+      "op": "key home",
+      "baseline": {
+        "n": 20,
+        "minMs": 28.257,
+        "medianMs": 48.86,
+        "p95Ms": 137.931,
+        "meanMs": 54.936299999999996
+      },
+      "baselineTool": "adb shell input keyevent KEYCODE_HOME",
+      "agemu": {
+        "n": 20,
+        "minMs": 5.595,
+        "medianMs": 9.548,
+        "p95Ms": 23.734,
+        "meanMs": 10.759599999999999
+      },
+      "agemuTool": "agemu key home (returns when queued)",
+      "daemon": {
+        "n": 20,
+        "minMs": 0.501,
+        "medianMs": 1.172,
+        "p95Ms": 10.132,
+        "meanMs": 1.73885
+      },
+      "speedupCli": 5.117302052785924,
+      "speedupDaemon": 41.689419795221845
+    },
+    {
+      "op": "launch app (cold start)",
+      "baseline": {
+        "n": 10,
+        "minMs": 107.68,
+        "medianMs": 601.155,
+        "p95Ms": 770.011,
+        "meanMs": 563.4407000000001
+      },
+      "baselineTool": "adb shell am start -W -n com.android.settings/.Settings",
+      "agemu": {
+        "n": 10,
+        "minMs": 87.138,
+        "medianMs": 684.371,
+        "p95Ms": 734.766,
+        "meanMs": 566.4251
+      },
+      "agemuTool": "agemu launch com.android.settings",
+      "daemon": {
+        "n": 10,
+        "minMs": 111.143,
+        "medianMs": 601.468,
+        "p95Ms": 831.083,
+        "meanMs": 536.9893999999999
+      },
+      "speedupCli": 0.8784051340574045,
+      "speedupDaemon": 0.9994796065626101
+    },
+    {
+      "op": "launch app (warm start)",
+      "baseline": {
+        "n": 10,
+        "minMs": 51.035,
+        "medianMs": 86.819,
+        "p95Ms": 383.036,
+        "meanMs": 132.6587
+      },
+      "baselineTool": "adb shell am start -W -n com.android.settings/.Settings",
+      "agemu": {
+        "n": 10,
+        "minMs": 51.605,
+        "medianMs": 135.392,
+        "p95Ms": 339.435,
+        "meanMs": 147.434
+      },
+      "agemuTool": "agemu launch com.android.settings",
+      "daemon": {
+        "n": 10,
+        "minMs": 6.847,
+        "medianMs": 78.769,
+        "p95Ms": 60307.361,
+        "meanMs": 12099.3037
+      },
+      "speedupCli": 0.6412417277239424,
+      "speedupDaemon": 1.1021975650319287
+    },
+    {
+      "op": "profile switch",
+      "baseline": {
+        "n": 10,
+        "minMs": 104.235,
+        "medianMs": 166.1,
+        "p95Ms": 331.334,
+        "meanMs": 178.37
+      },
+      "baselineTool": "adb shell wm size WxH \u0026\u0026 adb shell wm density D",
+      "agemu": {
+        "n": 10,
+        "minMs": 645.285,
+        "medianMs": 836.934,
+        "p95Ms": 904.829,
+        "meanMs": 794.6738
+      },
+      "agemuTool": "agemu profile small-phone|pixel-9 (waits for relayout)",
+      "daemon": {
+        "n": 10,
+        "minMs": 722.386,
+        "medianMs": 829.709,
+        "p95Ms": 1115.366,
+        "meanMs": 830.3372999999999
+      },
+      "speedupCli": 0.19846248330214808,
+      "speedupDaemon": 0.20019066925874013
+    },
+    {
+      "op": "boot to agent-ready (from standby)",
+      "baseline": {
+        "n": 3,
+        "minMs": 12276.656,
+        "medianMs": 12482.351,
+        "p95Ms": 13349.423,
+        "meanMs": 12702.81
+      },
+      "baselineTool": "emulator cold boot (same flags, -no-snapshot-load) until sys.boot_completed=1",
+      "agemu": {
+        "n": 3,
+        "minMs": 11.079,
+        "medianMs": 24.186,
+        "p95Ms": 24.838,
+        "meanMs": 20.034333333333333
+      },
+      "agemuTool": "agemu boot (resume from standby + agent answering)",
+      "daemon": {
+        "n": 3,
+        "minMs": 9.553,
+        "medianMs": 9.599,
+        "p95Ms": 30.644,
+        "meanMs": 16.598666666666666
+      },
+      "speedupCli": 516.0981973042257,
+      "speedupDaemon": 1300.3803521200125
+    },
+    {
+      "op": "boot to agent-ready (powered off)",
+      "baseline": {
+        "n": 3,
+        "minMs": 12226.939,
+        "medianMs": 12506.179,
+        "p95Ms": 12692.265,
+        "meanMs": 12475.127666666667
+      },
+      "baselineTool": "emulator cold boot (same flags, -no-snapshot-load) until sys.boot_completed=1",
+      "agemu": {
+        "n": 3,
+        "minMs": 5506.422,
+        "medianMs": 5516.988,
+        "p95Ms": 5927.637,
+        "meanMs": 5650.348999999999
+      },
+      "agemuTool": "agemu boot (new emulator process + baseline snapshot + agent answering)",
+      "daemon": {
+        "n": 3,
+        "minMs": 5452.996,
+        "medianMs": 5551.622,
+        "p95Ms": 5667.782,
+        "meanMs": 5557.466666666667
+      },
+      "speedupCli": 2.2668490487925657,
+      "speedupDaemon": 2.252707226824881
+    },
+    {
+      "op": "reset to clean state",
+      "baseline": {
+        "n": 3,
+        "minMs": 14116.89,
+        "medianMs": 14126.845,
+        "p95Ms": 14158.176,
+        "meanMs": 14133.970333333333
+      },
+      "baselineTool": "adb emu kill + emulator cold boot until sys.boot_completed=1",
+      "agemu": {
+        "n": 3,
+        "minMs": 2148.78,
+        "medianMs": 2222.233,
+        "p95Ms": 2325.014,
+        "meanMs": 2232.0090000000005
+      },
+      "agemuTool": "agemu reset (snapshot load in place + agent answering)",
+      "daemon": {
+        "n": 3,
+        "minMs": 2122.934,
+        "medianMs": 2141.268,
+        "p95Ms": 2170.705,
+        "meanMs": 2144.969
+      },
+      "speedupCli": 6.3570494183103206,
+      "speedupDaemon": 6.59742031357121
+    },
+    {
+      "op": "reset vs emulator snapshot load",
+      "baseline": {
+        "n": 3,
+        "minMs": 2220.389,
+        "medianMs": 2363.822,
+        "p95Ms": 2421.087,
+        "meanMs": 2335.0993333333336
+      },
+      "baselineTool": "adb emu avd snapshot load agemu-baseline until sys.boot_completed=1",
+      "agemu": {
+        "n": 3,
+        "minMs": 2091.515,
+        "medianMs": 2140.729,
+        "p95Ms": 2160.19,
+        "meanMs": 2130.811333333333
+      },
+      "agemuTool": "agemu reset",
+      "daemon": {
+        "n": 3,
+        "minMs": 2183.98,
+        "medianMs": 2198.033,
+        "p95Ms": 2230.022,
+        "meanMs": 2204.0116666666668
+      },
+      "speedupCli": 1.104213564631488,
+      "speedupDaemon": 1.0754260741308252
+    }
+  ],
+  "time": "2026-11-06T03:01:00+01:00"
+}

@@ -1,0 +1,38 @@
+== screenshot (n=20)
+   baseline 152.9 ms (p95 1013.4, n=20) | agemu cli 8.4 ms (p95 28.7, n=20) | daemon 4.4 ms (p95 5.1, n=20) | speedup cli 18.3x daemon 35.0x
+== screenshot (small-phone profile) (n=20)
+   baseline 111.1 ms (p95 240.8, n=20) | agemu cli 7.5 ms (p95 21.0, n=20) | daemon 3.7 ms (p95 4.3, n=20) | speedup cli 14.9x daemon 30.1x
+== screenshot (after a screen change) (n=20)
+   baseline 177.4 ms (p95 488.4, n=20) | agemu cli 22.1 ms (p95 92.0, n=20) | daemon 13.3 ms (p95 21.9, n=20) | speedup cli 8.0x daemon 13.4x
+== ui tree (n=20)
+   baseline 1994.7 ms (p95 2751.6, n=20) | agemu cli 5.9 ms (p95 7.9, n=20) | daemon 1.9 ms (p95 3.2, n=20) | speedup cli 336.8x daemon 1051.0x
+== agent step: find + tap + wait for next screen + screenshot (n=10)
+   baseline 5390.7 ms (p95 5633.4, n=10) | agemu cli 1495.6 ms (p95 1668.5, n=10) | daemon 1506.0 ms (p95 1694.9, n=10) | speedup cli 3.6x daemon 3.6x
+== tap (n=20)
+   baseline 52.7 ms (p95 123.7, n=20) | agemu cli 4.7 ms (p95 12.5, n=20) | daemon 0.3 ms (p95 0.4, n=20) | speedup cli 11.1x daemon 172.2x
+== swipe (300 ms gesture) (n=20)
+   baseline 383.9 ms (p95 574.6, n=20) | agemu cli 309.4 ms (p95 316.3, n=20) | daemon 302.4 ms (p95 314.6, n=20) | speedup cli 1.2x daemon 1.3x
+== swipe (50 ms gesture) (n=20)
+   baseline 129.2 ms (p95 528.3, n=20) | agemu cli 58.8 ms (p95 62.2, n=20) | daemon 51.9 ms (p95 55.7, n=20) | speedup cli 2.2x daemon 2.5x
+== type text (plain field) (n=20)
+   baseline 72.0 ms (p95 166.3, n=20) | agemu cli 50.5 ms (p95 77.5, n=20) | daemon 41.6 ms (p95 61.9, n=20) | speedup cli 1.4x daemon 1.7x
+== type text --keys (plain field) (n=20)
+   baseline 62.6 ms (p95 85.2, n=20) | agemu cli 56.2 ms (p95 102.5, n=20) | daemon 32.9 ms (p95 125.1, n=20) | speedup cli 1.1x daemon 1.9x
+== type text (Settings search) (n=20)
+   baseline 68.8 ms (p95 302.6, n=20) | agemu cli 28.8 ms (p95 49.6, n=20) | daemon 21.8 ms (p95 49.4, n=20) | speedup cli 2.4x daemon 3.2x
+== key home (n=20)
+   baseline 48.9 ms (p95 137.9, n=20) | agemu cli 9.5 ms (p95 23.7, n=20) | daemon 1.2 ms (p95 10.1, n=20) | speedup cli 5.1x daemon 41.7x
+== launch app (cold start) (n=10)
+   baseline 601.2 ms (p95 770.0, n=10) | agemu cli 684.4 ms (p95 734.8, n=10) | daemon 601.5 ms (p95 831.1, n=10) | speedup cli 0.9x daemon 1.0x
+== launch app (warm start) (n=10)
+   baseline 86.8 ms (p95 383.0, n=10) | agemu cli 135.4 ms (p95 339.4, n=10) | daemon 78.8 ms (p95 60307.4, n=10) | speedup cli 0.6x daemon 1.1x
+== profile switch (n=10)
+   baseline 166.1 ms (p95 331.3, n=10) | agemu cli 836.9 ms (p95 904.8, n=10) | daemon 829.7 ms (p95 1115.4, n=10) | speedup cli 0.2x daemon 0.2x
+== boot to agent-ready (from standby) (n=3)
+   baseline 12482.4 ms (p95 13349.4, n=3) | agemu cli 24.2 ms (p95 24.8, n=3) | daemon 9.6 ms (p95 30.6, n=3) | speedup cli 516.1x daemon 1300.4x
+== boot to agent-ready (powered off) (n=3)
+   baseline 12506.2 ms (p95 12692.3, n=3) | agemu cli 5517.0 ms (p95 5927.6, n=3) | daemon 5551.6 ms (p95 5667.8, n=3) | speedup cli 2.3x daemon 2.3x
+== reset to clean state (n=3)
+   baseline 14126.8 ms (p95 14158.2, n=3) | agemu cli 2222.2 ms (p95 2325.0, n=3) | daemon 2141.3 ms (p95 2170.7, n=3) | speedup cli 6.4x daemon 6.6x
+== reset vs emulator snapshot load (n=3)
+   baseline 2363.8 ms (p95 2421.1, n=3) | agemu cli 2140.7 ms (p95 2160.2, n=3) | daemon 2198.0 ms (p95 2230.0, n=3) | speedup cli 1.1x daemon 1.1x

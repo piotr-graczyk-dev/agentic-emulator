@@ -1,0 +1,370 @@
+{
+  "device": "ios:ED6C55BD-83FB-49B9-93A2-54BA0AD521DD",
+  "host": "Apple M2 Pro, macOS 26.6, arm64",
+  "platform": "ios",
+  "results": [
+    {
+      "op": "screenshot",
+      "baseline": {
+        "n": 20,
+        "minMs": 136.521,
+        "medianMs": 145.732,
+        "p95Ms": 457.752,
+        "meanMs": 168.88299999999998
+      },
+      "baselineTool": "xcrun simctl io \u003cudid\u003e screenshot (png)",
+      "agemu": {
+        "n": 20,
+        "minMs": 7.793,
+        "medianMs": 8.266,
+        "p95Ms": 9.922,
+        "meanMs": 8.355
+      },
+      "agemuTool": "agemu screenshot (png)",
+      "daemon": {
+        "n": 20,
+        "minMs": 4.087,
+        "medianMs": 4.463,
+        "p95Ms": 5.003,
+        "meanMs": 4.545450000000001
+      },
+      "speedupCli": 17.630292765545608,
+      "speedupDaemon": 32.6533721711853
+    },
+    {
+      "op": "screenshot-jpeg",
+      "baseline": {
+        "n": 20,
+        "minMs": 113.992,
+        "medianMs": 118.001,
+        "p95Ms": 139.338,
+        "meanMs": 118.96610000000001
+      },
+      "baselineTool": "xcrun simctl io \u003cudid\u003e screenshot --type=jpeg",
+      "agemu": {
+        "n": 20,
+        "minMs": 9.25,
+        "medianMs": 9.948,
+        "p95Ms": 15.615,
+        "meanMs": 10.4321
+      },
+      "agemuTool": "agemu screenshot --format jpeg",
+      "daemon": {
+        "n": 20,
+        "minMs": 5.326,
+        "medianMs": 5.494,
+        "p95Ms": 6.405,
+        "meanMs": 5.53395
+      },
+      "speedupCli": 11.861781262565339,
+      "speedupDaemon": 21.47815799053513
+    },
+    {
+      "op": "ui-tree",
+      "baseline": {
+        "n": 3,
+        "minMs": 7084.456,
+        "medianMs": 7103.688,
+        "p95Ms": 12583.631,
+        "meanMs": 8923.925000000001
+      },
+      "baselineTool": "maestro hierarchy (JVM + XCUITest runner per call)",
+      "agemu": {
+        "n": 20,
+        "minMs": 28.452,
+        "medianMs": 30.433,
+        "p95Ms": 55.249,
+        "meanMs": 31.3407
+      },
+      "agemuTool": "agemu ui",
+      "daemon": {
+        "n": 20,
+        "minMs": 22.173,
+        "medianMs": 22.994,
+        "p95Ms": 27.16,
+        "meanMs": 23.43755
+      },
+      "speedupCli": 233.42056320441625,
+      "speedupDaemon": 308.9365921544751
+    },
+    {
+      "op": "find-element x10",
+      "baseline": {
+        "n": 3,
+        "minMs": 9005.482,
+        "medianMs": 9019.888,
+        "p95Ms": 9504.588,
+        "meanMs": 9176.652666666667
+      },
+      "baselineTool": "one maestro flow: 10x assertVisible",
+      "agemu": {
+        "n": 3,
+        "minMs": 284.872,
+        "medianMs": 297.411,
+        "p95Ms": 328.594,
+        "meanMs": 303.62566666666663
+      },
+      "agemuTool": "10x agemu find --text Settings",
+      "daemon": {
+        "n": 3,
+        "minMs": 224.093,
+        "medianMs": 225.878,
+        "p95Ms": 229.796,
+        "meanMs": 226.58900000000003
+      },
+      "speedupCli": 30.328024182024205,
+      "speedupDaemon": 39.9325653671451
+    },
+    {
+      "op": "tap",
+      "baseline": {
+        "n": 3,
+        "minMs": 8283.259,
+        "medianMs": 8385.322,
+        "p95Ms": 8551.466,
+        "meanMs": 8406.682333333332
+      },
+      "baselineTool": "maestro test (1x tapOn point)",
+      "agemu": {
+        "n": 20,
+        "minMs": 3.783,
+        "medianMs": 4.451,
+        "p95Ms": 20.477,
+        "meanMs": 5.44835
+      },
+      "agemuTool": "agemu tap x y",
+      "daemon": {
+        "n": 20,
+        "minMs": 0.253,
+        "medianMs": 0.347,
+        "p95Ms": 1.726,
+        "meanMs": 0.5952499999999998
+      },
+      "speedupCli": 1883.9186699618065,
+      "speedupDaemon": 24165.19308357349
+    },
+    {
+      "op": "tap x10",
+      "baseline": {
+        "n": 3,
+        "minMs": 16224.444,
+        "medianMs": 16318.648,
+        "p95Ms": 16391.347,
+        "meanMs": 16311.479666666666
+      },
+      "baselineTool": "one maestro flow: 10x tapOn point",
+      "agemu": {
+        "n": 3,
+        "minMs": 41.593,
+        "medianMs": 42.902,
+        "p95Ms": 65.75,
+        "meanMs": 50.08166666666667
+      },
+      "agemuTool": "10x agemu tap x y",
+      "daemon": {
+        "n": 3,
+        "minMs": 5.908,
+        "medianMs": 14.601,
+        "p95Ms": 16.921,
+        "meanMs": 12.476666666666667
+      },
+      "speedupCli": 380.37033238543654,
+      "speedupDaemon": 1117.6390658174096
+    },
+    {
+      "op": "swipe (300 ms gesture)",
+      "baseline": {
+        "n": 3,
+        "minMs": 8628.832,
+        "medianMs": 9648.145,
+        "p95Ms": 9706.481,
+        "meanMs": 9327.819333333333
+      },
+      "baselineTool": "maestro test (1x swipe, 300 ms)",
+      "agemu": {
+        "n": 10,
+        "minMs": 414.049,
+        "medianMs": 442.428,
+        "p95Ms": 462.427,
+        "meanMs": 437.5730999999999
+      },
+      "agemuTool": "agemu swipe --ms 300",
+      "daemon": {
+        "n": 10,
+        "minMs": 387.197,
+        "medianMs": 418.249,
+        "p95Ms": 453.822,
+        "meanMs": 418.29710000000006
+      },
+      "speedupCli": 21.80726581500267,
+      "speedupDaemon": 23.067945171417026
+    },
+    {
+      "op": "type text",
+      "baseline": {
+        "n": 3,
+        "minMs": 8427.549,
+        "medianMs": 8448.763,
+        "p95Ms": 9176.684,
+        "meanMs": 8684.332
+      },
+      "baselineTool": "maestro test (inputText \"hello\")",
+      "agemu": {
+        "n": 20,
+        "minMs": 4.548,
+        "medianMs": 5.32,
+        "p95Ms": 15.073,
+        "meanMs": 5.870899999999999
+      },
+      "agemuTool": "agemu type hello",
+      "daemon": {
+        "n": 20,
+        "minMs": 1.668,
+        "medianMs": 2.543,
+        "p95Ms": 4.802,
+        "meanMs": 2.6514499999999996
+      },
+      "speedupCli": 1588.1133458646618,
+      "speedupDaemon": 3322.360597719229
+    },
+    {
+      "op": "launch app",
+      "baseline": {
+        "n": 10,
+        "minMs": 289.393,
+        "medianMs": 321.378,
+        "p95Ms": 323.905,
+        "meanMs": 315.7933
+      },
+      "baselineTool": "xcrun simctl launch \u003cudid\u003e com.apple.Preferences",
+      "agemu": {
+        "n": 10,
+        "minMs": 325.685,
+        "medianMs": 342.001,
+        "p95Ms": 355.159,
+        "meanMs": 338.38710000000003
+      },
+      "agemuTool": "agemu launch com.apple.Preferences",
+      "daemon": {
+        "n": 10,
+        "minMs": 304.175,
+        "medianMs": 336.395,
+        "p95Ms": 340.445,
+        "meanMs": 332.2616
+      },
+      "speedupCli": 0.9396990067280505,
+      "speedupDaemon": 0.9553590273339377
+    },
+    {
+      "op": "launch app + first screen",
+      "agemu": {
+        "n": 5,
+        "minMs": 1915.773,
+        "medianMs": 1922.87,
+        "p95Ms": 2172.977,
+        "meanMs": 1970.3807999999997
+      },
+      "agemuTool": "agemu launch + agemu wait --id com.apple.settings.general"
+    },
+    {
+      "op": "boot (device kept booted by agemu)",
+      "baseline": {
+        "n": 10,
+        "minMs": 98.395,
+        "medianMs": 104.51,
+        "p95Ms": 200.304,
+        "meanMs": 113.51490000000001
+      },
+      "baselineTool": "xcrun simctl bootstatus \u003cudid\u003e -b",
+      "agemu": {
+        "n": 10,
+        "minMs": 3.756,
+        "medianMs": 4.076,
+        "p95Ms": 6.589,
+        "meanMs": 4.2643
+      },
+      "agemuTool": "agemu boot (returns when agent-ready)",
+      "daemon": {
+        "n": 10,
+        "minMs": 0.288,
+        "medianMs": 0.315,
+        "p95Ms": 0.426,
+        "meanMs": 0.3338
+      },
+      "speedupCli": 25.640333660451425,
+      "speedupDaemon": 331.77777777777777
+    },
+    {
+      "op": "boot (cold from shutdown)",
+      "baseline": {
+        "n": 2,
+        "minMs": 4771.16,
+        "medianMs": 5422.627,
+        "p95Ms": 5422.627,
+        "meanMs": 5096.8935
+      },
+      "baselineTool": "xcrun simctl boot + simctl bootstatus -b",
+      "agemu": {
+        "n": 2,
+        "minMs": 6721.858,
+        "medianMs": 7538.061,
+        "p95Ms": 7538.061,
+        "meanMs": 7129.9595
+      },
+      "agemuTool": "agemu boot (until interactive: boot finished, framebuffer, HID; UI tree warming up)",
+      "speedupCli": 0.7193662932682556
+    },
+    {
+      "op": "boot (cold) + first UI tree",
+      "agemu": {
+        "n": 2,
+        "minMs": 7929.21,
+        "medianMs": 12485.761,
+        "p95Ms": 12485.761,
+        "meanMs": 10207.4855
+      },
+      "agemuTool": "agemu boot + agemu ui (until the UI tree is read)"
+    },
+    {
+      "op": "profile switch to iphone-se-3 (cold)",
+      "baseline": {
+        "n": 2,
+        "minMs": 7713.825,
+        "medianMs": 8595.352,
+        "p95Ms": 8595.352,
+        "meanMs": 8154.5885
+      },
+      "baselineTool": "simctl shutdown \u003cthis\u003e + simctl boot \u003cse\u003e + simctl bootstatus \u003cse\u003e -b",
+      "agemu": {
+        "n": 2,
+        "minMs": 9981.357,
+        "medianMs": 13039.434,
+        "p95Ms": 13039.434,
+        "meanMs": 11510.395499999999
+      },
+      "agemuTool": "agemu profile iphone-se-3 (until interactive)",
+      "speedupCli": 0.6591813724430065
+    },
+    {
+      "op": "reset to clean state",
+      "baseline": {
+        "n": 2,
+        "minMs": 29683.503,
+        "medianMs": 35687.16,
+        "p95Ms": 35687.16,
+        "meanMs": 32685.3315
+      },
+      "baselineTool": "simctl shutdown + erase + boot + bootstatus -b",
+      "agemu": {
+        "n": 2,
+        "minMs": 1776.72,
+        "medianMs": 2075.279,
+        "p95Ms": 2075.279,
+        "meanMs": 1925.9995
+      },
+      "agemuTool": "agemu reset (soft reset, no reboot)",
+      "speedupCli": 17.19631914552212
+    }
+  ],
+  "time": "2026-11-06T03:09:08+01:00"
+}

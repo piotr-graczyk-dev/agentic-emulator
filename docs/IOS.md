@@ -6,7 +6,7 @@ devices boot headless, and agents see the screen only through screenshots and th
 All the speed comes from the control plane.
 
 ```
-agemu CLI / MCP ──unix socket──► agemu daemon (Go, internal/ios)
+agemu CLI / MCP ──unix socket──► agemud daemon (Go, internal/ios)
                                    │ JSON lines over stdio (one long-lived child process)
                                    ▼
                           agemu-ios-helper (ios-helper/, Swift + Objective-C)
@@ -27,7 +27,7 @@ agemu CLI / MCP ──unix socket──► agemu daemon (Go, internal/ios)
 | key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. |
-| boot | `simctl boot` + `simctl bootstatus -b` | `-[SimDevice bootWithOptions:]` (persisted, headless), then agemu returns once the device is **interactive**: CoreSimulator's boot status is "finished" (what `bootstatus` waits for), the framebuffer is readable and the HID client is connected; accessibility finishes warming up in the background and UI reads wait for it (see "Cold boot"). A device that is already booted is ready in milliseconds, and agemu keeps devices booted (see below). |
+| boot | `simctl boot` + `simctl bootstatus -b` | `-[SimDevice bootWithOptions:]` (persisted, headless), then agemu returns once the **home screen is drawn**: CoreSimulator's boot status is "finished" (what `bootstatus` waits for), the framebuffer is readable, the HID client is connected and SpringBoard's accessibility tree answers (see "Cold boot"; `AGEMU_IOS_BOOT_WAIT_AX=0` returns before the last step). A device that is already booted is ready in milliseconds, and agemu keeps devices booted (see below). |
 | reset | `simctl shutdown` + `simctl erase` + boot | A soft reset of the running device; see below. |
 | profile | — | iOS screens are fixed per device type, so `agemu profile <name>` switches to the `agemu-<name>` simulator of that device type (created and booted when missing) and returns its id. |
 
@@ -428,7 +428,7 @@ bin/agemu-bench --platform ios --device ios:<udid> --agemu bin/agemu --n 20
 go test ./internal/ios/...      # unit tests (no simulator needed)
 ```
 
-The helper is found next to the `agemu` binary, or at `$AGEMU_IOS_HELPER`. Its source is
+The helper is found next to the `agemud` daemon binary, or at `$AGEMU_IOS_HELPER`. Its source is
 `ios-helper/` (`swift build -c release`).
 
 ## Credits
