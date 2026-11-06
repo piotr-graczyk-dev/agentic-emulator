@@ -726,9 +726,6 @@ func typeable(s string) bool {
 	return true
 }
 
-// TypeText types into the focused field with HID keyboard events. Text the US keyboard
-// cannot produce (emoji, accents, other scripts) is pasted: put on the simulator pasteboard
-// and inserted with Cmd-V.
 // Settle waits until the screen has been still for 48 ms (at most 1 s).
 func (b *Backend) Settle(ctx context.Context, id string) error {
 	d, err := b.target(ctx, id)
