@@ -370,15 +370,9 @@ keeps one simulator booted while memory is short.
 
 ## Caveats
 
-- **No on-screen keyboard while agemu types.** agemu types with HID keyboard events, which
-  iOS treats as a hardware keyboard, so the software keyboard stays hidden. On a phone it would
-  cover the lower part of the screen. A test that must see what the keyboard hides (a button
-  under it, a list that should scroll above it) does not see that on agemu. Tools that type
-  through XCTest show the keyboard.
 - **Taps by selector settle first.** Before it resolves a selector, agemu waits until the
   screen has been still for 48 ms (at most 1 s), so a button that is still scrolling into place
   is tapped where it comes to rest.
-
 - **Simulator, not a device.** The Simulator runs the iOS userland natively on the Mac's CPU.
   There is no cellular, no real camera, no Secure Enclave-backed Face ID (it can be simulated),
   push notifications must be simulated, GPU and memory limits differ, and performance is the
@@ -390,11 +384,12 @@ keeps one simulator booted while memory is short.
   CoreSimulator 1155.4 the legacy Indigo HID path no longer delivers buttons and keys and
   touches become unreliable (`dtuhidd` replaces it). `agemu-ios-helper` reports the framework
   versions it loaded (`hello`).
-- **HID keyboard.** Typing uses a US hardware keyboard layout. While a hardware keyboard is in
-  use iOS hides the software keyboard, as it does when you type on a Mac keyboard in
-  Simulator.app, and iOS's hardware-keyboard auto-capitalization (on by default) applies, so
-  `type hello` into an empty field with sentence capitalization can produce "Hello", exactly as
-  on a device with a keyboard.
+- **HID keyboard.** `type --keys` (and `type` of a single character) uses a US hardware
+  keyboard layout, and iOS's hardware-keyboard auto-capitalization (on by default) applies, so
+  `type --keys hello` into an empty field with sentence capitalization can produce "Hello",
+  exactly as on a device with a keyboard. `type` of longer text pastes it. The software keyboard
+  can stay on screen while agemu types (seen on iOS 26.5 with both paths), covering the lower
+  part of a phone screen.
 - **Disk.** Every simulator that has booted once costs 1-2 GB: on its first boot iOS stages
   about 1 GB of Siri, text-to-speech and linguistic assets into
   `data/private/var/MobileAsset` (`mobileassetd`; `simctl boot --disabledJob` does not stop it).

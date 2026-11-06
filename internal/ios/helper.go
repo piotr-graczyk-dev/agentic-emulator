@@ -202,6 +202,11 @@ func waitingFor(cmd string, params map[string]any) string {
 func (h *helper) call(ctx context.Context, cmd string, params map[string]any, out any) error {
 	if _, ok := ctx.Deadline(); !ok {
 		if d, ok := callTimeouts[cmd]; ok {
+			if t, isText := params["text"].(string); isText && cmd == "type" {
+				// type --keys paces every key (acknowledged, then a 10 ms gap): long text must
+				// not time out while the helper is still typing it.
+				d += time.Duration(len(t)) * 50 * time.Millisecond
+			}
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, d)
 			defer cancel()

@@ -151,7 +151,9 @@ let keyMap: [Character: (UInt32, Bool)] = {
 let leftShift: UInt32 = 225
 let leftGUI: UInt32 = 227
 
-func typeText(_ d: AGDevice, _ text: String) throws {
+/// Returns the display's frame mark taken right before the last key, so the caller waits for the
+/// frame that shows the last character and not for one an earlier key produced.
+func typeText(_ d: AGDevice, _ text: String) throws -> UInt {
     var unsupported = Set<Character>()
     for c in text where keyMap[c] == nil { unsupported.insert(c) }
     if !unsupported.isEmpty {
@@ -163,7 +165,10 @@ func typeText(_ d: AGDevice, _ text: String) throws {
     // a 10 ms gap lost 1 of 6 one-time-code digits; waiting for each key's frame lost "ex" in one
     // try and doubled ".pl" in another). That is why `type` pastes by default; key events are
     // the explicit `--keys` path.
-    for c in text {
+    var mark = d.inputFrameMark()
+    let last = text.count - 1
+    for (i, c) in text.enumerated() {
+        if i == last && i > 0 { mark = d.inputFrameMark() }
         let (usage, shift) = keyMap[c]!
         if shift { try d.key(leftShift, down: true) }
         try d.key(usage, down: true)
@@ -172,6 +177,7 @@ func typeText(_ d: AGDevice, _ text: String) throws {
         try d.hidWait(forAcknowledgements: 10)
         if keyGapMs > 0 { usleep(keyGapMs * 1000) }
     }
+    return mark
 }
 
 let keyGapMs: UInt32 = UInt32(ProcessInfo.processInfo.environment["AGEMU_IOS_KEY_GAP_MS"] ?? "") ?? 10
@@ -889,8 +895,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         // Like taps, typing waits for a still screen first: a paste sent while a search field
         // was still animating into its focused state was lost.
         if tapSettle { _ = d.wait(forSettleQuiet: 48, max: 1000) }
-        let mark = d.inputFrameMark()
-        try inputQueue(d.udid).sync { try typeText(d, text) }
+        let mark = try inputQueue(d.udid).sync { try typeText(d, text) }
         let shown = d.waitForChange(since: mark, quiet: 48, max: req.optDouble("settleMaxMs", 1000))
         return ["ok": true, "settleMs": shown["waitedMs"] ?? 0]
     case "key":
