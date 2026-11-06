@@ -18,7 +18,7 @@ import (
 
 func tree() *api.UITree {
 	return &api.UITree{Width: 100, Height: 200, Root: &api.Element{Ref: "e0", Role: "window", Frame: api.Rect{W: 100, H: 200}, Children: []*api.Element{
-		{Ref: "e1", Role: "button", Text: "Log in", ID: "com.app:id/login", Frame: api.Rect{X: 10, Y: 20, W: 30, H: 10}},
+		{Ref: "e1", Role: "button", Text: "Log in", ID: "com.app:id/login", Frame: api.Rect{X: 10, Y: 20, W: 30, H: 10}, Enabled: true},
 		{Ref: "e2", Role: "text", Label: "Welcome back", Frame: api.Rect{X: 0, Y: 0, W: 100, H: 10}},
 		{Ref: "e3", Role: "button", Text: "Hidden", Frame: api.Rect{}},
 	}}}
@@ -154,37 +154,98 @@ func shortTempDir(t *testing.T) string {
 	return d
 }
 
-// settlingBackend records the order of Settle and UITree calls.
+// settlingBackend records the order of Settle, UITree and tap calls. still is what Settle
+// reports; frames, when set, are the "Log in" button's successive frames (one per tree read).
 type settlingBackend struct {
 	fakeBackend
-	calls []string
+	still         bool
+	frames        []api.Rect
+	disabledReads int // the button reads as disabled for this many tree reads
+	goneAfter     int // from this many reads on (when > 0), the button is gone
+	reads         int
+	calls         []string
 }
 
-func (s *settlingBackend) Settle(ctx context.Context, id string) error {
+func (s *settlingBackend) Settle(ctx context.Context, id string) (bool, error) {
 	s.calls = append(s.calls, "settle")
-	return nil
+	return s.still, nil
 }
 
 func (s *settlingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
 	s.calls = append(s.calls, "ui")
-	return tree(), nil
+	t := tree()
+	if len(s.frames) > 0 {
+		f := s.frames[min(s.reads, len(s.frames)-1)]
+		t.Root.Children[0].Frame = f
+	}
+	if s.reads < s.disabledReads {
+		t.Root.Children[0].Enabled = false
+	}
+	if s.goneAfter > 0 && s.reads >= s.goneAfter {
+		t.Root.Children = t.Root.Children[1:]
+	}
+	s.reads++
+	return t, nil
 }
 
-func TestTapBySelectorSettlesBeforeReadingTheTree(t *testing.T) {
-	sb := &settlingBackend{}
+func (s *settlingBackend) Tap(ctx context.Context, id string, x, y int) error {
+	s.calls = append(s.calls, fmt.Sprintf("tap %d,%d", x, y))
+	return nil
+}
+
+func (s *settlingBackend) TapNow(ctx context.Context, id string, x, y int) error {
+	s.calls = append(s.calls, fmt.Sprintf("tapnow %d,%d", x, y))
+	return nil
+}
+
+func TestTapBySelectorOnAStillScreen(t *testing.T) {
+	sb := &settlingBackend{still: true}
 	svc := NewService(t.TempDir(), sb)
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(sb.calls) < 2 || sb.calls[0] != "settle" || sb.calls[1] != "ui" {
-		t.Fatalf("calls = %v, want settle before ui", sb.calls)
+	// The tap keeps the backend's settle: a transition can start or resume during the tree read.
+	want := []string{"settle", "ui", "tap 25,25"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}
 	sb.calls = nil
 	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(sb.calls) != 0 {
-		t.Fatalf("a tap at coordinates read the tree or settled: %v", sb.calls)
+	if fmt.Sprint(sb.calls) != "[tap 5,5]" {
+		t.Fatalf("a tap at coordinates: %v, want only the backend's own tap", sb.calls)
+	}
+}
+
+func TestTapBySelectorWaitsForTheElementToStopMoving(t *testing.T) {
+	// The screen never goes still (say, a spinner), and the button is still scrolling: its frame
+	// changes once and then repeats. The tap lands on the resting frame without waiting longer.
+	sb := &settlingBackend{still: false, frames: []api.Rect{{X: 10, Y: 300, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}}}
+	svc := NewService(t.TempDir(), sb)
+	start := time.Now()
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"settle", "ui", "ui", "ui", "tapnow 25,125"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("took %v", time.Since(start))
+	}
+}
+
+func TestTapBySelectorWaitsForTheElementToBeEnabled(t *testing.T) {
+	// A "send" button the app enables only once it has processed the typed text.
+	sb := &settlingBackend{still: true, disabledReads: 2}
+	svc := NewService(t.TempDir(), sb)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"settle", "ui", "ui", "ui", "tap 25,25"}
+	if fmt.Sprint(sb.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", sb.calls, want)
 	}
 }
 
@@ -233,5 +294,80 @@ func TestLaunchOptionsNeedALauncher(t *testing.T) {
 	}
 	if len(ol.got.Args) != 2 || ol.got.Args[1] != "http://localhost:8081" || ol.got.Env["A"] != "1" || !ol.got.Relaunch || len(ol.launched) != 0 {
 		t.Fatalf("LaunchWith got %+v (plain launches %v)", ol.got, ol.launched)
+	}
+}
+
+func TestActionWaitsForItsEffectInTheSameCall(t *testing.T) {
+	sb := &settlingBackend{still: true}
+	svc := NewService(t.TempDir(), sb)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"},"waitFor":{"contains":"welcome"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := res.(map[string]any)
+	if !ok || m["result"] == nil || m["waited"] == nil {
+		t.Fatalf("result = %#v, want result and waited", res)
+	}
+	if el, _ := m["waited"].(*api.Element); el == nil || el.Ref != "e2" {
+		t.Fatalf("waited = %#v, want e2", m["waited"])
+	}
+	_, err = svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":1,"y":1,"waitFor":{"text":"never"},"waitTimeoutMs":100}`))
+	if err == nil || !strings.Contains(err.Error(), "tap done, but") {
+		t.Fatalf("err = %v, want the action to report the failed wait", err)
+	}
+}
+
+func TestActionCanReturnTheScreenItEndsOn(t *testing.T) {
+	sb := &settlingBackend{still: true}
+	svc := NewService(t.TempDir(), sb)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"},"waitFor":{"contains":"welcome"},"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := res.(map[string]any)
+	if tr, _ := m["ui"].(*api.UITree); tr == nil || tr.Root == nil || m["waited"] == nil || m["result"] == nil {
+		t.Fatalf("got %#v, want result, waited and ui", res)
+	}
+}
+
+func TestTapBySelectorDoesNotTapAnElementThatWentAway(t *testing.T) {
+	for name, sb := range map[string]*settlingBackend{
+		"while moving":   {still: false, frames: []api.Rect{{X: 10, Y: 300, W: 30, H: 10}, {X: 10, Y: 200, W: 30, H: 10}}, goneAfter: 2},
+		"while disabled": {still: true, disabledReads: 5, goneAfter: 2},
+	} {
+		svc := NewService(t.TempDir(), sb)
+		_, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`))
+		if err == nil || !strings.Contains(err.Error(), "disappeared") {
+			t.Fatalf("%s: err = %v, want an error saying it disappeared", name, err)
+		}
+		for _, c := range sb.calls {
+			if strings.HasPrefix(c, "tap") {
+				t.Fatalf("%s: tapped anyway: %v", name, sb.calls)
+			}
+		}
+	}
+}
+
+// stuckFrames never delivers a frame: WaitFrame blocks until its context ends.
+type stuckFrames struct{ fakeBackend }
+
+func (s *stuckFrames) UITree(ctx context.Context, id string) (*api.UITree, error) { return tree(), nil }
+func (s *stuckFrames) WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error) {
+	if mark == 0 {
+		return 7, nil
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func TestWaitEndsOnTimeWhenFramesStall(t *testing.T) {
+	svc := NewService(t.TempDir(), &stuckFrames{})
+	start := time.Now()
+	_, err := svc.Call(context.Background(), "wait", json.RawMessage(`{"device":"android:x","selector":{"text":"never"},"timeoutMs":900}`))
+	if err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("err = %v, want a timeout", err)
+	}
+	if el := time.Since(start); el > 4*time.Second {
+		t.Fatalf("wait took %v with a 900 ms timeout", el)
 	}
 }

@@ -46,6 +46,11 @@ Device commands (-d <device> optional when exactly one device is booted):
   launch <app-id> [--relaunch] [-- <process args...>]   (args/relaunch: iOS)
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
 
+Actions (tap, swipe, type, key, launch) also wait for their effect in the same call:
+  --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
+  --ui prints the screen the action ends on (outline), so one call acts, waits and observes
+  e.g. agemu tap --text "Log in" --wait-id home-screen --ui
+
 Servers:
   daemon                                    run the daemon in the foreground
   mcp                                       MCP server on stdio (for agent harnesses)
@@ -87,7 +92,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true}
+var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -128,6 +133,15 @@ func (c cli) int(name string) int { v, _ := strconv.Atoi(c.flags[name]); return 
 
 func (c cli) selector() *api.Selector {
 	s := api.Selector{Text: c.flags["text"], Contains: c.flags["contains"], ID: c.flags["id"], Role: c.flags["role"], Index: c.int("index")}
+	if s.Empty() {
+		return nil
+	}
+	return &s
+}
+
+// waitSelector builds the selector of an action's --wait-* flags (nil without any).
+func (c cli) waitSelector() *api.Selector {
+	s := api.Selector{Text: c.flags["wait-text"], Contains: c.flags["wait-contains"], ID: c.flags["wait-id"], Role: c.flags["wait-role"]}
 	if s.Empty() {
 		return nil
 	}
@@ -234,6 +248,14 @@ func runCommand(cmd string, args []string) error {
 		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
 	}
 
+	switch cmd {
+	case "tap", "swipe", "type", "key", "launch":
+		if ws := c.waitSelector(); ws != nil {
+			p.WaitFor, p.WaitGone, p.WaitTimeoutMs = ws, c.flags["wait-gone"] == "true", c.int("wait-timeout-ms")
+		}
+		p.ReturnUI = c.flags["ui"] == "true"
+	}
+
 	cl, err := client.Dial()
 	if err != nil {
 		return err
@@ -250,6 +272,25 @@ func runCommand(cmd string, args []string) error {
 		}
 		fmt.Print(outline.Render(&t))
 		return nil
+	}
+	if p.ReturnUI && textOut {
+		// An action with --ui prints the screen it ends on as an outline (after a JSON line
+		// with the action's result); --json prints everything as JSON.
+		var r struct {
+			Result json.RawMessage `json:"result"`
+			Waited json.RawMessage `json:"waited,omitempty"`
+			UI     *api.UITree     `json:"ui"`
+		}
+		if err := json.Unmarshal(raw, &r); err == nil && r.UI != nil {
+			head := map[string]json.RawMessage{"result": r.Result}
+			if len(r.Waited) > 0 {
+				head["waited"] = r.Waited
+			}
+			b, _ := json.Marshal(head)
+			fmt.Println(string(b))
+			fmt.Print(outline.Render(r.UI))
+			return nil
+		}
 	}
 	if (cmd == "find") && textOut {
 		var els []*api.Element

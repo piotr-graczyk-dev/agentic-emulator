@@ -726,13 +726,51 @@ func typeable(s string) bool {
 	return true
 }
 
-// Settle waits until the screen has been still for 48 ms (at most 1 s).
-func (b *Backend) Settle(ctx context.Context, id string) error {
+// Settle waits until the screen has had no big change for 48 ms, at most 1.5 s, and reports
+// whether it got there. Big means more than 0.4% of a sparse pixel grid: scrolling (including
+// momentum) and transitions count, a blinking cursor, a spinner or a countdown do not, so
+// those no longer hold every tap for the full timeout.
+func (b *Backend) Settle(ctx context.Context, id string) (bool, error) {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	var r struct {
+		Settled bool `json:"settled"`
+	}
+	err = b.call(ctx, "settle", map[string]any{"udid": d.UDID, "quietMs": 48, "maxMs": 1500, "big": true}, &r)
+	return r.Settled, err
+}
+
+// WaitFrame blocks until the screen shows a frame newer than mark and has then had no big
+// change for 16 ms (at most max); mark 0 returns the current frame counter at once.
+func (b *Backend) WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error) {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	var r struct {
+		Mark uint64 `json:"mark"`
+	}
+	req := map[string]any{"udid": d.UDID, "since": mark, "maxMs": max.Milliseconds(), "quietMs": 16}
+	if mark == 0 {
+		req["since"] = -1
+	}
+	err = b.call(ctx, "nextframe", req, &r)
+	return r.Mark, err
+}
+
+// TapNow taps without the helper's wait for a still screen (the daemon confirmed the target is
+// at rest).
+func (b *Backend) TapNow(ctx context.Context, id string, x, y int) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
 	}
-	return b.call(ctx, "settle", map[string]any{"udid": d.UDID, "quietMs": 48, "maxMs": 1000}, nil)
+	if x < 0 || y < 0 || (d.Width > 0 && (x >= d.Width || y >= d.Height)) {
+		return fmt.Errorf("tap (%d,%d) is outside the %dx%d screen", x, y, d.Width, d.Height)
+	}
+	return b.call(ctx, "tap", map[string]any{"udid": d.UDID, "x": x, "y": y, "settleMaxMs": 0}, nil)
 }
 
 // TypeText inserts text at the cursor of the focused field. More than one character is pasted
@@ -769,10 +807,72 @@ func (b *Backend) paste(ctx context.Context, udid, text string) error {
 	if text == "" {
 		return nil
 	}
-	if err := simctlStdin(ctx, text, "pbcopy", udid); err != nil {
+	return pasteVerified(
+		func() error { return simctlStdin(ctx, text, "pbcopy", udid) },
+		func() error { return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil) },
+		func() (string, bool) { return b.focusedFieldValue(ctx, udid) },
+		func() { log.Printf("ios type on %s: the focused field did not change; pasting again", udid) },
+	)
+}
+
+// pasteVerified sets the pasteboard (setPasteboard), pastes (paste) and checks that the
+// focused field changed, using read (ok=false: no literal text field in focus). The field is
+// read before the paste, while the pasteboard is set, so a lost paste can be told apart from
+// one the field transformed (a formatted phone number, upper-casing): only a field that did
+// not change at all gets a second paste. The first read finishes before the paste is sent, or
+// a late read could see the pasted text and trigger a duplicate.
+func pasteVerified(setPasteboard, paste func() error, read func() (string, bool), retrying func()) error {
+	type fieldState struct {
+		value string
+		ok    bool
+	}
+	before := make(chan fieldState, 1)
+	go func() {
+		v, ok := read()
+		before <- fieldState{v, ok}
+	}()
+	if err := setPasteboard(); err != nil {
+		<-before
 		return err
 	}
-	return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil)
+	pre := <-before
+	if err := paste(); err != nil {
+		return err
+	}
+	if !pre.ok {
+		return nil
+	}
+	for _, pause := range []time.Duration{0, 150 * time.Millisecond} {
+		time.Sleep(pause)
+		if v, ok := read(); !ok || v != pre.value {
+			return nil // the field changed: the paste arrived (possibly transformed)
+		}
+	}
+	retrying()
+	return paste()
+}
+
+// focusedFieldValue returns the text of the focused text field. ok is false when there is no
+// focused text field, or when its value is not its literal text (a secure field).
+func (b *Backend) focusedFieldValue(ctx context.Context, udid string) (value string, ok bool) {
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	t, err := b.readTree(tctx, udid)
+	if err != nil {
+		return "", false
+	}
+	found := false
+	convertTree(t, "").Walk(func(e *api.Element) {
+		if found || !e.Focused || e.Role != "textfield" {
+			return
+		}
+		found = true
+		if strings.Contains(strings.ToLower(e.Type), "secure") {
+			return
+		}
+		value, ok = e.Text+"\x00"+e.Value, true
+	})
+	return value, ok
 }
 
 // Key presses a named key. iOS has no back key: "back" taps the navigation bar's back

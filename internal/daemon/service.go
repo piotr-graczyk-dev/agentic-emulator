@@ -53,6 +53,13 @@ type Params struct {
 	Env      map[string]string `json:"env,omitempty"`      // launch: process environment
 	Relaunch bool              `json:"relaunch,omitempty"` // launch: terminate a running instance first
 
+	// actions (tap, swipe, type, key, launch) can wait for the next screen in the same call
+	WaitFor       *api.Selector `json:"waitFor,omitempty"`
+	WaitGone      bool          `json:"waitGone,omitempty"`
+	WaitTimeoutMs int           `json:"waitTimeoutMs,omitempty"`
+	// ReturnUI makes an action return the UI tree of the screen it ends on.
+	ReturnUI bool `json:"returnUi,omitempty"`
+
 	// selectors / waits
 	Selector  *api.Selector `json:"selector,omitempty"`
 	TimeoutMs int           `json:"timeoutMs,omitempty"`
@@ -233,6 +240,35 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 	l.Lock()
 	defer l.Unlock()
 
+	res, err := s.act(ctx, b, id, method, p)
+	compound := p.WaitFor != nil && !p.WaitFor.Empty()
+	if err != nil || (!compound && !p.ReturnUI) {
+		return res, err
+	}
+	// The action succeeded; wait for its effect and/or read the screen it ends on in the same
+	// call (one round trip, and one agent tool call, per step).
+	out := map[string]any{"result": res}
+	if compound {
+		waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs})
+		if werr != nil {
+			return nil, fmt.Errorf("%s done, but: %w", method, werr)
+		}
+		out["waited"] = waited
+	}
+	if p.ReturnUI {
+		t, terr := b.UITree(ctx, id)
+		if terr != nil {
+			return nil, fmt.Errorf("%s done, but reading the screen failed: %w", method, terr)
+		}
+		out["ui"] = t
+	}
+	return out, nil
+}
+
+// act runs one device action (the caller holds the device lock).
+func (s *Service) act(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
+	var err error
+
 	switch method {
 	case "boot":
 		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
@@ -257,11 +293,16 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		}
 		return b.SetProfile(ctx, id, prof)
 	case "tap":
-		x, y, el, err := s.point(ctx, b, id, p)
+		x, y, el, atRest, err := s.point(ctx, b, id, p)
 		if err != nil {
 			return nil, err
 		}
-		if err := b.Tap(ctx, id, x, y); err != nil {
+		if st, ok := b.(backend.Settler); ok && atRest {
+			err = st.TapNow(ctx, id, x, y)
+		} else {
+			err = b.Tap(ctx, id, x, y)
+		}
+		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"x": x, "y": y, "element": el}, nil
@@ -311,30 +352,87 @@ func ok(err error) (any, error) {
 	return map[string]any{"ok": true}, nil
 }
 
-// point resolves tap coordinates from explicit x/y or a selector.
-func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Params) (int, int, *api.Element, error) {
+// restCheckFor bounds how long point re-reads the tree waiting for a moving element to stop;
+// enabledWaitFor how long it waits for a disabled element to become enabled.
+const (
+	restCheckFor   = 1500 * time.Millisecond
+	enabledWaitFor = 3 * time.Second
+)
+
+// point resolves tap coordinates from explicit x/y or a selector. atRest reports that the
+// screen kept changing and the element was confirmed at rest by two equal reads of its frame:
+// the tap then goes out at once, since another wait for a still screen would only time out. On
+// a still screen the tap keeps the backend's own settle. It returns at once if the screen is
+// still still, and it holds the tap if a transition started or resumed during the tree read
+// (UIKit ignores a tap during a transition).
+func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Params) (x, y int, el *api.Element, atRest bool, err error) {
 	if p.X != nil && p.Y != nil {
-		return *p.X, *p.Y, nil, nil
+		return *p.X, *p.Y, nil, false, nil
 	}
 	if p.Selector == nil || p.Selector.Empty() {
-		return 0, 0, nil, fmt.Errorf("tap needs x,y or a selector")
+		return 0, 0, nil, false, fmt.Errorf("tap needs x,y or a selector")
 	}
 	// A frame read while the content still scrolls is stale by the time the tap lands (a
 	// "log out" button tapped right after a swipe was hit 200 px above its resting place).
-	if st, ok := b.(backend.Settler); ok {
-		_ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
+	st, settler := b.(backend.Settler)
+	still := false
+	if settler {
+		still, _ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
 	}
-	t, err := b.UITree(ctx, id)
-	if err != nil {
-		return 0, 0, nil, err
+	find := func() (*api.Element, error) {
+		t, err := b.UITree(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		m := Find(t, *p.Selector)
+		if len(m) <= p.Selector.Index {
+			return nil, fmt.Errorf("no element matches %s", describe(*p.Selector))
+		}
+		return m[p.Selector.Index], nil
 	}
-	m := Find(t, *p.Selector)
-	if len(m) <= p.Selector.Index {
-		return 0, 0, nil, fmt.Errorf("no element matches %s", describe(*p.Selector))
+	if el, err = find(); err != nil {
+		return 0, 0, nil, false, err
 	}
-	el := m[p.Selector.Index]
-	x, y := el.Frame.Center()
-	return x, y, el, nil
+	// Actionability: a disabled element ignores the tap (a "send" button enabled by text the
+	// app has not processed yet). Give it a moment to become enabled; tap it anyway after that.
+	if !el.Enabled {
+		deadline := time.Now().Add(enabledWaitFor)
+		for !el.Enabled && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return 0, 0, nil, false, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+			again, ferr := find()
+			if ferr != nil {
+				return 0, 0, nil, false, fmt.Errorf("%w (it disappeared while disabled)", ferr)
+			}
+			el = again
+		}
+	}
+	if settler && !still {
+		// Something on screen keeps changing (a spinner, a blinking cursor): waiting for a
+		// still screen would only time out. The element is at rest once its frame repeats.
+		deadline := time.Now().Add(restCheckFor)
+		for time.Now().Before(deadline) {
+			if ctx.Err() != nil {
+				return 0, 0, nil, false, ctx.Err()
+			}
+			again, ferr := find()
+			if ferr != nil {
+				// The element went away while it moved (a transition replaced the screen):
+				// its last frame may now belong to another control, so do not tap it.
+				return 0, 0, nil, false, fmt.Errorf("%w (it disappeared while it was moving)", ferr)
+			}
+			if again.Frame == el.Frame {
+				el, atRest = again, true
+				break
+			}
+			el = again
+		}
+	}
+	x, y = el.Frame.Center()
+	return x, y, el, atRest, nil
 }
 
 func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Params) (any, error) {
@@ -347,7 +445,27 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	fw, frames := b.(backend.FrameWaiter)
+	if os.Getenv("AGEMU_WAIT_MODE") == "poll" { // timer polling only, for comparisons
+		frames = false
+	}
+	var prevMark uint64
+	lastChange := time.Now()
 	for {
+		// The frame mark is taken before the read, so a change that shows during the read
+		// triggers the next read at once.
+		var mark uint64
+		if frames {
+			var ferr error
+			fctx, cancel := context.WithDeadline(ctx, frameDeadline(deadline))
+			mark, ferr = fw.WaitFrame(fctx, id, 0, 0)
+			cancel()
+			if ferr != nil || mark == 0 {
+				frames = false // no frame counter (yet): poll on a timer
+			} else if mark != prevMark {
+				prevMark, lastChange = mark, time.Now()
+			}
+		}
 		// Each read is bounded by the wait's own deadline (at least 1 s), so a slow device
 		// cannot stretch a wait far past its timeout.
 		rdl := deadline
@@ -377,12 +495,36 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 			}
 			return nil, fmt.Errorf("timeout after %v waiting for %s to %s", timeout, describe(*p.Selector), state)
 		}
+		// While the screen is changing (and for 600 ms after), poll every 50 ms: the
+		// accessibility tree of a React Native app catches up with a frame some time after it
+		// is drawn. On a still screen, sleep until the next frame instead (at most 250 ms,
+		// since the tree can change without one), which saves reads while waiting for, say,
+		// the network.
+		if frames && time.Since(lastChange) > 600*time.Millisecond {
+			fctx, cancel := context.WithDeadline(ctx, frameDeadline(deadline))
+			_, ferr := fw.WaitFrame(fctx, id, mark, 250*time.Millisecond)
+			cancel()
+			if ferr == nil {
+				continue
+			}
+			frames = false // fall back to timer polling; the wait's own deadline still applies
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// frameDeadline bounds one frame request: never past the wait's deadline (plus the 1 s a last
+// tree read gets), and never more than 2 s, so a stalled framebuffer cannot hold a wait.
+func frameDeadline(waitDeadline time.Time) time.Time {
+	d := time.Now().Add(2 * time.Second)
+	if limit := waitDeadline.Add(time.Second); limit.Before(d) {
+		d = limit
+	}
+	return d
 }
 
 func describe(s api.Selector) string {

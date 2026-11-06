@@ -872,11 +872,17 @@ func handle(_ req: [String: Any]) throws -> Any {
         // when it already is).
         let settleMs = tapSettle ? req.optDouble("settleMaxMs", 1000) : 0
         var settle: [String: Any] = [:]
+        var shown: [AnyHashable: Any] = [:]
         try inputQueue(d.udid).sync {
-            if settleMs > 0 { settle = d.wait(forSettleQuiet: 48, max: settleMs) as? [String: Any] ?? [:] }
+            if settleMs > 0 { settle = d.wait(forStillQuiet: 48, max: settleMs) as? [String: Any] ?? [:] }
+            let mark = d.inputFrameMark()
             try tap(d, x: x, y: y, holdMs: hold)
+            // Return once the tap shows on screen (its first frame, at most 120 ms): a check for
+            // a still screen right after a tap otherwise saw the old, still screen and typed
+            // into a field that was still becoming focused.
+            shown = d.waitForChange(since: mark, quiet: 0, max: 120)
         }
-        return ["ok": true, "settleMs": settle["waitedMs"] ?? 0]
+        return ["ok": true, "settleMs": settle["waitedMs"] ?? 0, "shownMs": shown["waitedMs"] ?? 0]
     case "swipe":
         let d = try device(req)
         let edge = AGEdge(rawValue: UInt32(req.optDouble("edge", 0))) ?? AGEdge.none
@@ -893,19 +899,20 @@ func handle(_ req: [String: Any]) throws -> Any {
         let d = try device(req)
         let text = req.optString("text") ?? ""
         // Like taps, typing waits for a still screen first: a paste sent while a search field
-        // was still animating into its focused state was lost.
-        if tapSettle { _ = d.wait(forSettleQuiet: 48, max: 1000) }
+        // was still animating into its focused state was lost. Bounded at 600 ms: a screen
+        // with a blinking cursor or a spinner is never still.
+        if tapSettle { _ = d.wait(forStillQuiet: 40, max: 600) }
         let mark = try inputQueue(d.udid).sync { try typeText(d, text) }
-        let shown = d.waitForChange(since: mark, quiet: 48, max: req.optDouble("settleMaxMs", 1000))
+        let shown = d.waitForChange(since: mark, quiet: 24, max: req.optDouble("settleMaxMs", 500))
         return ["ok": true, "settleMs": shown["waitedMs"] ?? 0]
     case "key":
         let d = try device(req)
         let key = try req.string("key").lowercased()
-        if key == "paste" && tapSettle { _ = d.wait(forSettleQuiet: 48, max: 1000) }
+        if key == "paste" && tapSettle { _ = d.wait(forStillQuiet: 40, max: 600) }
         let mark = key == "paste" ? d.inputFrameMark() : UInt.max
         try inputQueue(d.udid).sync { try pressKey(d, key) }
         if key == "paste" {
-            let shown = d.waitForChange(since: mark, quiet: 48, max: req.optDouble("settleMaxMs", 1000))
+            let shown = d.waitForChange(since: mark, quiet: 24, max: req.optDouble("settleMaxMs", 500))
             return ["ok": true, "settleMs": shown["waitedMs"] ?? 0]
         }
         return ["ok": true]
@@ -976,8 +983,19 @@ func handle(_ req: [String: Any]) throws -> Any {
         let out = try d.spawnCapture(try req.string("path"), arguments: req["args"] as? [String] ?? [],
                                      timeout: req.optDouble("timeoutMs", 10000) / 1000)
         return ["stdout": out]
+    case "nextframe":
+        let d = try device(req)
+        let since = req.optDouble("since", -1)
+        if since < 0 {
+            let mark = d.inputFrameMark()
+            return ["mark": mark == UInt.max ? 0 : mark]
+        }
+        return d.waitForFrame(since: UInt(since), quiet: req.optDouble("quietMs", 16), max: req.optDouble("maxMs", 250))
     case "settle":
         let d = try device(req)
+        if req.optBool("big") {
+            return d.wait(forStillQuiet: req.optDouble("quietMs", 48), max: req.optDouble("maxMs", 1000))
+        }
         return d.wait(forSettleQuiet: req.optDouble("quietMs", 48), max: req.optDouble("maxMs", 1000))
     case "notify":
         try device(req).postDarwinNotification(try req.string("name"))

@@ -3,6 +3,7 @@ package backend
 
 import (
 	"context"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 )
@@ -54,9 +55,25 @@ type Launcher interface {
 	LaunchWith(ctx context.Context, id string, appID string, o LaunchOptions) error
 }
 
-// Settler is implemented by backends that can wait until the screen stops changing. The daemon
-// settles before it resolves a tap selector, so the element's frame is read where it comes to
-// rest and not mid-scroll or mid-transition.
+// Settler is implemented by backends that can tell when the screen has stopped changing. The
+// daemon uses it to tap a selector where the element comes to rest, not mid-scroll or
+// mid-transition, without waiting out animations that never stop (a blinking cursor, a
+// spinner, a countdown):
+//   - Settle waits briefly for a still screen and reports whether it got one.
+//   - When it did, the tap is the backend's Tap, whose own settle catches a transition that
+//     started during the tree read.
+//   - When it did not, the daemon reads the tree again until the element's frame repeats, and
+//     TapNow taps without the backend's own wait for a still screen (it would only time out).
 type Settler interface {
-	Settle(ctx context.Context, id string) error
+	Settle(ctx context.Context, id string) (bool, error)
+	TapNow(ctx context.Context, id string, x, y int) error
+}
+
+// FrameWaiter is implemented by backends that can block until the screen shows a new frame.
+// The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
+// on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns
+// once a frame newer than mark has shown and the screen has had no big change for a moment,
+// or after max, with the newest mark.
+type FrameWaiter interface {
+	WaitFrame(ctx context.Context, id string, mark uint64, max time.Duration) (uint64, error)
 }

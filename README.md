@@ -79,6 +79,24 @@ tables and JSON: [bench/final/](bench/final/).
   while `wm size` returns immediately. On iOS it is a cold boot of another device type
   (13 s, 0.7×).
 
+### A real app, against agent-device and Argent
+
+The same 23-step flow through a React Native app in development, on one iOS simulator: sign in
+with e-mail and one-time code, search, open a result, switch tabs, scroll, sign out. Every step
+waits for the screen it leads to. There were 5 interleaved rounds; the values are medians. Method,
+per-step times and an earlier series: [docs/IOS.md](docs/IOS.md#a-real-app-against-agent-device-and-argent).
+
+| | agemu (action and wait in one call) | Argent 0.32 | agent-device 0.21 |
+|---|---|---|---|
+| whole flow | **29.7 s** | 38.8 s (1.31× slower) | 65.5 s (2.21× slower) |
+| after the app is up (14-17 s launch excluded) | **15.8 s** | 21.1 s (1.34×) | 47.6 s (3.01×) |
+| tool calls (agent turns) | **26** | 51 | 36 |
+| one UI tree / one screenshot | 24-122 ms / 18-26 ms | 188-513 ms / 159-212 ms | 304-455 ms / 484-700 ms |
+
+After launch, most of agemu's time is the app's own transitions: a tap returns when the first
+changed frame shows, and a wait ends on the first read that has the next screen. Compared with
+agemu before this round of work, the flow after launch went from 18.9 s to 15.2 s.
+
 ## Install
 
 Requirements:
@@ -106,7 +124,8 @@ agemu boot android:agemu-pixel                         # warm snapshot: seconds;
 agemu launch com.android.settings
 agemu ui                                               # compact outline: [ref] role "text" id=... @(x,y wxh)
 agemu tap --text "Network & internet"                  # or: tap 393 614, tap --id ..., --contains ...
-agemu wait --text Internet                             # polls the UI tree (ms per poll)
+agemu wait --text Internet                             # re-reads the UI tree as the screen changes
+agemu tap --text "Network & internet" --wait-text Internet --ui   # act, wait and observe in one call
 agemu type "hello"                                     # into the focused field
 agemu key back                                         # home, back, enter, delete, tab, escape, lock, ...
 agemu screenshot -o shot.png                           # pixels = the profile's resolution
@@ -116,6 +135,10 @@ agemu profiles                                         # all real-device profile
 ```
 
 With exactly one booted device, `-d <device>` can be left out.
+
+Actions (`tap`, `swipe`, `type`, `key`, `launch`) take `--wait-text/--wait-id/--wait-contains/--wait-role`
+(plus `--wait-gone`, `--wait-timeout-ms`) to wait for their effect in the same call, and `--ui` to
+also return the screen they end on. One call per agent step instead of two or three.
 
 ### MCP
 
