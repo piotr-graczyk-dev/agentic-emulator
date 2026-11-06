@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/backend"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
 )
 
@@ -725,10 +726,35 @@ func typeable(s string) bool {
 	return true
 }
 
-// TypeText types into the focused field with HID keyboard events. Text the US keyboard
-// cannot produce (emoji, accents, other scripts) is pasted: put on the simulator pasteboard
-// and inserted with Cmd-V.
+// Settle waits until the screen has been still for 48 ms (at most 1 s).
+func (b *Backend) Settle(ctx context.Context, id string) error {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return err
+	}
+	return b.call(ctx, "settle", map[string]any{"udid": d.UDID, "quietMs": 48, "maxMs": 1000}, nil)
+}
+
+// TypeText inserts text at the cursor of the focused field. More than one character is pasted
+// (simulator pasteboard + Cmd-V), so the app receives the whole text in one change, the way
+// Android's set-text path works. Key events were not reliable in React Native controlled
+// inputs (see typeText in the helper): characters were lost or doubled, and a lost character
+// in an e-mail field signed in to a different account. TypeKeys sends key events. Both return
+// once the app has drawn the change.
 func (b *Backend) TypeText(ctx context.Context, id, text string) error {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len([]rune(text)) == 1 && typeable(text) {
+		return b.call(ctx, "type", map[string]any{"udid": d.UDID, "text": text}, nil)
+	}
+	return b.paste(ctx, d.UDID, text)
+}
+
+// TypeKeys types one hardware key event per character (US layout, paced); characters the US
+// keyboard cannot produce make it paste the whole text instead.
+func (b *Backend) TypeKeys(ctx context.Context, id, text string) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
@@ -736,10 +762,17 @@ func (b *Backend) TypeText(ctx context.Context, id, text string) error {
 	if typeable(text) {
 		return b.call(ctx, "type", map[string]any{"udid": d.UDID, "text": text}, nil)
 	}
-	if err := simctlStdin(ctx, text, "pbcopy", d.UDID); err != nil {
+	return b.paste(ctx, d.UDID, text)
+}
+
+func (b *Backend) paste(ctx context.Context, udid, text string) error {
+	if text == "" {
+		return nil
+	}
+	if err := simctlStdin(ctx, text, "pbcopy", udid); err != nil {
 		return err
 	}
-	return b.call(ctx, "key", map[string]any{"udid": d.UDID, "key": "paste"}, nil)
+	return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil)
 }
 
 // Key presses a named key. iOS has no back key: "back" taps the navigation bar's back
@@ -786,6 +819,12 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 // Launch starts the app (or brings it to the foreground) and returns once its process is
 // running, like `simctl launch`. Use `wait` for the first screen.
 func (b *Backend) Launch(ctx context.Context, id, app string) error {
+	return b.LaunchWith(ctx, id, app, backend.LaunchOptions{})
+}
+
+// LaunchWith launches app with process arguments and environment, terminating a running
+// instance first when o.Relaunch is set.
+func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.LaunchOptions) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
@@ -800,7 +839,17 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 		if wait > 0 {
 			time.Sleep(wait)
 		}
-		if lerr = b.call(ctx, "launch", map[string]any{"udid": d.UDID, "bundleId": app}, &r); lerr == nil {
+		req := map[string]any{"udid": d.UDID, "bundleId": app}
+		if len(o.Args) > 0 {
+			req["args"] = o.Args
+		}
+		if len(o.Env) > 0 {
+			req["env"] = o.Env
+		}
+		if o.Relaunch && attempt == 0 {
+			req["terminateExisting"] = true
+		}
+		if lerr = b.call(ctx, "launch", req, &r); lerr == nil {
 			if attempt > 0 {
 				log.Printf("ios launch %s on %s: succeeded on attempt %d", app, d.UDID, attempt+1)
 			}

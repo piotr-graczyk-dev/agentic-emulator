@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -151,4 +152,86 @@ func shortTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
+}
+
+// settlingBackend records the order of Settle and UITree calls.
+type settlingBackend struct {
+	fakeBackend
+	calls []string
+}
+
+func (s *settlingBackend) Settle(ctx context.Context, id string) error {
+	s.calls = append(s.calls, "settle")
+	return nil
+}
+
+func (s *settlingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	s.calls = append(s.calls, "ui")
+	return tree(), nil
+}
+
+func TestTapBySelectorSettlesBeforeReadingTheTree(t *testing.T) {
+	sb := &settlingBackend{}
+	svc := NewService(t.TempDir(), sb)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sb.calls) < 2 || sb.calls[0] != "settle" || sb.calls[1] != "ui" {
+		t.Fatalf("calls = %v, want settle before ui", sb.calls)
+	}
+	sb.calls = nil
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sb.calls) != 0 {
+		t.Fatalf("a tap at coordinates read the tree or settled: %v", sb.calls)
+	}
+}
+
+// launchBackend records plain launches; like the Android backend it has no LaunchWith.
+type launchBackend struct {
+	fakeBackend
+	launched []string
+}
+
+func (l *launchBackend) Launch(ctx context.Context, id, app string) error {
+	l.launched = append(l.launched, app)
+	return nil
+}
+
+// optionsLauncher implements backend.Launcher, like the iOS backend.
+type optionsLauncher struct {
+	launchBackend
+	got backend.LaunchOptions
+}
+
+func (o *optionsLauncher) LaunchWith(ctx context.Context, id, app string, opts backend.LaunchOptions) error {
+	o.got = opts
+	return nil
+}
+
+func TestLaunchOptionsNeedALauncher(t *testing.T) {
+	lb := &launchBackend{}
+	svc := NewService(t.TempDir(), lb)
+	if _, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []string{`"args":["-x"]`, `"env":{"A":"1"}`, `"relaunch":true`} {
+		_, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app",`+extra+`}`))
+		if err == nil || !strings.Contains(err.Error(), "not supported on android") {
+			t.Fatalf("%s: err = %v, want not supported", extra, err)
+		}
+	}
+	if len(lb.launched) != 1 {
+		t.Fatalf("launched %v, want only the plain launch", lb.launched)
+	}
+
+	ol := &optionsLauncher{}
+	svc = NewService(t.TempDir(), ol)
+	if _, err := svc.Call(context.Background(), "launch", json.RawMessage(`{"device":"android:x","app":"com.app","args":["--initialUrl","http://localhost:8081"],"env":{"A":"1"},"relaunch":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(ol.got.Args) != 2 || ol.got.Args[1] != "http://localhost:8081" || ol.got.Env["A"] != "1" || !ol.got.Relaunch || len(ol.launched) != 0 {
+		t.Fatalf("LaunchWith got %+v (plain launches %v)", ol.got, ol.launched)
+	}
 }

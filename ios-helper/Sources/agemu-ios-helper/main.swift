@@ -151,21 +151,36 @@ let keyMap: [Character: (UInt32, Bool)] = {
 let leftShift: UInt32 = 225
 let leftGUI: UInt32 = 227
 
-func typeText(_ d: AGDevice, _ text: String) throws {
+/// Returns the display's frame mark taken right before the last key, so the caller waits for the
+/// frame that shows the last character and not for one an earlier key produced.
+func typeText(_ d: AGDevice, _ text: String) throws -> UInt {
     var unsupported = Set<Character>()
     for c in text where keyMap[c] == nil { unsupported.insert(c) }
     if !unsupported.isEmpty {
         throw HelperError("cannot type characters \(unsupported.map { String($0) }.sorted()) with the US hardware keyboard; use paste")
     }
-    for c in text {
+    // Keys are paced (each acknowledged, then AGEMU_IOS_KEY_GAP_MS, default 10). That is not
+    // enough for every React Native controlled input: in an Expo development build key events
+    // lost or duplicated characters at any pace tried (a burst kept 11 of 26 e-mail characters;
+    // a 10 ms gap lost 1 of 6 one-time-code digits; waiting for each key's frame lost "ex" in one
+    // try and doubled ".pl" in another). That is why `type` pastes by default; key events are
+    // the explicit `--keys` path.
+    var mark = d.inputFrameMark()
+    let last = text.count - 1
+    for (i, c) in text.enumerated() {
+        if i == last && i > 0 { mark = d.inputFrameMark() }
         let (usage, shift) = keyMap[c]!
         if shift { try d.key(leftShift, down: true) }
         try d.key(usage, down: true)
         try d.key(usage, down: false)
         if shift { try d.key(leftShift, down: false) }
+        try d.hidWait(forAcknowledgements: 10)
+        if keyGapMs > 0 { usleep(keyGapMs * 1000) }
     }
-    try d.hidWait(forAcknowledgements: 10)
+    return mark
 }
+
+let keyGapMs: UInt32 = UInt32(ProcessInfo.processInfo.environment["AGEMU_IOS_KEY_GAP_MS"] ?? "") ?? 10
 
 func pressKey(_ d: AGDevice, _ name: String) throws {
     let usages: [String: UInt32] = [
@@ -872,14 +887,27 @@ func handle(_ req: [String: Any]) throws -> Any {
         }
         return ["ok": true]
     case "type":
+        // Returns once the app has drawn the text (first new frame, then 48 ms without frames;
+        // at most 1 s), so a following tap sees the updated state: a "Send" button enabled by
+        // the typed e-mail was still disabled right after an unwaited paste.
         let d = try device(req)
         let text = req.optString("text") ?? ""
-        try inputQueue(d.udid).sync { try typeText(d, text) }
-        return ["ok": true]
+        // Like taps, typing waits for a still screen first: a paste sent while a search field
+        // was still animating into its focused state was lost.
+        if tapSettle { _ = d.wait(forSettleQuiet: 48, max: 1000) }
+        let mark = try inputQueue(d.udid).sync { try typeText(d, text) }
+        let shown = d.waitForChange(since: mark, quiet: 48, max: req.optDouble("settleMaxMs", 1000))
+        return ["ok": true, "settleMs": shown["waitedMs"] ?? 0]
     case "key":
         let d = try device(req)
         let key = try req.string("key").lowercased()
+        if key == "paste" && tapSettle { _ = d.wait(forSettleQuiet: 48, max: 1000) }
+        let mark = key == "paste" ? d.inputFrameMark() : UInt.max
         try inputQueue(d.udid).sync { try pressKey(d, key) }
+        if key == "paste" {
+            let shown = d.waitForChange(since: mark, quiet: 48, max: req.optDouble("settleMaxMs", 1000))
+            return ["ok": true, "settleMs": shown["waitedMs"] ?? 0]
+        }
         return ["ok": true]
     case "ui":
         let d = try device(req)

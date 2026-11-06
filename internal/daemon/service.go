@@ -48,7 +48,10 @@ type Params struct {
 	Keys bool `json:"keys,omitempty"`
 
 	// apps
-	App string `json:"app,omitempty"`
+	App      string            `json:"app,omitempty"`
+	Args     []string          `json:"args,omitempty"`     // launch: process arguments
+	Env      map[string]string `json:"env,omitempty"`      // launch: process environment
+	Relaunch bool              `json:"relaunch,omitempty"` // launch: terminate a running instance first
 
 	// selectors / waits
 	Selector  *api.Selector `json:"selector,omitempty"`
@@ -281,6 +284,13 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 	case "install":
 		return ok(b.Install(ctx, id, p.Path))
 	case "launch":
+		if len(p.Args) > 0 || len(p.Env) > 0 || p.Relaunch {
+			l, isLauncher := b.(backend.Launcher)
+			if !isLauncher {
+				return nil, fmt.Errorf("launch arguments, environment and relaunch are not supported on %s yet", b.Platform())
+			}
+			return ok(l.LaunchWith(ctx, id, p.App, backend.LaunchOptions{Args: p.Args, Env: p.Env, Relaunch: p.Relaunch}))
+		}
 		return ok(b.Launch(ctx, id, p.App))
 	case "terminate":
 		return ok(b.Terminate(ctx, id, p.App))
@@ -308,6 +318,11 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 	}
 	if p.Selector == nil || p.Selector.Empty() {
 		return 0, 0, nil, fmt.Errorf("tap needs x,y or a selector")
+	}
+	// A frame read while the content still scrolls is stale by the time the tap lands (a
+	// "log out" button tapped right after a swipe was hit 200 px above its resting place).
+	if st, ok := b.(backend.Settler); ok {
+		_ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
 	}
 	t, err := b.UITree(ctx, id)
 	if err != nil {
