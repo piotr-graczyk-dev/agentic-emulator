@@ -118,6 +118,11 @@ func (b *Backend) leanDevice(d simDevice, cold bool) {
 // applyLean makes the device's launchd overrides match on (see leanDevice), then reads them
 // back: the device is marked as checked only when every lean job matches.
 func (b *Backend) applyLean(ctx context.Context, d simDevice, on bool) {
+	// Until this reconciliation is verified the device counts as unchecked, so a failure (or a
+	// change since an earlier success) is retried by the next boot request.
+	b.mu.Lock()
+	delete(b.lean, d.UDID)
+	b.mu.Unlock()
 	start := time.Now()
 	out, err := b.launchctl(ctx, d.UDID, "print-disabled", "system")
 	if err != nil {

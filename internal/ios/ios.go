@@ -120,18 +120,17 @@ func (b *Backend) call(ctx context.Context, cmd string, params map[string]any, o
 
 func (b *Backend) Close() error {
 	b.mu.Lock()
-	b.closed = true
-	b.mu.Unlock()
-	// Background lean work stops on cancellation; its helper calls fail once closed is set.
-	b.stopBg()
-	b.bgWG.Wait()
-	b.mu.Lock()
+	b.closed = true // no new helper and no new background work from here on
 	h := b.h
 	b.h = nil
 	b.mu.Unlock()
+	b.stopBg()
+	// Close the helper before waiting: a background call blocked writing to it fails then,
+	// instead of keeping Close waiting.
 	if h != nil {
 		h.close()
 	}
+	b.bgWG.Wait()
 	return nil
 }
 
