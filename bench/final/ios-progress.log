@@ -1,0 +1,30 @@
+== screenshot (n=20)
+   baseline 145.7 ms (p95 457.8, n=20) | agemu cli 8.3 ms (p95 9.9, n=20) | daemon 4.5 ms (p95 5.0, n=20) | speedup cli 17.6x daemon 32.7x
+== screenshot-jpeg (n=20)
+   baseline 118.0 ms (p95 139.3, n=20) | agemu cli 9.9 ms (p95 15.6, n=20) | daemon 5.5 ms (p95 6.4, n=20) | speedup cli 11.9x daemon 21.5x
+== ui-tree (n=20)
+   baseline 7103.7 ms (p95 12583.6, n=3) | agemu cli 30.4 ms (p95 55.2, n=20) | daemon 23.0 ms (p95 27.2, n=20) | speedup cli 233.4x daemon 308.9x
+== find-element x10 (n=3)
+   baseline 9019.9 ms (p95 9504.6, n=3) | agemu cli 297.4 ms (p95 328.6, n=3) | daemon 225.9 ms (p95 229.8, n=3) | speedup cli 30.3x daemon 39.9x
+== tap (n=20)
+   baseline 8385.3 ms (p95 8551.5, n=3) | agemu cli 4.5 ms (p95 20.5, n=20) | daemon 0.3 ms (p95 1.7, n=20) | speedup cli 1883.9x daemon 24165.2x
+== tap x10 (n=3)
+   baseline 16318.6 ms (p95 16391.3, n=3) | agemu cli 42.9 ms (p95 65.8, n=3) | daemon 14.6 ms (p95 16.9, n=3) | speedup cli 380.4x daemon 1117.6x
+== swipe (300 ms gesture) (n=10)
+   baseline 9648.1 ms (p95 9706.5, n=3) | agemu cli 442.4 ms (p95 462.4, n=10) | daemon 418.2 ms (p95 453.8, n=10) | speedup cli 21.8x daemon 23.1x
+== type text (n=20)
+   baseline 8448.8 ms (p95 9176.7, n=3) | agemu cli 5.3 ms (p95 15.1, n=20) | daemon 2.5 ms (p95 4.8, n=20) | speedup cli 1588.1x daemon 3322.4x
+== launch app (n=10)
+   baseline 321.4 ms (p95 323.9, n=10) | agemu cli 342.0 ms (p95 355.2, n=10) | daemon 336.4 ms (p95 340.4, n=10) | speedup cli 0.9x daemon 1.0x
+== launch app + first screen (n=5)
+   baseline - | agemu cli 1922.9 ms (p95 2173.0, n=5) | daemon - | speedup cli 0.0x daemon 0.0x
+== boot (device kept booted by agemu) (n=10)
+   baseline 104.5 ms (p95 200.3, n=10) | agemu cli 4.1 ms (p95 6.6, n=10) | daemon 0.3 ms (p95 0.4, n=10) | speedup cli 25.6x daemon 331.8x
+== boot (cold from shutdown) (n=2)
+   baseline 5422.6 ms (p95 5422.6, n=2) | agemu cli 7538.1 ms (p95 7538.1, n=2) | daemon - | speedup cli 0.7x daemon 0.0x
+== boot (cold) + first UI tree (n=2)
+   baseline - | agemu cli 12485.8 ms (p95 12485.8, n=2) | daemon - | speedup cli 0.0x daemon 0.0x
+== profile switch to iphone-se-3 (cold) (n=2)
+   baseline 8595.4 ms (p95 8595.4, n=2) | agemu cli 13039.4 ms (p95 13039.4, n=2) | daemon - | speedup cli 0.7x daemon 0.0x
+== reset to clean state (n=2)
+   baseline 35687.2 ms (p95 35687.2, n=2) | agemu cli 2075.3 ms (p95 2075.3, n=2) | daemon - | speedup cli 17.2x daemon 0.0x

@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-test:
+    # agemu targets Apple Silicon macOS: the iOS helper links AppKit/IOSurface, and the
+    # daemon's backends only run on macOS. Device end-to-end tests need real emulators and
+    # simulators and run locally (scripts/e2e-*.sh), not here.
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: vet
+        run: go vet ./...
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: build (agemu, agemud, agemu-bench, agemu-ios-helper)
+        run: make build
+      - name: smoke test the CLI and MCP server
+        run: |
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-ci.XXXX)"
+          bin/agemu ping
+          bin/agemu profiles --platform ios | grep -q iphone-se-3
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | bin/agemu mcp | grep -q '"name":"screenshot"'
