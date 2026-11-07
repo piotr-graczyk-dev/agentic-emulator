@@ -387,6 +387,81 @@ func TestFrameStreamNoIdleStop(t *testing.T) {
 	}
 }
 
+// openStreamShowing starts an open stream (no idle stop) whose copy shows v, and returns it.
+func openStreamShowing(t *testing.T, v byte) (*fakeEmu, *frameStream) {
+	t.Helper()
+	emu, s := newFakeEmu(t, 20*time.Millisecond)
+	emu.post(v)
+	fs := startTestStream(t, emu, s, 0, false)
+	waitFor(t, "a frame", func() bool {
+		f, ok := fs.get(context.Background(), time.Time{})
+		return ok && shows(f) == v
+	})
+	return emu, fs
+}
+
+// The guest posts a frame right after the input that still shows the screen the input was sent
+// from (the app has not drawn its effect yet), then the input's frame. The screenshot must be
+// the input's frame, not the first frame posted after the input.
+func TestFrameStreamSkipsAFrameThatStillShowsTheScreenBeforeTheInput(t *testing.T) {
+	emu, fs := openStreamShowing(t, 1)
+	ref := fs.screenNow()
+	if ref == nil {
+		t.Fatal("no current copy before the input")
+	}
+	input := time.Now()
+	fs.noteInput(input, ref)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		emu.post(1) // posted after the input, same pixels
+		time.Sleep(120 * time.Millisecond)
+		emu.post(2) // the input's effect
+	}()
+	f, ok := fs.get(context.Background(), input)
+	if !ok || shows(f) != 2 {
+		t.Fatalf("got %d (ok %v), want the input's frame 2", shows(f), ok)
+	}
+	if took := time.Since(input); took >= changeWait {
+		t.Fatalf("took %v, want the changed frame as soon as it is copied", took)
+	}
+}
+
+// An input whose frames never differ from the screen it was sent from: the screenshot gives up
+// after changeWait and returns that screen.
+func TestFrameStreamUnchangedScreenAfterAnInputIsBounded(t *testing.T) {
+	emu, fs := openStreamShowing(t, 1)
+	input := time.Now()
+	fs.noteInput(input, fs.screenNow())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		emu.post(1)
+	}()
+	f, ok := fs.get(context.Background(), input)
+	took := time.Since(input)
+	if !ok || shows(f) != 1 {
+		t.Fatalf("got %d (ok %v), want the unchanged screen 1", shows(f), ok)
+	}
+	if took < changeWait || took > changeWait+300*time.Millisecond {
+		t.Fatalf("took %v, want about changeWait (%v)", took, changeWait)
+	}
+}
+
+// Without a known screen before the input (no current copy then, or an input other than tap,
+// swipe, key or type), the first frame posted after the input is taken, as before.
+func TestFrameStreamWithoutTheScreenBeforeTheInput(t *testing.T) {
+	emu, fs := openStreamShowing(t, 1)
+	input := time.Now()
+	fs.noteInput(input, nil)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		emu.post(1)
+	}()
+	f, ok := fs.get(context.Background(), input)
+	if took := time.Since(input); !ok || shows(f) != 1 || took >= reactWindow {
+		t.Fatalf("got %d (ok %v) after %v, want the posted frame 1 at once", shows(f), ok, took)
+	}
+}
+
 func TestStreamIdleEnv(t *testing.T) {
 	for _, c := range []struct {
 		v    string

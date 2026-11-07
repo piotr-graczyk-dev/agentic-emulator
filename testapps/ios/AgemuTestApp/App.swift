@@ -12,6 +12,11 @@
 //   - push: the last push the notification delegate saw (fg/tap) or the app delegate (bg),
 //   - store: data that clear-data must remove (defaults, Documents, Caches, app group) and
 //     what it must keep (keychain).
+//
+// The "Logs" screen (the "Logs" button, or the -logs launch argument) is the probe for logs and
+// crashes (docs/CAPABILITIES.md "Logs and crashes"): a line at each unified-log level, a burst
+// of numbered lines, and one button per way an app ends (see LogProbe). Launch arguments do the
+// same without a tap: -crash <kind> [-crash-delay-ms N], -hang-launch <seconds>.
 import AVFoundation
 import Contacts
 import CoreLocation
@@ -23,6 +28,7 @@ import Security
 import SwiftUI
 import UIKit
 import UserNotifications
+import os
 
 let appGroup = "group.dev.agemu.testapp"
 
@@ -34,7 +40,9 @@ struct AgemuTestApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if probe.showProbe {
+                if probe.showLogs {
+                    LogsView()
+                } else if probe.showProbe {
                     ProbeView()
                 } else {
                     ContentView()
@@ -54,6 +62,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = Probe.shared
         application.registerForRemoteNotifications()
+        LogProbe.launched()
         return true
     }
 
@@ -72,6 +81,8 @@ final class Probe: NSObject, ObservableObject, CLLocationManagerDelegate, UNUser
     static let shared = Probe()
 
     @Published var showProbe = ProcessInfo.processInfo.arguments.contains("-probe")
+    @Published var showLogs = ProcessInfo.processInfo.arguments.contains("-logs")
+    @Published var logStatus = "idle"
     @Published var url = "none"
     @Published var location = "none"
     @Published var pasteboard = "-"
@@ -273,7 +284,198 @@ struct ContentView: View {
                 .accessibilityIdentifier("greeting")
             Button("Capabilities") { probe.showProbe = true }
                 .accessibilityIdentifier("capabilities")
+            Button("Logs") { probe.showLogs = true }
+                .accessibilityIdentifier("logs")
         }
+    }
+}
+
+/// The logs and crashes probe. Every line goes to the unified log through os.Logger (subsystem
+/// dev.agemu.testapp, category probe) unless its name says otherwise, so agemu's capture can be
+/// compared with what the app wrote. Events the measurement scripts need (when the app crashed,
+/// how long a burst took) also go to Library/Caches/agemu-probe-events.txt in the app's data
+/// container, written before the event, so they do not depend on the capture under test.
+enum LogProbe {
+    static let logger = Logger(subsystem: "dev.agemu.testapp", category: "probe")
+    static let osLog = OSLog(subsystem: "dev.agemu.testapp", category: "probe")
+    static let args = ProcessInfo.processInfo.arguments
+
+    static func arg(_ name: String) -> String? {
+        guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
+    static var eventsFile: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("agemu-probe-events.txt")
+    }
+
+    /// Appends one line to the events file and flushes it to disk (a crash follows some of them).
+    static func event(_ line: String) {
+        let now = Date().timeIntervalSince1970
+        let data = Data(String(format: "%.6f %@\n", now, line).utf8)
+        if !FileManager.default.fileExists(atPath: eventsFile.path) {
+            FileManager.default.createFile(atPath: eventsFile.path, contents: nil)
+        }
+        guard let h = try? FileHandle(forWritingTo: eventsFile) else { return }
+        defer { try? h.close() }
+        _ = try? h.seekToEnd()
+        try? h.write(contentsOf: data)
+        try? h.synchronize()
+    }
+
+    /// Called from didFinishLaunching: a startup line, then the launch-argument triggers.
+    static func launched() {
+        logger.notice("probe launched pid \(getpid(), privacy: .public)")
+        if let s = arg("-hang-launch"), let sec = Double(s) {
+            // A main thread blocked during launch: on a device the watchdog kills it.
+            event("hang-launch \(sec)")
+            Thread.sleep(forTimeInterval: sec)
+        }
+        if let rate = arg("-log-rate").flatMap(Int.init) { startSteady(rate) }
+        if let kind = arg("-crash") {
+            let delay = Double(arg("-crash-delay-ms") ?? "0") ?? 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay / 1000) { crash(kind) }
+        }
+    }
+
+    /// One line at each level the unified log has, and the other ways an app writes text, all
+    /// carrying token so a check can find exactly these.
+    static func levels(_ token: String) {
+        logger.debug("level debug \(token, privacy: .public)")
+        logger.info("level info \(token, privacy: .public)")
+        logger.notice("level notice \(token, privacy: .public)")
+        logger.warning("level warning \(token, privacy: .public)")
+        logger.error("level error \(token, privacy: .public)")
+        logger.critical("level critical \(token, privacy: .public)")
+        os_log("level oslog-default %{public}@", log: osLog, type: .default, token)
+        NSLog("level nslog %@", token)
+        print("level print \(token)")
+        logger.notice("level multiline \(token, privacy: .public)\nsecond line\nthird line")
+    }
+
+    /// Whether the unified log has debug and info turned on for this app's log handle: a
+    /// capture must not change them.
+    static var enabled: String {
+        "debug=\(osLog.isEnabled(type: .debug)) info=\(osLog.isEnabled(type: .info))"
+    }
+
+    /// Logs n numbered lines as fast as the app can and returns the time it took (ms).
+    @discardableResult
+    static func burst(_ n: Int, id: String) -> Double {
+        let start = CFAbsoluteTimeGetCurrent()
+        for i in 1...n {
+            logger.notice("burst \(id, privacy: .public) \(i, privacy: .public)/\(n, privacy: .public)")
+        }
+        let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        event(String(format: "burst %@ n=%d ms=%.3f", id, n, ms))
+        return ms
+    }
+
+    static var steady: Timer?
+
+    /// Logs rate lines per second (in batches every 50 ms) until stopped (rate 0).
+    static func startSteady(_ rate: Int) {
+        steady?.invalidate()
+        steady = nil
+        guard rate > 0 else { return }
+        var seq = 0
+        let perTick = max(1, rate / 20)
+        steady = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            for _ in 0..<perTick {
+                seq += 1
+                logger.notice("steady \(seq, privacy: .public)")
+            }
+        }
+    }
+
+    /// Ends the process the way kind says. The events file gets the time first.
+    static func crash(_ kind: String) {
+        event("crash \(kind)")
+        logger.notice("crash \(kind, privacy: .public) now")
+        switch kind {
+        case "exception":
+            NSException(name: .invalidArgumentException, reason: "agemu probe exception", userInfo: ["probe": kind]).raise()
+        case "fatal":
+            fatalError("agemu probe fatalError")
+        case "badaccess":
+            badAccess()
+        case "abort":
+            abort()
+        case "exit":
+            exit(0)
+        case "sigkill":
+            // What a system kill (jetsam on a device) looks like from outside: no crash report.
+            kill(getpid(), SIGKILL)
+        case "hang":
+            // The main thread stops answering; the app is not killed on the Simulator.
+            Thread.sleep(forTimeInterval: 30)
+        default:
+            logger.error("unknown crash kind \(kind, privacy: .public)")
+        }
+    }
+
+    /// Writes through a null-page pointer: EXC_BAD_ACCESS (SIGSEGV). Not inlined, so the
+    /// optimizer keeps the store and the frame names the function.
+    @inline(never)
+    static func badAccess() {
+        let p = UnsafeMutablePointer<Int>(bitPattern: 0x10)!
+        p.pointee = 42
+    }
+}
+
+struct LogsView: View {
+    @EnvironmentObject var probe: Probe
+    @State private var token = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Logs").font(.headline).accessibilityIdentifier("logs-title")
+            Text(probe.logStatus).accessibilityIdentifier("log-status")
+            Text("pid \(String(getpid())) \(LogProbe.enabled)").accessibilityIdentifier("log-enabled")
+            HStack {
+                button("Levels", "log-levels") {
+                    token += 1
+                    let t = "tok\(getpid())-\(token)"
+                    LogProbe.levels(t)
+                    probe.logStatus = "levels \(t)"
+                }
+                button("Burst 1000", "log-burst") {
+                    token += 1
+                    let id = "b\(getpid())-\(token)"
+                    let ms = LogProbe.burst(1000, id: id)
+                    probe.logStatus = String(format: "burst %@ n=1000 ms=%.1f", id, ms)
+                }
+                button("10k", "log-burst-10k") {
+                    token += 1
+                    let id = "B\(getpid())-\(token)"
+                    let ms = LogProbe.burst(10000, id: id)
+                    probe.logStatus = String(format: "burst %@ n=10000 ms=%.1f", id, ms)
+                }
+                button("200/s", "log-steady") {
+                    LogProbe.startSteady(LogProbe.steady == nil ? 200 : 0)
+                    probe.logStatus = LogProbe.steady == nil ? "steady off" : "steady 200/s"
+                }
+            }
+            HStack {
+                button("Exception", "crash-exception") { LogProbe.crash("exception") }
+                button("Fatal", "crash-fatal") { LogProbe.crash("fatal") }
+                button("Bad access", "crash-badaccess") { LogProbe.crash("badaccess") }
+            }
+            HStack {
+                button("Abort", "crash-abort") { LogProbe.crash("abort") }
+                button("Exit", "crash-exit") { LogProbe.crash("exit") }
+                button("Kill", "crash-sigkill") { LogProbe.crash("sigkill") }
+                button("Hang", "crash-hang") { LogProbe.crash("hang") }
+            }
+            button("Back", "logs-back") { probe.showLogs = false }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func button(_ title: String, _ id: String, _ action: @escaping () -> Void) -> some View {
+        Button(title, action: action).buttonStyle(.bordered).controlSize(.small).accessibilityIdentifier(id)
     }
 }
 

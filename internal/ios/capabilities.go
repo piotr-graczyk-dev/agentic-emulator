@@ -41,6 +41,7 @@ func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	b.noteInput(d.UDID)
 	if err := b.call(ctx, "openurl", map[string]any{"udid": d.UDID, "url": url}, nil); err != nil {
 		return "", err
 	}
@@ -196,6 +197,8 @@ func (b *Backend) SetPermissions(ctx context.Context, id, app string, action api
 			return err
 		}
 	}
+	// iOS may end the app when a permission changes: that exit is agemu's, not a crash.
+	defer b.expectExits(d.UDID, app)(0)
 	for _, op := range ops {
 		req := map[string]any{"udid": d.UDID, "service": op.Service, "bundleId": app, "action": op.Action}
 		if err := b.call(ctx, "privacy", req, nil); err != nil {
@@ -334,6 +337,7 @@ func (b *Backend) Uninstall(ctx context.Context, id, app string) error {
 	if _, err := b.userApp(ctx, d.UDID, app, "uninstall"); err != nil {
 		return err
 	}
+	defer b.expectExits(d.UDID, app)(0)
 	if err := b.call(ctx, "uninstall", map[string]any{"udid": d.UDID, "bundleId": app}, nil); err != nil {
 		return err
 	}
@@ -381,6 +385,7 @@ func (b *Backend) ClearAppData(ctx context.Context, id, app string) error {
 		return err
 	}
 	bundle := filepath.Join(tmp, filepath.Base(info.Path))
+	defer b.expectExits(d.UDID, app)(0)
 	var tClone, tUninstall time.Duration
 	err = reinstallFresh(
 		func() error {

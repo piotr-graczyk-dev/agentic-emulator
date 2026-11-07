@@ -34,12 +34,18 @@ agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.so
                agemud daemon (Go) ── device registry, selectors, waits, per-device locks
                ├── android backend (internal/android)
                │     ├── emulator gRPC (screenshots, touch, keys, snapshots)
-               │     └── on-device agent (android-agent/, Java via app_process): UI tree, launch, ...
+               │     ├── on-device agent (android-agent/, Java via app_process): UI tree, launch, ...
+               │     └── log capture: one `logcat -B` reader per device (adb exec:), crash records
                └── ios backend (internal/ios)
-                     └── agemu-ios-helper (ios-helper/, Swift, long-lived child process)
-                           CoreSimulator / SimulatorKit private APIs: framebuffer IOSurface,
-                           HID touch and keyboard, accessibility tree
+                     ├── agemu-ios-helper (ios-helper/, Swift, long-lived child process)
+                     │     CoreSimulator / SimulatorKit private APIs: framebuffer IOSurface,
+                     │     HID touch and keyboard, accessibility tree
+                     └── log capture: one `simctl spawn log stream` per simulator, kqueue on
+                           launched apps, the Mac's .ips crash reports
 ```
+
+`logs`, `crashes` and the crash notice run without the device lock: they read what the capture
+holds in memory (docs/CAPABILITIES.md, "Logs and crashes").
 
 ## Conventions
 

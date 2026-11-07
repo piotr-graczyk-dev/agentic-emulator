@@ -69,6 +69,13 @@ type device struct {
 
 	lastLoad time.Time // when the last in-place snapshot load finished (see loadBaseline)
 	fix      gpsFix    // the emulator's default GPS fix (see recordDefaultFix)
+
+	// Logs and crashes (logs.go): the running capture, the newest cursor of the captures this
+	// daemon stopped (a new capture's cursors continue above it), and when the last snapshot
+	// load into the running emulator started (a capture backfills from there).
+	logs      *logCapture
+	lastSeq   uint64
+	loadStart time.Time
 }
 
 // loadSpacing is the minimum time between the end of an in-place snapshot load and the start of
@@ -95,6 +102,10 @@ func (d *device) loadBaseline(ctx context.Context, e *emuClient) error {
 	}
 	lctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	// The restored guest's logd holds the baseline's lines (and its clock jumps): the capture
+	// ends here and the next one backfills from this load on.
+	d.stopCapture()
+	d.noteLoad(time.Now())
 	err := e.loadSnapshot(lctx, baselineSnapshot)
 	e.stream.invalidate()
 	d.mu.Lock()
@@ -106,7 +117,18 @@ func (d *device) loadBaseline(ctx context.Context, e *emuClient) error {
 	return err
 }
 
-func (d *device) markInput() { d.lastInput.Store(time.Now().UnixNano()) }
+func (d *device) markInput() { d.markInputFrom(nil, nil) }
+
+// markInputFrom marks an input that e's frame stream saw start from the screen ref (taken with
+// screenNow before the input was sent; nil: unknown): a screenshot right after it does not take
+// a frame that still shows ref for its effect (see frameStream.get).
+func (d *device) markInputFrom(e *emuClient, ref []byte) {
+	now := time.Now()
+	if e != nil {
+		e.stream.noteInput(now, ref)
+	}
+	d.lastInput.Store(now.UnixNano())
+}
 
 // redirector owns the console port redirection to the agent's guest TCP port for one
 // emulator process (agentClient.tcp). It has its own lock: it is called with the agent
@@ -286,6 +308,12 @@ func (d *device) connRaw(ctx context.Context) (*emuClient, *agentClient, error) 
 		e.enableShm(filepath.Join(logDir(), d.name+".fb"), av.intCfg("hw.lcd.width"), av.intCfg("hw.lcd.height"))
 	}
 	d.mu.Lock()
+	changed := d.run.PID != r.PID
+	d.mu.Unlock()
+	if changed {
+		d.stopCapture() // it reads another emulator process
+	}
+	d.mu.Lock()
 	if d.emu != nil {
 		d.emu.Close()
 	}
@@ -346,6 +374,7 @@ func isZombie(d *device) bool {
 }
 
 func (d *device) drop() {
+	d.stopCapture()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.emu != nil {
@@ -771,6 +800,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			}
 			d.run, d.emu, d.agent, d.dispAt, d.agentOK = r, e, newAgent(d.name, r), time.Time{}, false
 			d.lastLoad = time.Time{} // a new emulator process has no texture loader running
+			d.loadStart = time.Time{}
 			d.mu.Unlock()
 			e.enableShm(filepath.Join(logDir(), d.name+".fb"), a.intCfg("hw.lcd.width"), a.intCfg("hw.lcd.height"))
 			d.recordDefaultFix(ctx, e, r.PID)
@@ -1370,7 +1400,7 @@ func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
 	if err != nil {
 		return err
 	}
-	defer d.markInput()
+	defer d.markInputFrom(e, e.stream.screenNow())
 	if err := checkPoint(m, x, y); err != nil {
 		return err
 	}
@@ -1386,7 +1416,7 @@ func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, duration
 	if err != nil {
 		return err
 	}
-	defer d.markInput()
+	defer d.markInputFrom(e, e.stream.screenNow())
 	if err := checkPoint(m, x1, y1); err != nil {
 		return err
 	}
@@ -1441,13 +1471,14 @@ func (b *Backend) typeText(ctx context.Context, id string, text string, keys boo
 	if err != nil {
 		return err
 	}
-	if _, _, err := d.conn(ctx); err != nil {
+	e, _, err := d.conn(ctx)
+	if err != nil {
 		return err
 	}
 	if text == "" {
 		return nil
 	}
-	defer d.markInput()
+	defer d.markInputFrom(e, e.stream.screenNow())
 	var res struct {
 		Mode string `json:"mode"`
 	}
@@ -1476,12 +1507,13 @@ func (b *Backend) Key(ctx context.Context, id string, key string) error {
 		sort.Strings(names)
 		return fmt.Errorf("unknown key %q (have: %s)", key, strings.Join(names, ", "))
 	}
-	if _, _, err := d.conn(ctx); err != nil {
+	e, _, err := d.conn(ctx)
+	if err != nil {
 		return err
 	}
 	// Returns once InputManager has queued the key, like a tap through the emulator; follow it
 	// with wait or ui to see its effect.
-	defer d.markInput()
+	defer d.markInputFrom(e, e.stream.screenNow())
 	return d.call(ctx, map[string]any{"cmd": "key", "code": code, "async": true}, nil)
 }
 
@@ -1528,6 +1560,11 @@ func (b *Backend) Launch(ctx context.Context, id, app string) error {
 	if pkg == "" {
 		return errors.New("launch needs a package name")
 	}
+	// The app's lines and crashes are captured from its first launch on. The capture starts once
+	// the launch has returned and backfills the launch's lines from logd's buffer: started
+	// before, its setup and backfill ran in the guest beside the app's start and made a cold
+	// launch take 445-763 ms instead of 145-170 ms.
+	defer d.startCapture()
 	// Launch returns once the app has drawn: its frames count from the start of the launch.
 	d.markInput()
 	return d.call(ctx, map[string]any{"cmd": "launch", "pkg": pkg, "activity": act}, nil)
@@ -1542,6 +1579,7 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 		return err
 	}
 	defer d.markInput()
+	d.expectExit(app)
 	return d.call(ctx, map[string]any{"cmd": "stop", "pkg": app}, nil)
 }
 

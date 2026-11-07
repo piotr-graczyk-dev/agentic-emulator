@@ -28,8 +28,12 @@ type Response struct {
 	ID     int64           `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
-	// Code classifies Error for programs: CodeNotImplemented, or empty.
+	// Code classifies Error for programs: CodeNotImplemented, CodeAppCrashed, or empty.
 	Code string `json:"code,omitempty"`
+	// AppCrash tells the agent that the app it launched through agemu crashed, stopped
+	// responding or was killed by the system: in the first result after it, and in every
+	// error while the app is down (docs/CAPABILITIES.md, "The crash notice").
+	AppCrash *api.AppCrash `json:"appCrash,omitempty"`
 	// Ms is the server-side handling time, for benchmarks.
 	Ms float64 `json:"ms"`
 }
@@ -38,10 +42,17 @@ type Response struct {
 // implementation on the device's platform, so retrying or changing the arguments cannot help.
 const CodeNotImplemented = "not_implemented"
 
-// errorCode returns the Response code for err.
+// CodeAppCrashed marks an error that matches api.ErrAppCrashed: the call failed while the app
+// the agent launched was down after a crash (the response's AppCrash says which).
+const CodeAppCrashed = "app_crashed"
+
+// errorCode returns the Response code for err. Not implemented wins: retrying cannot help.
 func errorCode(err error) string {
 	if errors.Is(err, api.ErrNotImplemented) {
 		return CodeNotImplemented
+	}
+	if errors.Is(err, api.ErrAppCrashed) {
+		return CodeAppCrashed
 	}
 	return ""
 }
@@ -101,14 +112,14 @@ func Serve(ctx context.Context, svc *Service) error {
 
 // safeCall runs one request and turns a panic into an error, so one bad request cannot take
 // down the daemon that every agent shares.
-func safeCall(ctx context.Context, svc *Service, req Request) (res any, err error) {
+func safeCall(ctx context.Context, svc *Service, req Request) (res any, crash *api.AppCrash, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic in %s: %v\n%s", req.Method, r, debug.Stack())
-			res, err = nil, fmt.Errorf("internal error in %s: %v", req.Method, r)
+			res, crash, err = nil, nil, fmt.Errorf("internal error in %s: %v", req.Method, r)
 		}
 	}()
-	return svc.Call(ctx, req.Method, req.Params)
+	return svc.Handle(ctx, req.Method, req.Params)
 }
 
 // ServeConn serves requests on one connection until it closes (Serve does this for every
@@ -131,7 +142,8 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 			resp.Error = "bad request: " + jerr.Error()
 		} else {
 			resp.ID = req.ID
-			res, cerr := safeCall(ctx, svc, req)
+			res, crash, cerr := safeCall(ctx, svc, req)
+			resp.AppCrash = crash
 			if cerr != nil {
 				resp.Error = cerr.Error()
 				resp.Code = errorCode(cerr)

@@ -859,9 +859,22 @@ func handle(_ req: [String: Any]) throws -> Any {
         // UIKit: wait until the screen has been still for 48 ms first (at most 1 s; instant
         // when it already is).
         let settleMs = tapSettle ? req.optDouble("settleMaxMs", 1000) : 0
+        // "ready" is the frame of the element the tap aims at when the caller saw it appear
+        // since the last input: wait until it has drawn and stopped moving (waitForRectReady).
+        // UIKit drops every touch while a presentation is in progress, and the element is in
+        // the UI tree before the presentation's first frame shows.
+        var ready: CGRect?
+        if tapSettle, let r = req["ready"] as? [Double], r.count == 4 {
+            ready = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+        }
+        var readiness: [String: Any] = [:]
         var settle: [String: Any] = [:]
         var shown: [AnyHashable: Any] = [:]
         try inputQueue(d.udid).sync {
+            if let r = ready {
+                readiness = d.wait(forRectReady: r, quiet: 48, stillQuiet: settleMs > 0 ? 48 : 0, startMax: 500,
+                                   tailMax: 300, max: 1500) as? [String: Any] ?? [:]
+            }
             if settleMs > 0 { settle = d.wait(forStillQuiet: 48, max: settleMs) as? [String: Any] ?? [:] }
             let mark = d.inputFrameMark()
             try tap(d, x: x, y: y, holdMs: hold)
@@ -870,7 +883,11 @@ func handle(_ req: [String: Any]) throws -> Any {
             // into a field that was still becoming focused.
             shown = d.waitForChange(since: mark, quiet: 0, max: 120)
         }
-        return ["ok": true, "settleMs": settle["waitedMs"] ?? 0, "shownMs": shown["waitedMs"] ?? 0]
+        return [
+            "ok": true, "settleMs": settle["waitedMs"] ?? 0, "shownMs": shown["waitedMs"] ?? 0,
+            "readyMs": readiness["waitedMs"] ?? 0, "pending": readiness["pending"] ?? false,
+            "readySettled": readiness["settled"] ?? true,
+        ]
     case "swipe":
         let d = try device(req)
         let edge = AGEdge(rawValue: UInt32(req.optDouble("edge", 0))) ?? AGEdge.none
@@ -937,6 +954,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         let d = try device(req)
         let bundle = try req.string("bundleId")
         if req.optBool("terminateExisting") { try? d.terminate(bundle) }
+        d.markInput()
         let args = req["args"] as? [String] ?? []
         let env = req["env"] as? [String: String] ?? [:]
         var pid: Int32 = -1

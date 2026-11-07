@@ -9,6 +9,7 @@
 
 #import <dlfcn.h>
 #import <mach/mach_time.h>
+#import <os/lock.h>
 #import <poll.h>
 #import <stdatomic.h>
 
@@ -610,6 +611,7 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
 @property (atomic, assign) NSUInteger frameCount;
 @property (atomic, assign) CFAbsoluteTime lastBigChangeAt; // last frame that changed > AGBigChange of the screen
 @property (nonatomic, assign) BOOL monitorStarted;
+@property (atomic, assign, readwrite) CFAbsoluteTime lastInputAt;
 @property (nonatomic, strong, readonly) NSUUID *callbackUUID;
 // HID
 @property (nonatomic, strong, readonly) dispatch_queue_t hidQueue;
@@ -621,7 +623,12 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
 @property (nonatomic, strong, nullable) NSDate *connectedBoot;
 @end
 
-@implementation AGDevice
+@implementation AGDevice {
+  // When each sample of the region grid (AGRegionGridW x AGRegionGridH) last changed, as
+  // CFAbsoluteTime; written by the display monitor, NULL until it runs. Guarded by _regionLock.
+  CFAbsoluteTime *_regionChangedAt;
+  os_unfair_lock _regionLock;
+}
 
 - (instancetype)initWithDevice:(id)device
 {
@@ -630,6 +637,7 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
     return nil;
   }
   _device = device;
+  _regionLock = OS_UNFAIR_LOCK_INIT;
   _framebufferSetupQueue = dispatch_queue_create("agemu.framebuffer.setup", DISPATCH_QUEUE_SERIAL);
   _framebufferCallbackQueue =
     dispatch_queue_create("agemu.framebuffer.callbacks",
@@ -639,6 +647,14 @@ static NSDictionary *AGAXNode(id element, AGAXWalk *walk, NSInteger depth)
   _hidAckQueue = dispatch_queue_create("agemu.hid.ack", DISPATCH_QUEUE_SERIAL);
   _hidGroup = dispatch_group_create();
   return self;
+}
+
+// The display monitor's thread reaches the region grid only through a strong reference (it ends
+// when the device is gone), so nothing uses it once dealloc runs.
+- (void)dealloc
+{
+  free(_regionChangedAt);
+  _regionChangedAt = NULL;
 }
 
 - (NSString *)udid
@@ -1032,6 +1048,48 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
   return changed;
 }
 
+// A denser grid whose samples remember when they last changed, so "has anything inside this
+// element's frame changed in the last N ms?" is answered without waiting. The big-change grid is
+// too sparse for an element: an action sheet sliding in changed 1-12 of the ~120 samples of that
+// grid inside its button, at gaps longer than a tap's 48 ms wait.
+static const NSUInteger AGRegionGridW = AGGridW * 2, AGRegionGridH = AGGridH * 2;
+
+// Samples the region grid from surface into cur. NO when the surface could not be read.
+static BOOL AGSampleRegionGrid(IOSurfaceRef surface, uint32_t *cur)
+{
+  if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+    return NO;
+  }
+  const uint8_t *base = IOSurfaceGetBaseAddress(surface);
+  size_t bpr = IOSurfaceGetBytesPerRow(surface), w = IOSurfaceGetWidth(surface), h = IOSurfaceGetHeight(surface);
+  BOOL ok = base && w > 0 && h > 0 && IOSurfaceGetBytesPerElement(surface) == 4;
+  if (ok) {
+    for (NSUInteger gy = 0; gy < AGRegionGridH; gy++) {
+      const uint32_t *row = (const uint32_t *)(base + ((gy * 2 + 1) * h / (AGRegionGridH * 2)) * bpr);
+      for (NSUInteger gx = 0; gx < AGRegionGridW; gx++) {
+        cur[gy * AGRegionGridW + gx] = row[(gx * 2 + 1) * w / (AGRegionGridW * 2)];
+      }
+    }
+  }
+  IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+  return ok;
+}
+
+// The samples of an n-sample axis of length `length` whose positions lie in [lo, hi): [*first,
+// *end). Sample k sits at (2k+1)/(2n) of the axis. A span too thin to hold one gets the sample
+// nearest its middle.
+static void AGGridSpan(double lo, double hi, double length, NSUInteger n, NSUInteger *first, NSUInteger *end)
+{
+  double a = ceil((lo * 2 * n / length - 1) / 2), b = ceil((hi * 2 * n / length - 1) / 2);
+  NSInteger f = (NSInteger)MAX(0, a), e = (NSInteger)MIN((double)n, b);
+  if (f >= e) {
+    f = (NSInteger)MIN(MAX(0, floor((lo + hi) / 2 * n / length)), (double)n - 1);
+    e = f + 1;
+  }
+  *first = (NSUInteger)f;
+  *end = (NSUInteger)e;
+}
+
 // The display monitor samples the framebuffer surface's seed (bumped on every write, i.e. every
 // new frame) every 8 ms on a background thread and records when the picture last changed, so
 // "has the screen been still for N ms?" is answered without waiting. (The display's frame
@@ -1046,15 +1104,28 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
   }
   self.lastFrameAt = CFAbsoluteTimeGetCurrent();
   self.lastBigChangeAt = self.lastFrameAt;
+  CFAbsoluteTime *changedAt = calloc(AGRegionGridW * AGRegionGridH, sizeof(CFAbsoluteTime));
+  for (NSUInteger i = 0; i < AGRegionGridW * AGRegionGridH; i++) {
+    changedAt[i] = self.lastFrameAt;
+  }
+  os_unfair_lock_lock(&_regionLock);
+  _regionChangedAt = changedAt;
+  os_unfair_lock_unlock(&_regionLock);
   __weak AGDevice *weakSelf = self;
   [NSThread detachNewThreadWithBlock:^{
     IOSurface *last = nil;
     uint32_t lastSeed = 0;
     uint32_t *prev = calloc(AGGridW * AGGridH, sizeof(uint32_t));
     uint32_t *cur = calloc(AGGridW * AGGridH, sizeof(uint32_t));
+    uint32_t *regionPrev = calloc(AGRegionGridW * AGRegionGridH, sizeof(uint32_t));
+    uint32_t *regionCur = calloc(AGRegionGridW * AGRegionGridH, sizeof(uint32_t));
     for (;;) {
       AGDevice *strong = weakSelf;
       if (!strong) {
+        free(prev);
+        free(cur);
+        free(regionPrev);
+        free(regionCur);
         return;
       }
       IOSurface *current;
@@ -1084,6 +1155,18 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
         uint32_t *t = prev;
         prev = cur;
         cur = t;
+        // Every change counts in the region grid: an element's own animation may be small.
+        BOOL sampled = AGSampleRegionGrid((__bridge IOSurfaceRef)current, regionCur);
+        os_unfair_lock_lock(&strong->_regionLock);
+        for (NSUInteger i = 0; i < AGRegionGridW * AGRegionGridH; i++) {
+          if (newSurface || !sampled || regionCur[i] != regionPrev[i]) {
+            strong->_regionChangedAt[i] = now;
+          }
+        }
+        os_unfair_lock_unlock(&strong->_regionLock);
+        t = regionPrev;
+        regionPrev = regionCur;
+        regionCur = t;
       }
       strong = nil;
       usleep(8000);
@@ -1131,6 +1214,77 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
     BOOL settled = now - self.lastBigChangeAt >= quiet;
     if (settled || now - start >= limit) {
       return @{@"settled" : @(settled), @"waitedMs" : @((now - start) * 1000)};
+    }
+    usleep(4000);
+  }
+}
+
+- (void)markInput
+{
+  self.lastInputAt = CFAbsoluteTimeGetCurrent();
+}
+
+// When a sample of the region grid inside rect (screen pixels) last changed; 0 before the display
+// monitor runs.
+- (CFAbsoluteTime)lastChangeInRect:(CGRect)rect
+{
+  CGSize screen = self.screenPixels;
+  if (screen.width <= 0 || screen.height <= 0) {
+    return 0;
+  }
+  NSUInteger x0, x1, y0, y1;
+  AGGridSpan(CGRectGetMinX(rect), CGRectGetMaxX(rect), screen.width, AGRegionGridW, &x0, &x1);
+  AGGridSpan(CGRectGetMinY(rect), CGRectGetMaxY(rect), screen.height, AGRegionGridH, &y0, &y1);
+  CFAbsoluteTime last = 0;
+  os_unfair_lock_lock(&_regionLock);
+  if (_regionChangedAt) {
+    for (NSUInteger gy = y0; gy < y1; gy++) {
+      for (NSUInteger gx = x0; gx < x1; gx++) {
+        last = MAX(last, _regionChangedAt[gy * AGRegionGridW + gx]);
+      }
+    }
+  }
+  os_unfair_lock_unlock(&_regionLock);
+  return last;
+}
+
+- (NSDictionary *)waitForRectReady:(CGRect)rect
+                             quiet:(double)quietMs
+                        stillQuiet:(double)stillQuietMs
+                          startMax:(double)startMaxMs
+                           tailMax:(double)tailMaxMs
+                               max:(double)maxMs
+{
+  NSError *err = nil;
+  if (![self framebufferWithError:&err]) {
+    return @{@"settled" : @NO, @"pending" : @NO, @"waitedMs" : @0, @"error" : err.localizedDescription ?: @"no framebuffer"};
+  }
+  [self startDisplayMonitor];
+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent(), input = self.lastInputAt;
+  double quiet = quietMs / 1000, still = stillQuietMs / 1000, limit = maxMs / 1000, tail = tailMaxMs / 1000;
+  // 1. Nothing has shown since the last input: the presentation may not have drawn yet.
+  BOOL pending = NO;
+  while (input > 0 && [self lastChangeInRect:rect] <= input && self.lastBigChangeAt <= input &&
+         CFAbsoluteTimeGetCurrent() - start < MIN(startMaxMs / 1000, limit)) {
+    pending = YES;
+    usleep(4000);
+  }
+  // 2. Until the element's column (its x range, the screen's full height) has been quiet: a
+  // presentation that slides in reaches the element's frame late, with small changes, and the
+  // frame itself can sit still under the dimming for longer than quietMs before that (an action
+  // sheet: about 50 ms). The tail allowance runs while the screen has no big change.
+  CGRect column = CGRectMake(CGRectGetMinX(rect), 0, CGRectGetWidth(rect), MAX(self.screenPixels.height, 1));
+  CFAbsoluteTime stillSince = 0;
+  for (;;) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL rectQuiet = now - [self lastChangeInRect:column] >= quiet;
+    BOOL screenStill = now - self.lastBigChangeAt >= still;
+    if (rectQuiet && screenStill) {
+      return @{@"settled" : @YES, @"pending" : @(pending), @"waitedMs" : @((now - start) * 1000)};
+    }
+    stillSince = screenStill ? (stillSince ?: now) : 0;
+    if ((stillSince && now - stillSince >= tail) || now - start >= limit) {
+      return @{@"settled" : @NO, @"pending" : @(pending), @"waitedMs" : @((now - start) * 1000)};
     }
     usleep(4000);
   }
@@ -1413,6 +1567,7 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
     }
     dispatch_group_t group = self.hidGroup;
     dispatch_group_enter(group);
+    [self markInput];
     @try {
       [(id<AGLegacyHIDClient>)self.hidClient sendWithMessage:message
                                                 freeWhenDone:YES

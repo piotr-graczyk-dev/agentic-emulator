@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- AgemuProbe: shows what an app sees of the state agemu's test capabilities change
-     (docs/CAPABILITIES.md). Built by testapps/android/build.sh without Gradle. -->
+     (docs/CAPABILITIES.md), and logs and crashes on demand (LabActivity). Built by
+     testapps/android/build.sh without Gradle. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.agemu.probe"
-    android:versionCode="3"
-    android:versionName="1.2">
+    android:versionCode="4"
+    android:versionName="1.3">
 
     <!-- Mapped by the neutral names: camera, microphone, location(-always), contacts,
          calendar (READ only: a grant acts on what the app requests), notifications, photos.
@@ -49,5 +50,16 @@
                 <data android:scheme="agemunb" />
             </intent-filter>
         </activity>
+        <!-- Logs, crashes, an ANR and exits on demand: buttons, or agemulab://<action>. -->
+        <activity android:name=".LabActivity" android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="agemulab" />
+            </intent-filter>
+        </activity>
+        <!-- A second process of the app (same uid): dev.agemu.probe:remote. -->
+        <service android:name=".RemoteService" android:process=":remote" android:exported="false" />
     </application>
 </manifest>

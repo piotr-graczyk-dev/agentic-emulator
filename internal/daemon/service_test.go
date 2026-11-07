@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -96,7 +97,7 @@ func TestNegativeSelectorIndexIsRejected(t *testing.T) {
 func TestSafeCallRecoversPanics(t *testing.T) {
 	s := NewService(t.TempDir(), &fakeBackend{})
 	// fakeBackend.Swipe panics like a backend bug would.
-	_, err := safeCall(context.Background(), s, Request{Method: "swipe", Params: json.RawMessage(`{"device":"android:x","x":1,"y":1,"x2":2,"y2":2}`)})
+	_, _, err := safeCall(context.Background(), s, Request{Method: "swipe", Params: json.RawMessage(`{"device":"android:x","x":1,"y":1,"x2":2,"y2":2}`)})
 	if err == nil {
 		t.Fatal("want an error from a panicking backend")
 	}
@@ -249,6 +250,46 @@ func TestTapBySelectorWaitsForTheElementToBeEnabled(t *testing.T) {
 	}
 }
 
+// elementTapper implements backend.ElementTapper, like the iOS backend.
+type elementTapper struct {
+	settlingBackend
+}
+
+func (e *elementTapper) TapElement(ctx context.Context, id string, el *api.Element, atRest bool) error {
+	e.calls = append(e.calls, fmt.Sprintf("tapelement %q %v rest=%v", el.Text, el.Frame, atRest))
+	return nil
+}
+
+func TestTapBySelectorHandsTheElementToAnElementTapper(t *testing.T) {
+	et := &elementTapper{settlingBackend{still: true}}
+	svc := NewService(t.TempDir(), et)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"settle", "ui", `tapelement "Log in" {10 20 30 10} rest=false`}
+	if fmt.Sprint(et.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", et.calls, want)
+	}
+	// The element at rest on a screen that never goes still keeps that verdict.
+	et = &elementTapper{settlingBackend{still: false, frames: []api.Rect{{X: 10, Y: 120, W: 30, H: 10}}}}
+	svc = NewService(t.TempDir(), et)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"settle", "ui", "ui", `tapelement "Log in" {10 120 30 10} rest=true`}
+	if fmt.Sprint(et.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", et.calls, want)
+	}
+	// A tap at coordinates stays the backend's plain tap.
+	et.calls = nil
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(et.calls) != "[tap 5,5]" {
+		t.Fatalf("a tap at coordinates: %v", et.calls)
+	}
+}
+
 // launchBackend records plain launches; like the Android backend it has no LaunchWith.
 type launchBackend struct {
 	fakeBackend
@@ -345,6 +386,62 @@ func TestTapBySelectorDoesNotTapAnElementThatWentAway(t *testing.T) {
 				t.Fatalf("%s: tapped anyway: %v", name, sb.calls)
 			}
 		}
+	}
+}
+
+// actionableBackend implements backend.Actionability like the Android backend: it reads the
+// element with the daemon's find until two reads agree (frames are the button's successive
+// frames, as in settlingBackend), or fails when fail is set.
+type actionableBackend struct {
+	settlingBackend
+	fail error
+}
+
+func (a *actionableBackend) AwaitActionable(ctx context.Context, id string, find func() (*api.Element, error)) (*api.Element, bool, error) {
+	a.calls = append(a.calls, "await")
+	if a.fail != nil {
+		return nil, false, a.fail
+	}
+	prev, err := find()
+	if err != nil {
+		return nil, false, err
+	}
+	for {
+		el, err := find()
+		if err != nil {
+			return nil, false, err
+		}
+		if el.Frame == prev.Frame {
+			return el, true, nil
+		}
+		prev = el
+	}
+}
+
+func TestTapBySelectorWaitsUntilTheBackendFindsItActionable(t *testing.T) {
+	ab := &actionableBackend{settlingBackend: settlingBackend{frames: []api.Rect{{X: 10, Y: 300, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}, {X: 10, Y: 120, W: 30, H: 10}}}}
+	svc := NewService(t.TempDir(), ab)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The backend's own wait replaces Settle and the daemon's frame check; the tap is the plain
+	// Tap at the resting frame.
+	want := []string{"await", "ui", "ui", "ui", "tap 25,125"}
+	if fmt.Sprint(ab.calls) != fmt.Sprint(want) {
+		t.Fatalf("calls = %v, want %v", ab.calls, want)
+	}
+	if m := res.(map[string]any); m["y"] != 125 {
+		t.Fatalf("result = %v, want y 125", m)
+	}
+
+	ab = &actionableBackend{fail: errors.New(`no element matches {"text":"Log in"} (it disappeared while it was moving)`)}
+	svc = NewService(t.TempDir(), ab)
+	if _, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","selector":{"text":"Log in"}}`)); err == nil || !strings.Contains(err.Error(), "disappeared") {
+		t.Fatalf("err = %v, want the backend's error", err)
+	}
+	if fmt.Sprint(ab.calls) != "[await]" {
+		t.Fatalf("calls = %v, want no tap", ab.calls)
 	}
 }
 

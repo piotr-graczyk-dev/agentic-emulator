@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
 )
 
@@ -114,6 +118,67 @@ func TestCapabilityCommandErrors(t *testing.T) {
 		_, _, err := req(t, "", c.args...)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%v: err = %v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
+func TestLogsAndCrashesCommands(t *testing.T) {
+	cases := []struct {
+		args   []string
+		method string
+		want   string
+	}{
+		{[]string{"logs"}, "logs", `{}`},
+		{[]string{"logs", "com.app", "--since", "launch", "--level", "warn"}, "logs", `{"app":"com.app","since":"launch","level":"warn"}`},
+		{[]string{"logs", "--app", "pl.app", "--contains", "TypeError", "--regex", "fail(ed)?", "--limit", "20", "--max-bytes", "4096", "-d", "ios:y"}, "logs", `{"device":"ios:y","app":"pl.app","contains":"TypeError","regex":"fail(ed)?","limit":20,"maxBytes":4096}`},
+		{[]string{"logs", "--since", "c1730970000123456", "--json"}, "logs", `{"since":"c1730970000123456"}`},
+		{[]string{"crashes"}, "crashes", `{}`},
+		{[]string{"crashes", "com.app", "--since", "5m", "--limit", "3"}, "crashes", `{"app":"com.app","since":"5m","limit":3}`},
+		{[]string{"crashes", "--app", "com.app", "--level", "error"}, "crashes", `{"app":"com.app"}`}, // logs-only flags are not sent
+	}
+	for _, c := range cases {
+		method, p, err := req(t, "", c.args...)
+		if err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		b, _ := json.Marshal(p)
+		if method != c.method || string(b) != c.want {
+			t.Fatalf("%v:\n got %s %s\nwant %s %s", c.args, method, b, c.method, c.want)
+		}
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"logs", "a", "b"}, "usage: logs"},
+		{[]string{"logs", "a", "--app", "b"}, "usage: logs"},
+		{[]string{"logs", "--limit", "many"}, `--limit must be a whole number, got "many"`},
+		{[]string{"logs", "--max-bytes", "1.5"}, "--max-bytes must be a whole number"},
+		{[]string{"crashes", "--limit", "x"}, "--limit must be a whole number"},
+	} {
+		if _, _, err := req(t, "", c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%v: err = %v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
+func TestExitCodes(t *testing.T) {
+	crashed := &api.AppCrashedError{Err: errors.New("no element matches")}
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{errors.New("boom"), 1},
+		{api.NotImplemented(api.Android, "logs", ""), 3},
+		{crashed, 4},
+		{fmt.Errorf("tap done, but: %w", crashed), 4},
+		{&client.Error{Message: "x", Code: daemon.CodeAppCrashed}, 4},
+		{&client.Error{Message: "x", Code: daemon.CodeNotImplemented}, 3},
+		{&api.AppCrashedError{Err: api.NotImplemented(api.IOS, "crashes", "")}, 3},
+	}
+	for _, c := range cases {
+		if got := exitCode(c.err); got != c.want {
+			t.Fatalf("%v: exit %d, want %d", c.err, got, c.want)
 		}
 	}
 }

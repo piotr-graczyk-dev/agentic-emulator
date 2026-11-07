@@ -139,6 +139,28 @@ if [[ -n "$TESTAPP" ]]; then
   expect "type agemu" type agemu
   expect "greeting shows the typed text" wait --text "Hello, agemu!" --timeout-ms 5000
   expect "screenshot test app" screenshot -o "$OUT/testapp.png"
+
+  step "logs and crashes: the test app's lines, a crash notice, the crash report"
+  expect "launch the test app on its Logs screen" launch dev.agemu.testapp --relaunch -- -logs
+  expect "wait for the Logs screen" wait --id log-levels --timeout-ms 20000
+  expect "log one line at each level" tap --id log-levels --wait-contains "levels tok"
+  expect "logs since launch" logs dev.agemu.testapp --since launch --limit 300 --max-bytes 200000
+  has "the startup line" "probe launched"
+  has "an info line" "dev.agemu.testapp:probe: level info"
+  has "a fault line as fatal" "F AgemuTestApp["
+  has "an NSLog line, tagged Foundation" "Foundation: level nslog"
+  grep -qF "level debug" <<<"$LAST" && bad "a debug line was captured" || ok "no debug line (capture is info level)"
+  grep -qF "level print" <<<"$LAST" && bad "a print() line was captured" || ok "no print() line (stdout is not the unified log)"
+  ag tap --id crash-exception --wait-id never-there --wait-timeout-ms 10000
+  rc=$?
+  [[ $rc -eq 4 ]] && ok "the wait after the crash fails at once with exit 4" || bad "the wait after the crash exited $rc"
+  has "the error names the exception" "NSInvalidArgumentException: agemu probe exception"
+  expect "crashes" crashes dev.agemu.testapp --since launch
+  has "crashes has the exception" "NSInvalidArgumentException: agemu probe exception"
+  has "crashes has the app's frame" "LogProbe"
+  expect "relaunch after the crash" launch dev.agemu.testapp --relaunch -- -logs
+  expect "terminate (no notice)" terminate dev.agemu.testapp
+  grep -qF "note:" <<<"$LAST" && bad "terminate produced a crash notice" || ok "terminate is not a crash"
 fi
 
 step "screen profiles: screenshot pixels equal the profile size"

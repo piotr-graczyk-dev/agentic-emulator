@@ -160,7 +160,7 @@ ui_has() { ag wait --contains "$1" --timeout-ms "${2:-5000}" >/dev/null; }
 
 step "capabilities: install the probe app; apps lists it"
 ag install "$OUT/agemu-probe.apk" >/dev/null
-ag apps | grep -q "\"id\":\"$PROBE\",\"name\":\"Agemu Probe\",\"version\":\"1.2\"" || fail "apps: $(ag apps)"
+ag apps | grep -q "\"id\":\"$PROBE\",\"name\":\"Agemu Probe\",\"version\":\"1.3\"" || fail "apps: $(ag apps)"
 ok "apps lists $PROBE with its name and version"
 
 step "capabilities: open a deep link as a tapped link (BROWSABLE)"
@@ -235,6 +235,86 @@ ag push "$PROBE" '{"aps":{"alert":"x"}}' >/dev/null 2>&1; rc=$?
 set -e
 [[ $rc == 3 ]] || fail "push exit $rc, want 3 (not implemented on android)"
 ok "push answers not implemented (exit 3)"
+
+# Logs and crashes (docs/CAPABILITIES.md, "Logs and crashes"), with the probe's lab screen:
+# agemulab://<action> logs at each level, crashes in Java or native code, exits, or logs from
+# its :remote process.
+LAB="$PROBE/.LabActivity"
+# entries prints "level process tag message" per entry of a logs --json result on stdin.
+entries() { python3 -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
+cursor() { python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
+lab() { ag launch "$LAB" >/dev/null; ag wait --contains "lab: ready" --timeout-ms 8000 >/dev/null || fail "lab screen did not start"; }
+
+step "logs: levels, the app's processes only, cursor, since launch"
+ag install "$OUT/agemu-probe.apk" >/dev/null
+lab
+# since launch: from the start of the launch (an open of a link counts as one too, below). While
+# the device logs over 100 records/s (a cold start does) the capture reads logd every 250 ms.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  ag logs "$PROBE" --since launch --contains "lab: created" --json | entries | grep -q "lab: created" && break
+  sleep 0.2
+done
+ag logs "$PROBE" --since launch --contains "lab: created" --json | entries | grep -q "lab: created" || fail "since launch lacks the app's startup line"
+ag open "agemulab://log-levels" >/dev/null
+sleep 1
+ag logs "$PROBE" --since launch --contains "level " --json | entries >"$OUT/levels.txt"
+for l in "verbose dev.agemu.probe AgemuLab level V" "debug dev.agemu.probe AgemuLab level D" "info dev.agemu.probe AgemuLab level I" \
+         "warn dev.agemu.probe AgemuLab level W" "error dev.agemu.probe AgemuLab level E"; do
+  grep -q "^$l " "$OUT/levels.txt" || fail "logs: no \"$l\" line: $(cat "$OUT/levels.txt")"
+done
+ok "a line at each level with its level, process and tag"
+ag logs "$PROBE" --since launch --limit 10000 --max-bytes 1048576 --json | entries | awk '{print $2}' | sort -u >"$OUT/procs.txt"
+[[ "$(cat "$OUT/procs.txt")" == "dev.agemu.probe" ]] || fail "logs of $PROBE holds other processes: $(cat "$OUT/procs.txt")"
+ok "logs <app> holds only the app's lines, from the start of its launch"
+cur=$(ag logs "$PROBE" --limit 1 --json | cursor)
+ag open "agemulab://remote-log" >/dev/null
+sleep 1
+ag logs "$PROBE" --since "$cur" --json | entries >"$OUT/after-cursor.txt"
+grep -q "^info dev.agemu.probe:remote AgemuLabRemote remote: started" "$OUT/after-cursor.txt" || fail "no line from the :remote process: $(cat "$OUT/after-cursor.txt")"
+grep -q "level " "$OUT/after-cursor.txt" && fail "the cursor returned older lines"
+ok "a cursor returns only newer lines; the app's :remote process is in its logs"
+
+step "crashes: the notice, a failing action's exit 4, the report's frames"
+ag open "agemulab://crash-java" >/dev/null 2>"$OUT/crash-open.err" || true
+sleep 1
+set +e
+ag tap --text "Log levels" >"$OUT/crash-tap.out" 2>&1; rc=$?
+set -e
+[[ $rc == 4 ]] || fail "tap after the crash: exit $rc, want 4: $(cat "$OUT/crash-tap.out")"
+grep -q "crashed at .*java.lang.IllegalStateException: probe crash" "$OUT/crash-open.err" "$OUT/crash-tap.out" || fail "no crash notice: $(cat "$OUT/crash-open.err" "$OUT/crash-tap.out")"
+ag crashes "$PROBE" --limit 1 >"$OUT/crash-java.txt"
+grep -q "java.lang.IllegalStateException: probe crash" "$OUT/crash-java.txt" || fail "crashes: $(cat "$OUT/crash-java.txt")"
+grep -q "at dev.agemu.probe.LabActivity.crashJava" "$OUT/crash-java.txt" || fail "crashes lacks the app's frame: $(cat "$OUT/crash-java.txt")"
+ok "Java crash: notice, tap exits 4 with the crash, crashes has the exception and the app's frame"
+lab
+ag open "agemulab://crash-native" >/dev/null 2>&1 || true
+for _ in 1 2 3 4 5 6; do
+  ag crashes "$PROBE" --limit 1 >"$OUT/crash-native.txt"
+  grep -q "libprobe.so" "$OUT/crash-native.txt" && break
+  sleep 0.5
+done
+grep -q "SIGSEGV (SEGV_MAPERR)" "$OUT/crash-native.txt" && grep -q "probe_null_write" "$OUT/crash-native.txt" \
+  || fail "native crash: $(cat "$OUT/crash-native.txt")"
+ok "native crash: SIGSEGV (SEGV_MAPERR) with the tombstone's frame in libprobe.so"
+ag terminate "$PROBE" >/dev/null # no "keeps stopping" dialog left over
+lab
+ag open "agemulab://exit" >/dev/null 2>&1 || true
+set +e
+ag wait --text "Log levels" --timeout-ms 9000 >"$OUT/exit-wait.out" 2>&1; rc=$?
+set -e
+[[ $rc == 4 ]] && grep -q "exited unexpectedly" "$OUT/exit-wait.out" || fail "wait after System.exit: exit $rc: $(cat "$OUT/exit-wait.out")"
+ok "System.exit: a wait stops with exit 4 (exited unexpectedly)"
+lab
+ag terminate "$PROBE" >/dev/null 2>"$OUT/term.err"
+ag ui >/dev/null 2>>"$OUT/term.err"
+grep -q "note:" "$OUT/term.err" && fail "terminate produced a notice: $(cat "$OUT/term.err")"
+ok "terminate is not reported"
+
+step "logs and crashes: reset empties both"
+ag reset >/dev/null
+ag logs "$PROBE" | grep -q "no log lines match" || fail "logs after reset: $(ag logs "$PROBE" | head -3)"
+ag crashes | grep -q "no crashes" || fail "crashes after reset: $(ag crashes | head -3)"
+ok "after reset: no lines and no crash reports from before"
 ag key home >/dev/null
 
 printf '\nALL %d CHECKS PASSED (artifacts in %s)\n' "$PASS" "$OUT"

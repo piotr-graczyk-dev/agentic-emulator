@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
@@ -63,12 +64,22 @@ Test capabilities (docs/CAPABILITIES.md; reset restores appearance, location, cl
   uninstall <app-id>  clear-data <app-id>   clear-data: like a fresh install, app kept
   push <app-id> <json|file.json|->          push notification (iOS)
 
+Logs and crashes (docs/CAPABILITIES.md):
+  logs [<app-id>|--app ID] [--since T] [--level L] [--contains T] [--regex RE] [--limit 100] [--max-bytes 16384]
+                                            recent log lines, oldest first: time level process[pid] tag: message;
+                                            T: 2026-11-07T10:00:00Z, 30s, 5m, launch, or the cursor the last line gives;
+                                            L: verbose debug info warn error fatal (the minimum)
+  crashes [<app-id>|--app ID] [--since T] [--limit 10]   crash, ANR and system-kill reports with top frames
+  When the app launched last through agemu crashed, the next command says so on stderr
+  ("note: ..."), and a command that fails while the app is down says why and exits 4.
+
 Actions (tap, swipe, type, key, launch, open, push) also wait for their effect in the same call:
   --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
   --ui prints the screen the action ends on (outline), so one call acts, waits and observes
   e.g. agemu tap --text "Log in" --wait-id home-screen --ui
 
-Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform.
+Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform,
+4 failed while the app launched last through agemu was down after a crash (agemu crashes).
 
 Servers:
   daemon                                    run the daemon in the foreground
@@ -101,11 +112,19 @@ func main() {
 	}
 	if err := runCommand(cmd, args); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		if errors.Is(err, api.ErrNotImplemented) {
-			os.Exit(3) // a script can skip the step on this platform
-		}
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode is the exit status for a failed command.
+func exitCode(err error) int {
+	switch {
+	case errors.Is(err, api.ErrNotImplemented):
+		return 3 // a script can skip the step on this platform
+	case errors.Is(err, api.ErrAppCrashed):
+		return 4 // the app crashed: not a selector that did not match
+	}
+	return 1
 }
 
 // parsed command line: positional args + --flags (flags may appear anywhere).
@@ -153,6 +172,19 @@ func isNumber(s string) bool { _, err := strconv.ParseFloat(s, 64); return err =
 
 func (c cli) int(name string) int { v, _ := strconv.Atoi(c.flags[name]); return v }
 
+// number reads an integer flag strictly: absent is 0, anything but an integer is an error.
+func (c cli) number(name string) (int, error) {
+	s, ok := c.flags[name]
+	if !ok {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("--%s must be a whole number, got %q", name, s)
+	}
+	return v, nil
+}
+
 func (c cli) selector() *api.Selector {
 	s := api.Selector{Text: c.flags["text"], Contains: c.flags["contains"], ID: c.flags["id"], Role: c.flags["role"], Index: c.int("index")}
 	if s.Empty() {
@@ -188,9 +220,30 @@ func runCommand(cmd string, args []string) error {
 		return err
 	}
 	defer cl.Close()
-	raw, _, err := cl.CallRaw(method, p)
+	reply, err := cl.Do(method, p)
 	if err != nil {
-		return err
+		return err // a crash that explains it is in the message
+	}
+	if c := reply.AppCrash; c != nil {
+		// On stderr, so stdout stays the command's own output.
+		fmt.Fprintln(os.Stderr, "note:", c.Summary())
+	}
+	raw := reply.Result
+	switch {
+	case method == "logs" && textOut:
+		var l api.Logs
+		if err := json.Unmarshal(raw, &l); err != nil {
+			return err
+		}
+		fmt.Print(api.FormatLogs(l, time.Local))
+		return nil
+	case method == "crashes" && textOut:
+		var cs api.Crashes
+		if err := json.Unmarshal(raw, &cs); err != nil {
+			return err
+		}
+		fmt.Print(api.FormatCrashes(cs, time.Local))
+		return nil
 	}
 	if method == "ui" && textOut {
 		var t api.UITree
@@ -404,6 +457,27 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 			return "", err
 		}
 		p.Payload = payload
+
+	// Logs and crashes: the daemon checks the values (internal/daemon/logs.go).
+	case "logs", "crashes":
+		p.App = c.flags["app"]
+		if len(c.pos) > 1 || (len(c.pos) == 1 && p.App != "") {
+			return "", fmt.Errorf("usage: %s [<app-id> | --app <app-id>] [--since ...] (see agemu help)", cmd)
+		}
+		if len(c.pos) == 1 {
+			p.App = c.pos[0]
+		}
+		p.Since = c.flags["since"]
+		var err error
+		if p.Limit, err = c.number("limit"); err != nil {
+			return "", err
+		}
+		if cmd == "logs" {
+			p.Level, p.Contains, p.Regex = c.flags["level"], c.flags["contains"], c.flags["regex"]
+			if p.MaxBytes, err = c.number("max-bytes"); err != nil {
+				return "", err
+			}
+		}
 	default:
 		return "", fmt.Errorf("unknown command %q (see agemu help)", cmd)
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
@@ -160,6 +161,37 @@ var tools = []tool{
 		"app":     str("Bundle id"),
 		"payload": map[string]any{"type": "object", "description": "APNs payload with an \"aps\" object, at most 4096 bytes, e.g. {\"aps\":{\"alert\":{\"title\":\"Hi\",\"body\":\"Hello\"}}}"},
 	}), "app", "payload")},
+
+	// Logs and crashes (docs/CAPABILITIES.md). Every tool result also says once when the app
+	// launched last through agemu crashed (a NOTE line), and an error while it is down says why.
+	{Name: "logs", method: "logs", Description: "Recent log lines of one app (or the whole device), oldest first, as `time level process[pid] tag: message`. Filter by time, minimum level and text; the newest lines that fit limit and maxBytes are returned. The last line gives a cursor: pass it as since to read only newer lines.", InputSchema: obj(map[string]any{
+		"device":   device,
+		"app":      str("Package name or bundle id: only its processes' lines (default: every process)"),
+		"since":    str(sinceHelp),
+		"level":    enum("Minimum level (iOS: debug lines are not captured; info includes iOS default)", levelNames()...),
+		"contains": str("Case-insensitive substring of the tag or the message"),
+		"regex":    str("RE2 regular expression matched against the tag or the message"),
+		"limit":    num(fmt.Sprintf("At most this many lines, the newest (default %d, max %d)", api.DefaultLogLimit, api.MaxLogLimit)),
+		"maxBytes": num(fmt.Sprintf("At most about this many bytes of lines (default %d, max %d)", api.DefaultLogBytes, api.MaxLogBytes)),
+		"json":     boolT("Return JSON instead of text lines"),
+	})},
+	{Name: "crashes", method: "crashes", Description: "Crash, ANR (Android), system-kill (iOS watchdog, jetsam) and unexpected-exit reports of the device's apps, oldest first: time, kind, exception, reason and the crashing thread's top frames.", InputSchema: obj(map[string]any{
+		"device": device,
+		"app":    str("Package name or bundle id (default: every app)"),
+		"since":  str(`A time (2026-11-07T10:00:00Z), a duration back from now (5m) or "launch" (the app's last launch through agemu)`),
+		"limit":  num(fmt.Sprintf("At most this many reports, the newest (default %d, max %d)", api.DefaultCrashLimit, api.MaxCrashLimit)),
+		"json":   boolT("Return JSON instead of text"),
+	})},
+}
+
+var sinceHelp = "Only lines from this point: " + strings.TrimPrefix(api.SinceHelp, "use ")
+
+func levelNames() []string {
+	names := make([]string, len(api.LogLevels))
+	for i, l := range api.LogLevels {
+		names[i] = string(l)
+	}
+	return names
 }
 
 // permissionNames lists the platform-neutral permission names for tool descriptions.
@@ -228,7 +260,7 @@ func handle(req rpcReq, getClient func() (*client.Client, error)) (any, *rpcErr)
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agemu", "version": "0.1.0"},
-			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions.",
+			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -280,7 +312,8 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 		_ = json.Unmarshal(b, &sel)
 		if !sel.Empty() {
 			p.Selector = &sel
-			p.Text = "" // "text" was a selector field, not text to type
+			p.Text = ""     // "text" was a selector field, not text to type
+			p.Contains = "" // and "contains" not a logs filter
 		}
 	}
 	wantJSON := false
@@ -296,11 +329,38 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 		p.Scale = scale
 	}
 
-	raw, ms, err := cl.CallRaw(t.method, p)
+	reply, err := cl.Do(t.method, p)
 	if err != nil {
-		return toolError(err)
+		return toolError(err) // a crash that explains it is in the message
 	}
+	res := render(name, p, wantJSON, scale, reply.Result, reply.Ms)
+	if c := reply.AppCrash; c != nil && res["isError"] != true {
+		// First, so the agent reads it before the result it explains.
+		note := map[string]any{"type": "text", "text": "NOTE: " + c.Summary()}
+		res["content"] = append([]map[string]any{note}, res["content"].([]map[string]any)...)
+	}
+	return res
+}
+
+// render turns a tool's raw result into MCP content.
+func render(name string, p daemon.Params, wantJSON bool, scale float64, raw json.RawMessage, ms float64) map[string]any {
 	switch name {
+	case "logs", "crashes":
+		if wantJSON {
+			return text(string(raw))
+		}
+		if name == "logs" {
+			var l api.Logs
+			if err := json.Unmarshal(raw, &l); err != nil {
+				return toolError(err)
+			}
+			return text(api.FormatLogs(l, time.Local))
+		}
+		var cs api.Crashes
+		if err := json.Unmarshal(raw, &cs); err != nil {
+			return toolError(err)
+		}
+		return text(api.FormatCrashes(cs, time.Local))
 	case "ui_tree":
 		if wantJSON {
 			return text(string(raw))

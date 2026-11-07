@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +68,13 @@ type Backend struct {
 	// anim maps udid -> the animation coefficient last applied to that device (see
 	// animations.go; 0 is normal speed).
 	anim map[string]float64
+	// logs maps udid -> the device's log capture and crash watch (logs.go, crashes.go); pw
+	// watches launched processes for their exit; reports reads the Mac's .ips crash reports.
+	logs    map[string]*deviceLogs
+	pw      *procWatcher
+	reports *reportDir
+	// seen holds, per udid, the elements of recent UI tree reads (see ready.go).
+	seen map[string]*seenElements
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -79,7 +88,7 @@ type Backend struct {
 func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
 		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, bootGen: map[string]int{},
-		anim: map[string]float64{}}
+		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -128,8 +137,28 @@ func (b *Backend) Close() error {
 	b.closed = true // no new helper and no new background work from here on
 	h := b.h
 	b.h = nil
+	udids := make([]string, 0, len(b.logs))
+	for udid := range b.logs {
+		udids = append(udids, udid)
+	}
+	pw := b.pw
+	b.pw = nil
 	b.mu.Unlock()
 	b.stopBg()
+	// The log streams end with their simctl processes; the readers then return. Each stop can
+	// wait up to 2 s for its relay, so the devices are stopped side by side.
+	var stops sync.WaitGroup
+	for _, udid := range udids {
+		stops.Add(1)
+		go func() {
+			defer stops.Done()
+			b.stopCapture(udid)
+		}()
+	}
+	stops.Wait()
+	if pw != nil {
+		pw.close()
+	}
 	// Close the helper before waiting: a background call blocked writing to it fails then,
 	// instead of keeping Close waiting.
 	if h != nil {
@@ -548,6 +577,7 @@ func (b *Backend) shutdown(ctx context.Context, udid string) error {
 			b.mu.Lock()
 			delete(b.apps, udid)
 			b.mu.Unlock()
+			b.stopCapture(udid)
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -676,7 +706,9 @@ func (b *Backend) UITree(ctx context.Context, id string) (*api.UITree, error) {
 	if app == "" {
 		app = b.appForPid(ctx, d.UDID, t.Pid)
 	}
-	return convertTree(t, app), nil
+	tree := convertTree(t, app)
+	b.noteTree(d.UDID, tree)
+	return tree, nil
 }
 
 // readTree reads the frontmost app's accessibility tree within the caller's deadline (20 s
@@ -733,6 +765,7 @@ func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
 	if x < 0 || y < 0 || (d.Width > 0 && (x >= d.Width || y >= d.Height)) {
 		return fmt.Errorf("tap (%d,%d) is outside the %dx%d screen", x, y, d.Width, d.Height)
 	}
+	b.noteInput(d.UDID)
 	return b.call(ctx, "tap", map[string]any{"udid": d.UDID, "x": x, "y": y}, nil)
 }
 
@@ -741,6 +774,7 @@ func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, duration
 	if err != nil {
 		return err
 	}
+	b.noteInput(d.UDID)
 	return b.call(ctx, "swipe", map[string]any{"udid": d.UDID, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "durationMs": durationMs}, nil)
 }
 
@@ -801,6 +835,7 @@ func (b *Backend) TapNow(ctx context.Context, id string, x, y int) error {
 	if x < 0 || y < 0 || (d.Width > 0 && (x >= d.Width || y >= d.Height)) {
 		return fmt.Errorf("tap (%d,%d) is outside the %dx%d screen", x, y, d.Width, d.Height)
 	}
+	b.noteInput(d.UDID)
 	return b.call(ctx, "tap", map[string]any{"udid": d.UDID, "x": x, "y": y, "settleMaxMs": 0}, nil)
 }
 
@@ -815,6 +850,7 @@ func (b *Backend) TypeText(ctx context.Context, id, text string) error {
 	if err != nil {
 		return err
 	}
+	b.noteInput(d.UDID)
 	if len([]rune(text)) == 1 && typeable(text) {
 		return b.call(ctx, "type", map[string]any{"udid": d.UDID, "text": text}, nil)
 	}
@@ -828,6 +864,7 @@ func (b *Backend) TypeKeys(ctx context.Context, id, text string) error {
 	if err != nil {
 		return err
 	}
+	b.noteInput(d.UDID)
 	if typeable(text) {
 		return b.call(ctx, "type", map[string]any{"udid": d.UDID, "text": text}, nil)
 	}
@@ -961,7 +998,8 @@ func (b *Backend) focusedFieldValue(ctx context.Context, udid string) (value str
 	return value, ok
 }
 
-// Key presses a named key. iOS has no back key: "back" taps the navigation bar's back
+// Key presses a named key. "home" returns once SpringBoard has acted on the press (see
+// home.go). iOS has no back key: "back" taps the navigation bar's back
 // button (UIKit gives it the identifier "BackButton") when the screen has one, and otherwise
 // swipes from the left edge (the interactive pop gesture). The tap is the robust path: a
 // gesture's timing can stretch on a loaded host and stop being recognized as a swipe.
@@ -969,6 +1007,10 @@ func (b *Backend) Key(ctx context.Context, id, key string) error {
 	d, err := b.target(ctx, id)
 	if err != nil {
 		return err
+	}
+	b.noteInput(d.UDID)
+	if key == "home" {
+		return pressHome(ctx, helperHome{b, d.UDID})
 	}
 	if key == "back" {
 		tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -999,7 +1041,27 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 	if !strings.HasSuffix(strings.TrimSuffix(path, "/"), ".app") {
 		return fmt.Errorf("install needs a simulator .app bundle, got %s", path)
 	}
+	// An install usually comes before the launch: the log stream starts here and has time to
+	// deliver its first lines before the app runs. The install also reads the bundle's id with
+	// plutil first (bundleID).
+	if d.StateCode == stateBooted {
+		b.startCapture(d)
+	}
+	// Installing over a running instance ends it (runningboardd: domain runningboard, code 0):
+	// that exit is agemu's, not a kill to report.
+	defer b.expectExits(d.UDID, bundleID(ctx, path))(0)
 	return b.call(ctx, "install", map[string]any{"udid": d.UDID, "path": path}, nil)
+}
+
+// bundleID reads an app bundle's CFBundleIdentifier (XML or binary Info.plist) with plutil;
+// "" when it cannot, which stands for every app.
+func bundleID(ctx context.Context, app string) string {
+	out, err := exec.CommandContext(ctx, "plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-",
+		filepath.Join(app, "Info.plist")).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // Launch starts the app (or brings it to the foreground) and returns once its process is
@@ -1017,9 +1079,20 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	}
 	// A device this daemon has not booted gets AGEMU_IOS_ANIMATIONS before its first launch.
 	b.animateDevice(ctx, d, false)
+	// Capture the app's startup lines: the stream starts before the launch. The first launch or
+	// install after a boot (or a daemon start) waits for the stream's start (a process list and
+	// starting simctl, see startCapture); later ones find it running.
+	b.startCapture(d)
+	b.noteInput(d.UDID)
 	var r struct {
 		Pid int `json:"pid"`
 	}
+	if o.Relaunch {
+		// The running instance's exit is agemu's; the new one's is not.
+		done := b.expectExits(d.UDID, app)
+		defer func() { done(r.Pid) }()
+	}
+	start := time.Now()
 	// Right after the app was terminated (reset, terminate) its process may still be exiting,
 	// and CoreSimulator then answers "failed to launch": retry twice.
 	var lerr error
@@ -1056,6 +1129,7 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	}
 	b.apps[d.UDID][r.Pid] = app
 	b.mu.Unlock()
+	b.watchLaunch(d, app, r.Pid, start)
 	return nil
 }
 
@@ -1091,5 +1165,7 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
+	defer b.expectExits(d.UDID, app)(0)
+	b.noteInput(d.UDID)
 	return b.call(ctx, "terminate", map[string]any{"udid": d.UDID, "bundleId": app}, nil)
 }

@@ -2,8 +2,9 @@
 
 Beyond driving the UI, agents testing real apps need to set up the device: open a deep link,
 grant a permission, fake a location, read what the app copied, switch to dark mode, start an
-app from a clean state, deliver a push. This page defines that surface: the commands, what each
-does on each platform, how far it matches a real device, and what `reset` restores.
+app from a clean state, deliver a push. They also need to see what the app logged and why it
+stopped ([Logs and crashes](#logs-and-crashes)). This page defines that surface: the commands,
+what each does on each platform, how far it matches a real device, and what `reset` restores.
 
 Every capability is a call to the daemon, like the rest of agemu. The daemon checks the
 arguments, takes the device lock and calls an optional backend interface
@@ -93,6 +94,7 @@ change. After `reset`:
 | clipboard | empty | restored by the snapshot; the emulator does not push its own copy back (verified, also 5 s later) | emptied (verified, as agemu reads it back) |
 | permissions | not determined, for every app | restored by the snapshot (verified for a system app's permission) | each remaining grant of a covered service is reset, found in the device's `TCC.db` and locationd's clients (verified for user and built-in apps, and Maps location); `simctl privacy reset all` without a bundle id, used before, changed nothing on iOS 26.5 |
 | apps installed since the baseline | gone, with their data and delivered notifications | restored by the snapshot (verified) | uninstalled, which also removes their grants (verified; delivered notifications not checked) |
+| logs and crashes | `logs` and `crashes` return only what happened after the reset; `since launch` and the crash notice forget earlier launches | the daemon starts both at the reset's end; the backend empties its ring buffer, and drops the baseline's lines the snapshot brings back into logd (to implement) | the daemon starts both at the reset's end, so older `.ips` reports on the Mac are not returned; the backend empties its rings and crash records and keeps the stream running (verified: no app line and no crash from before the reset) |
 
 The rule for new capabilities: whatever one can change, `reset` restores. Otherwise the change
 is listed under "Survives reset" below.
@@ -124,6 +126,12 @@ then the backend.
   installed, a system app cannot be uninstalled, and so on. The CLI exits 1.
 - **Compound calls** (`open`, `push` with `--wait-*`) fail like other actions:
   `open_url done, but: timeout after 10s waiting for ...`.
+- **The app crashed**: any call on a device that fails while the app launched last through agemu
+  is down after a crash (or right after one) says so after its own message, see
+  [The crash notice](#the-crash-notice). The CLI exits **4**, MCP returns `isError`, the daemon
+  response carries `"code":"app_crashed"` and the crash in `appCrash`, and in Go
+  `errors.Is(err, api.ErrAppCrashed)` holds on both sides of the socket. Not implemented wins
+  over it (exit 3).
 
 ## Fidelity
 
@@ -180,7 +188,183 @@ What each capability does differently from a person using a real device:
     shell may not send the `c2dm` broadcast. agemu answers not implemented rather than post a
     notification as the shell.
 
+## Logs and crashes
+
+An agent whose tap "did nothing" needs to know whether the selector missed, the app logged an
+error, or the app is gone. Two calls and one notice cover that:
+
+| What | CLI | MCP tool | Result |
+|---|---|---|---|
+| Log lines | `logs [<app>] [--since T] [--level L] [--contains T] [--regex RE] [--limit N] [--max-bytes B]` | `logs {app, since, level, contains, regex, limit, maxBytes, json}` | text lines, or with `--json` / `json`: `{"entries":[...],"cursor":"c...","omitted":N,"partial":true,"capturedFrom":"..."}` |
+| Crash reports | `crashes [<app>] [--since T] [--limit N]` | `crashes {app, since, limit, json}` | text, or `{"crashes":[...],"omitted":N}` |
+| The crash notice | every command: `note: ...` on stderr; exit 4 when it fails while the app is down | every tool: a first `NOTE: ...` content line; `isError` with the reason | daemon response field `appCrash`; error code `app_crashed` |
+
+Both calls take `-d <device>` (MCP: `device`) and an app (package name or bundle id; the CLI
+also takes it as the first word: `agemu logs com.example.app`). Without an app they cover the
+whole device. Unlike the capabilities above, `logs` and `crashes` do not take the device lock:
+they read what agemu captured, so they never wait behind another agent's action.
+
+### A log line
+
+The same shape on both platforms; times are the Mac's wall clock (UTC in JSON):
+
+```json
+{"time":"2026-11-07T10:00:00.123Z","level":"error","pid":1234,"tid":1240,
+ "process":"com.example.app","tag":"ReactNativeJS","message":"TypeError: undefined is not a function"}
+```
+
+```
+10:00:00.123 E com.example.app[1234] ReactNativeJS: TypeError: undefined is not a function
+```
+
+- `process`: Android's process name (`com.example.app`, `com.example.app:remote`,
+  `system_server`); iOS's executable (`AgemuTestApp`, `SpringBoard`).
+- `tag`: Android's log tag; iOS `subsystem:category` (or the subsystem alone), else the image
+  that logged the line (`Foundation` for `NSLog`).
+- `message` may hold several lines (a stack trace logged in one call stays one entry; text
+  output indents the continuation lines).
+
+| level | Android | iOS (unified log type) |
+|---|---|---|
+| `verbose` | V | - |
+| `debug` | D | debug: **not captured** (see Fidelity) |
+| `info` | I | info, and default (`os_log` default, `Logger.notice`, `NSLog`) |
+| `warn` | W | - (`Logger.warning` logs as error) |
+| `error` | E | error |
+| `fatal` | F, A (`Log.wtf`) | fault (`Logger.critical`) |
+
+`--level` is the minimum and also takes the letters `v d i w e f`, `warning`, `err` and `fault`.
+
+### Choosing lines
+
+- **since**: a time (`2026-11-07T10:00:00Z`, any RFC 3339 offset), a duration back from now
+  (`30s`, `5m`, `1h30m`), `launch` (the start of the app's last launch through agemu; without
+  an app, of the device's last launch), or the `cursor` of an earlier result (`c` and a number),
+  which returns only lines captured after it. Read new lines in a loop with the cursor:
+  `agemu logs com.app --since c1730970000123456`. `crashes` takes the same forms except the
+  cursor.
+- **level**, **contains** (case-insensitive, in the tag or the message) and **regex** (RE2, at
+  most 1000 bytes, matched against the tag or the message) all have to match.
+- **Bounds**: at most `limit` lines (default 100, at most 10000) and about `maxBytes` bytes
+  (default 16384, 1024 to 1048576; a line counts its message, tag and process plus 64). The
+  result holds the **newest** lines that fit, oldest first; `omitted` counts the older matching
+  lines left out. The newest line is always returned, its message cut to fit. One message is at
+  most 16 KiB; a longer one ends in `...[N bytes cut]`.
+- **partial** says that the window asked for reaches back before what agemu holds (the capture
+  started later, or the ring buffer dropped lines); `capturedFrom` is the oldest time it holds.
+- `crashes`: at most `limit` reports (default 10, at most 100), the newest, oldest first.
+
+### A crash report
+
+```
+2026-11-07 10:00:00.312 crash com.example.app pid 4242
+  java.lang.IllegalStateException: boom
+  thread main
+    at com.example.app.CartActivity.pay(CartActivity.kt:88)
+    at android.view.View.performClick(View.java:8028)
+  report dropbox data_app_crash 2026-11-07 10:00:00
+```
+
+| kind | means | Android | iOS |
+|---|---|---|---|
+| `crash` | the process died of its own fault: an uncaught exception, a fatal signal, abort | uncaught Java/Kotlin exception; native crash (tombstone) | an `.ips` crash report: `EXC_BAD_ACCESS`, an uncaught `NSException`, a Swift runtime error, abort |
+| `anr` | the app did not respond (main thread blocked); the system shows its dialog or kills it | ANR | - |
+| `killed` | the system killed it for a reason of its own | low memory, excessive resource use | watchdog, jetsam |
+| `exited` | it ended without a crash report and without agemu asking: it called `exit()`, or the report is not written yet | `System.exit`, a process death with no crash record | an exit before `ReportCrash` wrote the `.ips` (`crashes` shows the crash once it has) |
+
+Fields: `time`, `app`, `process`, `pid`, `kind`, `exception` (the most specific type: the
+exception's class or name, else the signal or Mach exception; for a kill, the mechanism),
+`reason` (the exception's message, the termination reason, the ANR's subject), `thread`,
+`frames` (the top 20 of the crashing thread, innermost first, as the platform's report prints
+them; for an uncaught `NSException`, the exception's own backtrace), and `report` (where the
+full report is: a path on the Mac, or the device's record). A report the platform is still
+writing can come back without frames. Exits agemu asked for are not reports: `terminate`, a
+relaunch, `uninstall`, `clear-data`, a permission revoke or reset, `reset`. A crash during such a
+call is still reported (Android: the crash records are made regardless; iOS: an end with a crash
+signal, the app's uncaught-exception line or an `.ips` is never taken for agemu's). Records are
+believed only from their writers (Android: the crashing process itself for its own crash,
+system_server's events, system daemons' lines; iOS: the system's runningboardd), so another app
+cannot make agemu report that the app under test crashed, was killed or exited.
+
+### The crash notice
+
+agemu watches the app launched last through agemu on each device (`launch`, or `open` when the
+platform names the app that took the URL). When that app crashes, stops responding, is killed
+by the system or exits on its own:
+
+- **The next call says so, once**, whatever the call: the daemon response carries `appCrash`
+  (the report's fields with up to 3 frames, and `running`), the CLI prints
+  `note: com.example.app crashed at 10:00:00.312: java.lang.IllegalStateException: boom; it is
+  not running; crashes has the report` on stderr, and MCP starts the result with a `NOTE:` line.
+  Once per crash and device: the first call that sees it reports it, from any agent. Reading the
+  crash with `crashes` counts as told.
+- **A call that fails while the app is down says why**, every time, after its own error:
+  `no element matches {"text":"Pay"} (com.example.app crashed at 10:00:00.312: ...)`, with exit
+  status 4 and code `app_crashed`. So "the selector did not match" and "the app crashed" read
+  differently. An ANR leaves the app running; then only the first call after it says so.
+- **A wait stops at once** (`wait`, and the `--wait-*` of an action) when the app is down after a
+  crash the agent has not been told about yet: one during the call, or since its last call. It
+  fails with `stopped waiting for {...} to appear (com.example.app crashed at ...)` instead of
+  waiting out its timeout. The wait asks before each UI tree read and while one runs; once the
+  crash is known, that read gets 300 ms more (an element still on screen is found). Once told, a
+  wait runs its course (the agent may be waiting for something else). A wait for an element to
+  disappear is not cut short.
+- `terminate`, `uninstall` or `clear-data` of the watched app stop watching it; `reset` and
+  `shutdown` forget the device's launches.
+
+### Lifecycle
+
+- **Log capture** is per device and boot. It starts at the latest when the first app launch
+  through agemu begins, or at the first `logs` call, whichever comes first; lines from before
+  that come from the OS's own buffer where it keeps one (Android's logd ring; on iOS what the
+  unified log persisted, so mostly not `info` lines). It runs until the device shuts down (Android:
+  also standby) or the daemon exits. A daemon restart loses what was captured, the launch
+  records `since launch` uses, and the reset floor below.
+- **Ring buffers**: per device, about 2 MiB for user apps' lines and 2 MiB for all others
+  (some 10,000 lines each), so system chatter cannot push an app's lines out.
+- **Crash reports** come from the platform's own records. Android: made from logd's crash and
+  events buffers as the system logs them (AndroidRuntime's report, libc's fatal-signal line and
+  the tombstone, ActivityManager's events); only an ANR's main-thread stack is read from dropbox,
+  by `crashes`. iOS: runningboardd's exit line and the app's own last line in the log stream,
+  then the `.ips` files the Mac writes, read when asked. The notice comes from watching the
+  app's processes from its launch through agemu.
+- **Reset** clears both: `logs` and `crashes` return only what happened after the reset's end,
+  and the launches before it are forgotten (see the reset contract).
+
+### Fidelity
+
+- **Capture observes, it changes nothing.** No `OS_ACTIVITY_DT_MODE` or other environment for
+  launched apps, no `log config`, no log level or `log.tag.*` changes, no logd buffer resize
+  (`logcat -G`), no crash-dialog settings, no debugger attached. An app logs and crashes as it
+  would without agemu.
+- **iOS debug lines are not captured**: a log stream that asks for them turns them on in the app
+  (on the Simulator the test app's `os_log_type_enabled(.debug)` read true while a `--level
+  debug` stream ran, also in an app already running, and false with agemu's info-level capture,
+  as without it), so the app would format messages it otherwise skips. `info` lines are captured
+  live; the unified log keeps them in memory and writes them to disk only around an error or
+  fault, so a backfill mostly lacks them.
+- **iOS `print()` and stdout are not in the unified log**, so they are not captured; on a
+  device they go nowhere either. `NSLog`, `os_log` and `Logger` are. (React Native's `console.log`
+  reaches the unified log through `RCTLog`: to verify.)
+- **Crash dialogs stay**: Android's "keeps stopping" and ANR dialogs show as on a device; they
+  appear in `ui`, and the agent dismisses them.
+- **The Simulator is not a device**: its apps run as Mac processes, so an iPhone's memory limits
+  (jetsam) are not expected to apply, and its FrontBoard gives a launching app 599.82 s before
+  the scene-create watchdog fires (seen in its log), so a slow launch is not killed as on a
+  device. A run without kills on the Simulator does not prove the app stays within a device's
+  limits.
+- **iOS crash reports are the Mac's**: `ReportCrash` on the Mac writes them to
+  `~/Library/Logs/DiagnosticReports` with the Mac's other reports, seconds after the crash, and
+  stopped after the test app's 25th report of the day (`osanalyticshelper`: "25 of max 25"; none
+  of its next 21 crashes got one); agemu reads only the device's own and does not delete them.
+- Times are the Mac's clock: Android's guest clock is corrected when it differs (after a
+  snapshot load, say), so `since` and the crash notice compare with the daemon's own times.
+
 ## Status
+
+Logs and crashes: implemented on both platforms. Android: see [Logs and crashes
+(Android)](#logs-and-crashes-android) below. iOS: see [iOS logs and
+crashes](#ios-logs-and-crashes) below.
 
 Android serves 8 of the 9 capabilities (push answers not implemented by design); iOS serves all
 9, with four permission cases that answer not implemented. Latencies below are medians of the
@@ -230,6 +414,64 @@ Verified on the device:
 - Deviation from the table: `location` and `location-always` reset also reset background
   location, like revoke.
 
+#### Logs and crashes (Android)
+
+One `logcat -B` stream per device into the daemon; crash records are made as the system logs
+them (AndroidRuntime's report, libc's fatal-signal line and the tombstone in the crash buffer;
+ActivityManager's `am_crash`, `am_anr`, `am_kill`, `am_proc_died` in the events buffer), not
+read from dropbox or exit records afterwards, except an ANR's main-thread stack, which comes
+from its dropbox entry. Mechanism and every measurement:
+[ANDROID.md, Logs and crashes](ANDROID.md#logs-and-crashes-2026-11-07). On agemu-lab (API 37.1),
+host load average 9-15:
+
+- **Crash notice**: per trial a terminate, a cold launch, then the crash 0.6 s after the app is
+  ready. From sending the link that crashed the app to the first response carrying the notice,
+  on the merged build with 5 s between trials (n=5 each, 20 of 20 reported): Java 10.3 ms,
+  SIGSEGV 10.3, abort 62.1 (ART dumps its threads before the signal), `System.exit` 19.2
+  (medians). With the trials back to back, a crash's own logging and the next launch kept the
+  device busy, and the medians were 13.0, 73.7, 238.8 and 147.8 ms (up to 345 ms). An earlier
+  build that always streamed reported 50 of 50 (n=10 each, ANR included) at medians 8.8-60.3 ms.
+  An ANR comes from the system 15.5 s after the blocked input (5 s × this image's
+  `ro.hw_timeout_multiplier` 3) and is reported 2.9-5.9 ms after it (n=3). A tap on a gone
+  button after a crash or exit answers `app_crashed` (exit 4) every time.
+- **Frames**: a Java crash's at once (12 here, 3 in the notice); a native crash's from the
+  tombstone about 120 ms after the signal; an ANR's main thread from dropbox, 621-786 ms after it
+  on the merged build (3 of 3; `crashes` looks again 150 ms after a look that came too early;
+  an earlier build looked once a second and got them 1.07 s after), but only for the first 6
+  ANRs of a process in 10 minutes (Android's dropbox rate limit). The ANR trace files are
+  readable only by the system.
+- **While the device logs heavily** (after more than 100 records in each of 3 consecutive
+  seconds, the capture reads logd in dumps every 250 ms instead of a record-by-record stream): a
+  Java crash's notice 121.4 ms (25.2-143.2) after the request with the probe logging 500 lines/s
+  (n=5, merged build; 218.6 ms, n=10, on a build that switched after one busy second).
+- **Cost**, capture on against off, 4 windows each, on a build that switched to dumps after one
+  busy second: idle, the emulator 5.25% of a core against 5.30% (no measurable difference), the
+  daemon 0.02%; the probe logging 500 lines/s, the emulator 20.1% against 12.6% (+7.5 points; a
+  record-by-record stream had cost +45), the daemon 0.27%, the adb server 0.13%. The merged
+  build streams the first 2-3 s of such a rate. Not measured: 40-100 records/s, where the
+  stream stays on (estimated up to about 9 points of a core from the +45 at 500/s). The
+  daemon's footprint +12 MB idle, +16 MB with full rings.
+- **logs**, daemon round trip: the app's newest 100 lines 0.56 ms against 252 ms for
+  `adb logcat -d --uid` (n=15, interleaved); warnings and worse 0.48 against 223 ms; a text
+  filter 3.83 against 198 ms; the whole device's newest 100 lines 1.38 against 42.7 ms. Through
+  the CLI (one process per call) 8.2-12.1 ms.
+- **Deviations**: verbose and debug lines are captured (Android's logd does not change what an
+  app logs when someone reads); `Log.wtf` logs at E on this image, so it is `error`. A wait
+  after a crash stops 326 ms after it (n=5; 5.0 s before the merge), but the first UI tree read
+  after a crash still waits out Android's 5 s accessibility timeout on the dying app's window
+  inside the device, so the next call that reads the tree took about 4.7 s (calls that do not
+  read the tree carry the notice within milliseconds). With a 5,000-line burst that overflows
+  logd, logd kept fewer lines with capture on (median 3,153 against 4,618, n=4 each, p≈0.06)
+  and the app's own `Log.i` calls were slower (median 7.54 against 6.43 ms per burst, 20 each,
+  p≈0.01). The second crash of an app within a minute shows "keeps stopping": its
+  process waits in its crash handler until the dialog goes (or the system kills it as cached,
+  15 s later here), and a `launch` meanwhile either brings that frozen activity back or fails
+  after 20 s without showing the app (both seen): dismiss the dialog or `terminate` the app
+  first. The capture starts after the first `launch` returns, so a crash during that launch is
+  told by the next call. A capture reads logd's buffer back at most 10 minutes;
+  logd keeps its 2 MiB buffers compressed (some 7 MiB of lines each), so it can hold older
+  lines than agemu's 2 MiB rings (`partial` says so).
+
 ### iOS
 
 All nine commands are implemented, as the CoreSimulator calls `simctl` makes, issued by the
@@ -277,3 +519,45 @@ Deviations from the tables above:
 - **type** depends on a private CoreSimulator class for the pasteboard
   (`SimPasteboardInterface`); without it, `type` falls back to `simctl pbcopy` and leaves the
   typed text on the pasteboard.
+
+### iOS logs and crashes
+
+`logs`, `crashes` and the crash notice are implemented; mechanisms, measurements and caveats:
+[IOS.md, Logs and crashes](IOS.md#logs-and-crashes). In short:
+- **logs**: one `log stream --style ndjson --level info` per booted simulator (whole device),
+  started when an app is installed or launched through agemu or at the first `logs` call; a
+  read is served from memory: 1.11 ms over the daemon socket and 8.84 ms through the CLI, against
+  961 ms for `xcrun simctl spawn <udid> log show --last 1m --predicate ...` (medians, n=12 each,
+  interleaved; agemu returned at most 200 lines, `log show` a median 648). Bursts of 1000 and
+  10,000 lines were held whole (8 of 8).
+- **Cost**: with the app idle, no measurable CPU and about 15 MB in the daemon's processes; while
+  the app logs 200 lines/s, about 4% of a core (3.3 points in the simulator, 0.8 in the daemon)
+  and about 22 MB. The app's own logging took 29.2 against 24.3 ms per 1000 lines with the stream
+  running (4 ABBA windows per arm of 3 bursts; every "on" window above every "off" one).
+- **The crash notice**: the launched pid's exit (kqueue), runningboardd's exit line and the app's
+  own last line. A `wait` for a missing element ended with `app_crashed` 58-791 ms after the
+  crash (median 199 ms, 60 of 60, six ways of ending, n=10 each; an earlier build of the capture,
+  with leftover in-simulator streams running), carrying the NSException's name, reason and 3
+  frames (the exception machinery's; the app's frame is the 4th, in `crashes`), the Swift runtime
+  error's message and location, or the signal; without the watcher the same waits ran to their
+  15 s timeout (10 of 10, run separately). On the merged build (smoke, n=3 per kind, load
+  60-67): NSException 145.5 ms, Swift `fatalError` 131.9, bad access 114.3 (medians), 9 of 9
+  with exit 4.
+- **crashes**: the same records, completed by the Mac's `.ips` reports of this device: 19 of 40
+  crashes got one, 1.7-42.9 s after the crash (median 10.4 s), and none after the test app's 25th
+  report that day. The frames of a signal crash or a Swift runtime error come only from the
+  `.ips`: for 13 of 30 such crashes, 1.7-17.5 s later; never for the other 17.
+
+Deviations from the sections above:
+- `exited` also stands for an end seen before runningboardd's line (kqueue is first); the
+  watcher waits up to 150 ms for that line, so a notice right after the crash says how it ended.
+- A FrontBoard force quit (`simctl terminate`, a quit in the app switcher) and a privacy
+  permission change (TCC) end the app without being reported, also when agemu did not ask.
+  `install` over a running instance is one of agemu's own exits too. Any end with crash evidence
+  (a crash signal, the app's uncaught-exception or Swift-error line, an `.ips`) is reported even
+  inside agemu's own call window.
+- `crashes` reads only agemu's simulators (`agemu-*`), like every other call.
+- The capture slows the app's own logging (above): "observe only" holds for what is logged and
+  at which level (debug stays off), not for its cost.
+- Lines from before the stream's first line are read once from the unified log's store, for user
+  apps only and from 30 s before the capture started: default, error and fault lines, not info.

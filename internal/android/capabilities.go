@@ -79,6 +79,9 @@ func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The daemon watches the app that took the URL, as after a launch (and, as there, the
+	// capture starts once the call has returned).
+	defer d.startCapture()
 	// Returns once the target has drawn: its frames count from the start.
 	d.markInput()
 	var res struct {
@@ -361,10 +364,12 @@ func (b *Backend) SetPermissions(ctx context.Context, id, app string, action api
 	if err != nil || len(steps) == 0 {
 		return err
 	}
-	// A revoke kills the app's process (as on a device), so its screen goes away.
+	// A revoke kills the app's process (as on a device), so its screen goes away; that exit is
+	// agemu's, not a crash.
 	for _, s := range steps {
 		if !s.Grant {
 			d.markInput()
+			d.expectExit(app)
 			break
 		}
 	}
@@ -584,6 +589,7 @@ func (b *Backend) Uninstall(ctx context.Context, id, app string) error {
 		return err
 	}
 	defer d.markInput()
+	d.expectExit(app)
 	return capErr(d.call(ctx, map[string]any{"cmd": "uninstall", "pkg": app}, nil))
 }
 
@@ -595,5 +601,6 @@ func (b *Backend) ClearAppData(ctx context.Context, id, app string) error {
 		return err
 	}
 	defer d.markInput()
+	d.expectExit(app)
 	return capErr(d.call(ctx, map[string]any{"cmd": "clear", "pkg": app}, nil))
 }

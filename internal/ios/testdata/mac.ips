@@ -1,0 +1,86 @@
+{"app_name":"watchman","timestamp":"2026-11-07 02:14:59.00 +0100","app_version":"","bug_type":"309","name":"watchman","incident_id":"0E02F699-A1D7-497F-A412-10955B2C0165"}
+{
+ "captureTime": "2026-11-07 02:14:59.1262 +0100",
+ "pid": 58166,
+ "procName": "watchman",
+ "procPath": "\/opt\/homebrew\/*\/watchman",
+ "exception": {
+  "codes": "0x0000000000000000, 0x0000000000000000",
+  "rawCodes": [
+   0,
+   0
+  ],
+  "type": "EXC_CRASH",
+  "signal": "SIGABRT"
+ },
+ "termination": {
+  "code": 1,
+  "flags": 518,
+  "namespace": "DYLD",
+  "indicator": "Library missing",
+  "details": [
+   "(terminated at launch; ignore backtrace)"
+  ],
+  "reasons": [
+   "Library not loaded: \/opt\/homebrew\/*\/libfmt.11.dylib",
+   "Referenced from: <587D4D66-7642-35A7-96B1-7E00293C5BAE> \/opt\/homebrew\/*\/watchman",
+   "Reason: tried: '\/opt\/homebrew\/*\/libfmt.11.dylib' (no such file), '\/System\/Volumes\/Preboot\/Cryptexes\/OS\/opt\/homebrew\/*\/libfmt.11.dylib' (no such file), '\/opt\/homebrew\/*\/libfmt.11.dylib' (no such file), '\/opt\/homebrew\/Cellar\/fmt\/12.2.0\/lib\/libfmt.11.dylib' (no such file), '\/System\/Volumes\/Preboot\/Cryptexes\/OS\/opt\/homebrew\/Cellar\/fmt\/12.2.0\/lib\/libfmt.11.dylib' (no such file), '\/opt\/homebrew\/Cellar\/fmt\/12.2.0\/lib\/libfmt.11.dylib' (no such file)"
+  ]
+ },
+ "faultingThread": 0,
+ "threads": [
+  {
+   "triggered": true,
+   "frames": [
+    {
+     "imageOffset": 23460,
+     "symbol": "__abort_with_payload",
+     "symbolLocation": 8,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 651268,
+     "symbol": "abort_with_payload_wrapper_internal",
+     "symbolLocation": 104,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 651320,
+     "symbol": "abort_with_payload",
+     "symbolLocation": 16,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 154948,
+     "symbol": "dyld4::halt(char const*, dyld4::StructuredError const*)",
+     "symbolLocation": 312,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 139056,
+     "symbol": "dyld4::prepare(dyld4::APIs&, mach_o::UnsafeHeader const*)",
+     "symbolLocation": 5092,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 133936,
+     "symbol": "dyld4::start(dyld4::KernelArgs*, void*, void*, unsigned long long)::$_1::operator()() const",
+     "symbolLocation": 320,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 132236,
+     "symbol": "start",
+     "symbolLocation": 6904,
+     "imageIndex": 0
+    }
+   ]
+  }
+ ],
+ "usedImages": [
+  {
+   "name": "dyld",
+   "path": "\/usr\/lib\/dyld"
+  }
+ ]
+}

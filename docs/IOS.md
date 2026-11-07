@@ -22,9 +22,9 @@ agemu CLI / MCP ──unix socket──► agemud daemon (Go, internal/ios)
 | Operation | Standard tool | agemu |
 |---|---|---|
 | screenshot | `simctl io screenshot`: new process, connects to the device, renders, encodes | The helper keeps the main display's framebuffer **IOSurface** (and its change callbacks) for the life of the process. A screenshot copies the surface (~2 ms) and encodes the copy: PNG with agemu's parallel encoder (`AGPNG.c`: the image is cut into 12 bands that are filtered and deflated on separate cores at zlib level 1, then joined into one valid zlib stream, as pigz does), JPEG with Core Image's encoder (~7 ms for 1206×2622 vs ~10 ms with ImageIO; its distance to the lossless frame, mean abs. difference 0.30, matches simctl's own JPEG at 0.29; `AGEMU_IOS_JPEG=imageio` selects ImageIO). Core Image is warmed up when the helper starts. |
-| tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, and waits up to 3 s for a disabled element to become enabled. On a still screen the tap then keeps the helper's settle, which returns at once unless a transition started during the tree read. An element confirmed at rest by its repeating frame is tapped at once, since a second settle on a screen that keeps changing would only time out. `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
+| tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, and waits up to 3 s for a disabled element to become enabled. On a still screen the tap then keeps the helper's settle, which returns at once unless a transition started during the tree read. An element confirmed at rest by its repeating frame is tapped at once, since a second settle on a screen that keeps changing would only time out. **An element that is new since the last input** (an alert's button, a sheet's) is tapped only once its presentation has finished; see "Taps on just-presented UI". `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
 | type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (the helper's pasteboard connection, then Cmd-V; see "Test capabilities"): the app gets the whole text in one change, as with Android's set-text path. The pasteboard's previous content (every item and type) is saved before and put back after, so typing does not change what the app or `agemu clipboard` sees. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is checked against the focused text field's text and repeated once if it did not arrive. Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
-| key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
+| key | — | `home` and `lock` are the hardware buttons (`home` returns once SpringBoard has acted on the press, see "The home button"); `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. `launch` takes process arguments and `--relaunch` (`agemu launch <bundle> --relaunch -- --initialUrl http://127.0.0.1:8081` opens an Expo development client on its Metro), and the MCP tool also takes an environment. |
 | boot | `simctl boot` + `simctl bootstatus -b` | `-[SimDevice bootWithOptions:]` (persisted, headless), then agemu returns once the **home screen is drawn**: CoreSimulator's boot status is "finished" (what `bootstatus` waits for), the framebuffer is readable, the HID client is connected and SpringBoard's accessibility tree answers (see "Cold boot"; `AGEMU_IOS_BOOT_WAIT_AX=0` returns before the last step). A device that is already booted is ready in milliseconds, and agemu keeps devices booted (see below). |
@@ -148,6 +148,113 @@ So on iPad the helper:
 iPhones skip steps 2-4. `reset` waits for SpringBoard on iPad as on iPhone; the old iPad
 exception (accept a frontmost `...ViewService` once the screen was still) is gone.
 
+### Taps on just-presented UI
+
+**Why UIKit drops these taps.** A presentation (an alert, an action sheet, a sheet) makes the
+presenting window scene ignore interaction events until the presentation completes:
+`-[UIWindowScene _beginIgnoringInteractionEventsForReason:]` with "beginning transition for
+presentation", then `_endIgnoringInteractionEventsForReason:` with "completing transition". A
+touch in between never reaches `-[UIApplication sendEvent:]`. This was seen with a probe app
+(`TapLab`, iOS 26.5) that swizzles those methods and `sendEvent:`, taps through the helper with no
+wait at a fixed delay after opening the alert, and traces every frame: every touch sent before
+the completion was absent from the app's log, every touch after it arrived. The deprecated
+`UIApplication.isIgnoringInteractionEvents` stays false throughout. The UIKit action sheet logs
+no scene-ignore, but touches before its presentation completion were dropped the same way (taps
+100 and 200 ms after opening it: 6 of 6 lost; 300 and 400 ms: 6 of 6 landed).
+
+**Why agemu's waits did not cover it.** Measured from the moment UIKit began ignoring touches
+(the action sheet: from its action), with the tap long after (load average 14-67; alerts n=22-23,
+sheets n=22, action sheets n=21):
+
+| | SwiftUI alert | UIKit alert | UIKit action sheet | SwiftUI sheet |
+|---|---|---|---|---|
+| first big frame shows | 41-104 ms later (median 49) | 42-114 (51) | 33-93 (46) | 32-146 (39) |
+| touches accepted again (completion) | 423-460 ms (435) | 425-456 (429) | 231-260 (243) | 510-535 (525) |
+| "no big change for 48 ms" (the old settle), relative to the completion | 69-80 ms after | 8-75 ms after | 106-150 ms **before** in 21 of 21 | up to 34 ms **before** in 19 of 22 |
+
+- The new UI is in the accessibility tree as soon as the presentation begins, before its first
+  frame. `tap ... --wait-text "<alert text>"` returns at that point, and the next `tap --text OK`
+  found the screen still, so it tapped at once (15-36 ms for the call) and the touch was dropped.
+  Through an instrumented helper (UIKit alert, 8 tries), the one lost touch went out 51 ms after
+  the app's action; the 7 delivered ones went out 23-82 ms after the completion.
+- A sheet's tail and an action sheet's whole slide change too little of the screen to count as
+  a big change, so the settle also ended inside the presentation (last row of the table).
+- An alert's or a sheet's last visible change came 20-33 ms after the completion (18 traces). An
+  action sheet's glass kept changing for 243-258 ms after it (2 traces).
+
+**What a tap by selector does now.** The iOS backend remembers which elements the UI tree held
+before the last input agemu sent (a tap, swipe, key, typing, launch, URL). An element that was
+not there (or moved) is *new*: the agent can only have seen it after that input, so it may still
+be presenting. For a new element the helper waits, before its usual settle:
+
+1. if neither the element's frame nor the screen (a big change) has changed since the last input,
+   until one of them does (at most 500 ms): the presentation has begun but not drawn yet;
+2. until nothing in the element's column (its x range over the screen's full height) has changed
+   for 48 ms and the screen has had no big change for 48 ms. The column catches an action sheet
+   that slides in below the button while the button's own frame still shows the dimmed background.
+   Once the screen is still, the column may keep changing for at most 300 ms more (a spinner or
+   a video in the column never stops); the whole wait is at most 1.5 s. At normal speed an
+   action sheet's column never went quiet: 40 of its 50 measured waits ended on this 300 ms tail
+   (372-426 ms in all), not by seeing it ready, which left roughly 150-200 ms after the
+   completion. For an element as wide as the screen (a list row) the column is the whole
+   screen, so any small continuous change anywhere (a spinner, a video, a loading cell) holds a
+   new element's tap for the 300 ms tail; on a screen that never goes still, with an element
+   the daemon saw moving, the wait can reach 1.5 s before the usual settle.
+
+What counts as new is the element's role, label, id and frame. A presentation that shows a
+button identical to one in the read before the last input (a second alert with "OK" at the same
+place, two permission alerts of the same size in a row) is not new and gets no wait; every
+measured try opened one presentation from a screen without one, so that case is untested.
+Neither were taps on new elements after a push navigation, the most common agent step, nor the
+cost of the wait for a new element on a still screen (the still-screen rows below measured
+elements the agent had already seen).
+
+Every change counts here, not only big ones: the display monitor keeps, for a 96×208 grid of
+pixels, when each sample last changed, so "has this column changed in the last 48 ms?" is
+answered without waiting, and an element the agent could already see is tapped exactly as before.
+That grid costs the helper about 0.5% of a core while the screen changes at 60 frames/s
+(0.35-0.38 against 0.20-0.22 CPU-s per 30 s, 3 windows each, both helpers watching the same
+simulator) and nothing on a still screen. A tap at coordinates is unchanged.
+`AGEMU_IOS_TAP_SETTLE=0` turns this wait off with the settle.
+
+The daemon log names each tap that waited, e.g. `ios tap on <udid>: button "OK" was new; waited
+499 ms for it (nothing shown yet: true, still changing: false)`.
+
+Results: see "Lost taps on just-presented UI (round 4)" under Benchmarks.
+
+**No retry.** A tap is never repeated. A touch UIKit dropped and a touch on a control that shows
+nothing when it acts look the same from outside: TapLab's "silent" button (no highlight, its
+action shows only 2 s later) showed no change in its frame within 500 ms of a delivered tap in
+20 of 20 taps, so a "no visual response, tap again" rule would have activated it twice each
+time. `tap --id silent` through agemu activated it exactly once in 20 of 20.
+
+### The home button
+
+The simulator's HID sender has no press-count or terminal-press support, so SpringBoard emulates
+the double-press detection (its log: "appears to be synthesizing home button events without press
+count/terminal support; SpringBoard is providing emulation for max count:2"). It acts on a single
+press only once no second press has come: 305-323 ms after the button-up in 16 presses (8 on the
+home screen, 8 with Settings in front; load average 125-218). `agemu key home` used to return in
+5-207 ms, before that; an app launched in between came to the front and was then sent to the
+background by the press.
+
+`key home` now returns once SpringBoard has acted on the press: with an app in front, once
+accessibility reports SpringBoard in front; in any case not before 650 ms after the press (twice
+the longest delay measured); then once the screen has had no big change for 48 ms. Reset no longer
+presses home when SpringBoard is already in front (see "Soft reset").
+
+Costs and limits:
+- `key home` takes 0.66-1.3 s instead of 5-23 ms, for every caller, although an agent that
+  leaves seconds between calls never met the race.
+- `key home` can now fail: when accessibility does not report SpringBoard in front within 15 s
+  after the press (before, the key was fire-and-forget).
+- The 650 ms count from just before the press is handed to the helper: a press that takes over
+  about 330 ms to reach the simulator (extreme host load) can still be acted on after the call
+  returned.
+- Since reset skips the press when SpringBoard is in front, SpringBoard's own state survives a
+  reset: the home-screen page, an open folder, Spotlight. Notification Center, Control Center
+  and the lock screen were not checked, nor iPad.
+
 ## Fast boot and reset
 
 There are no snapshots for iOS Simulators: a cold boot costs what CoreSimulator and iOS take,
@@ -226,13 +333,15 @@ cleans the running device instead:
    (contacts for Maps, calendar and microphone for Health, a camera revoke for Health: 4 rows)
    were reset and the baseline's `kTCCServiceLiverpool` rows kept; Maps' location authorization
    was reset too,
-4. presses home, waits until accessibility reports SpringBoard (`com.apple.springboard`) as the
-   frontmost app (on iPad too, found by the hit test above), then until the screen has been
-   still for 300 ms. The screen moves for ~1.3 s
-   after the press; an app launched sooner (the old fixed 300 ms) sometimes started in the
-   background, or failed to launch while a terminated process was still exiting. `launch` also
-   retries a "failed to launch" twice (after 0.3 s and 0.7 s) when the app is installed.
-   10 of 10 reset-then-launch rounds brought Settings to the front.
+4. checks that accessibility reports SpringBoard (`com.apple.springboard`) as the frontmost app
+   (on iPad too, found by the hit test above); only when it does not, presses home and waits
+   for it (see "The home button"). Then it waits until the screen has been still for 300 ms (at
+   most 2 s): an app launched while a terminated process was still exiting failed to launch.
+   `launch` also retries a "failed to launch" twice (after 0.3 s and 0.7 s) when the app is
+   installed. Reset used to press home with SpringBoard already in front; SpringBoard acts on
+   that press about 0.3 s later, and an app launched in between went to the background (see
+   "The home button" for the measurements). SpringBoard's own state (the home screen page, an
+   open folder, Spotlight) is no longer touched by reset.
 
 The daemon log has each phase, e.g. `ios reset <udid>: 1736 ms (app lists 1, terminate 25 apps
 31, uninstall [] 0, appearance/location/pasteboard/privacy 40, simctl keychain done at 158, home
@@ -380,6 +489,179 @@ that failed in earlier runs (content-available delivery, and a running app losin
 - **apps / uninstall**: name and version come from the Info.plist; built-in apps are refused
   (`... is a built-in (system) app`), as is an app that is not installed.
 
+## Logs and crashes
+
+`logs`, `crashes` and the crash notice of [CAPABILITIES.md](CAPABILITIES.md#logs-and-crashes)
+(`internal/ios/logs.go`, `crashes.go`, `procwatch_darwin.go`). The Simulator's processes log to
+the simulator's own unified log, which the Mac's `log` does not show, and its apps are Mac
+processes, which the daemon can watch directly.
+
+| Need | Mechanism |
+|---|---|
+| log lines | one `simctl spawn <udid> log stream --style ndjson --level info` per booted simulator, for the whole device, read line by line into two rings of 2 MiB (by `LogEntry.Size`): user apps' processes, and everything else. It starts when an app is installed or launched through agemu, or at the first `logs` call, and runs until the device shuts down or the daemon exits. A `logs` call reads the rings: nothing runs on the device per call. |
+| stopping it | the stream runs inside the simulator; simctl only relays it. A relay killed with SIGKILL left the simulator's `log` process running in 1 of 2 checks, and 19 such leftovers of an earlier build (from daemon restarts) used about 1.6% of a core each. agemu stops the relay with SIGTERM, which simctl passes on (SIGKILL after 2 s), and marks its stream with `--timeout <1000000 + daemon pid>m` (a valid timeout of about two years): a capture start ends the marked streams on the device whose daemon is gone, or that its own daemon no longer reads. Checked: after the daemon was stopped with SIGTERM (3) or SIGKILL (3), no stream was left in the device, and the next start ran exactly one. |
+| lines from before the stream | once per capture, `log show` of user apps' processes (and runningboardd's exit lines) from 30 s before the start to the stream's first line, put in front of the rings (at most 4 MiB kept). The unified log's store keeps default, error and fault lines, not info lines, so the window before `capturedFrom` stays `partial`. The stream delivered its first line 0.85-3.1 s after it was started (n=4, load average about 12), and once 11 s (load about 250); the backfill read took 1.3-4.3 s (14 starts) and held up to about 5300 lines. |
+| an app's lines | the executable is inside the app's bundle (`Containers/Bundle/Application/<UUID>/<App>.app/...`, extensions included); bundle ids come from the device's installed apps (built-in apps from CoreSimulator). Every install of the app seen during the capture counts, so lines from before a reinstall (`clear-data`) stay the app's. |
+| the app ended | kqueue `EVFILT_PROC`/`NOTE_EXIT` on the pid agemu's launch returned (the exit time, within milliseconds); then runningboardd's line in the stream says how: `exited with context <RBSProcessExitContext\| ... domain:signal(2) code:SIGSEGV(11)>`, `voluntary` for `exit()`. Processes agemu did not launch (an app opened from its icon) are known from runningboardd's lines alone. |
+| why | the app's own last line: CoreFoundation's `*** Terminating app due to uncaught exception 'X', reason: 'Y'` with the first throw call stack, or the Swift runtime's `App.swift:399: Fatal error: message`. |
+| the full report | the `.ips` the Mac's ReportCrash writes to `~/Library/Logs/DiagnosticReports` (bug type 309): only reports whose `procPath` is in this device, parsed once, never deleted. Frames are the faulting thread's (an uncaught NSException: its `lastExceptionBacktrace`), symbolicated and demangled. |
+
+How an end is reported (`kind`, `exception` until the `.ips` adds more):
+
+| runningboardd's exit context, or the app's last line | kind | exception |
+|---|---|---|
+| uncaught NSException (the app's line) | crash | its name; reason and frames from the line |
+| Swift runtime error (the app's line) | crash | `Fatal error` (or `Precondition failed`); reason: the message and `file:line` |
+| `signal` SIGSEGV, SIGABRT, SIGTRAP, SIGBUS, ... | crash | the signal; with the `.ips`: `EXC_BAD_ACCESS (SIGSEGV)` and its subtype (`KERN_INVALID_ADDRESS at 0x10`) |
+| `signal` SIGKILL, SIGTERM | killed | the signal |
+| `frontboard` 0x8badf00d | killed | `watchdog (0x8badf00d)` |
+| other domains | killed | domain and code |
+| `voluntary` | exited | - (reason: it exited on its own) |
+| an exit seen by kqueue before runningboardd's line | exited | - (upgraded when the line comes) |
+| `frontboard` force-quit 0xfbfbfbfb (agemu's terminate and relaunch, `simctl terminate`, a quit in the app switcher), `tcc` (a privacy permission change) | not reported | |
+
+Exits agemu causes are not reported: an exit of the app's processes from the start of
+`terminate`, a relaunch, `install` (over a running instance: runningboardd reports `runningboard`
+code 0), `uninstall`, `clear-data`, `permission` or `reset` until 5 s after the call returned,
+except processes agemu launched after the call began (the one a relaunch starts, or an app
+launched right after an install that crashes at once), and except any end with crash evidence: a
+signal other than SIGKILL or SIGTERM, the app's own uncaught-exception or Swift-error line, or an
+`.ips` for the process. The exits agemu's calls were seen to cause carry none (a force quit,
+runningboard code 0, tcc), so an app that crashes while agemu changes a permission, or that is
+opened by a link right after an install and crashes, is reported. (An earlier build ignored how
+the process ended inside that window, and hid such crashes, the `.ips` included; a unit test
+now crashes a process launched before a `permission` call inside its window.) An exit kqueue
+sees before runningboardd's line still counts as agemu's until the line comes, so such a crash
+is told by the next call. Right after an exit, the watcher waits up to 150 ms for runningboardd's
+line, so the first notice already says how the app ended. runningboardd's lines are believed
+only from the system's runningboardd (not from an executable of that name in an app bundle).
+
+**Crash to agemu's report** (`internal/ios`, test app on agemu-r4logs, iPhone 17 Pro, iOS 26.5;
+each trial launches the app through agemu with `-crash <kind>`, then `wait`s for an element that
+never appears, timeout 15 s, over the daemon socket; the app writes the time just before it
+crashes; 10 rounds, kinds interleaved; load average 26-65). These ran on an earlier build of the
+capture (a 2-minute backfill of the whole device), with 0-19 in-simulator log streams that
+earlier daemon restarts had left running; the final build was checked by a smoke run (below), not
+re-measured:
+
+| kind | the wait ended after the crash (median, range, n) | the error and notice carried |
+|---|---|---|
+| uncaught NSException | 178 ms (78-328, n=10) | `NSInvalidArgumentException`, its reason, 3 frames (the notice's limit; `crashes` has 4-6 from the log line) |
+| Swift `fatalError` | 195 ms (58-454, n=10) | `Fatal error`, `agemu probe fatalError (AgemuTestApp/App.swift:399)` |
+| bad memory access | 215 ms (74-319, n=10) | `SIGSEGV` |
+| `abort()` | 201 ms (151-403, n=10) | `SIGABRT` |
+| `exit(0)` | 193 ms (79-791, n=10) | `exited` |
+| SIGKILL from outside | 186 ms (79-507, n=10) | `killed`, `SIGKILL` |
+
+60 of 60 waits failed at once with code `app_crashed` (CLI exit 4), all within 791 ms. The same
+trials on a daemon without the iOS watcher (the logs skeleton build; run separately about 70
+minutes later, not interleaved): 10 of 10 waits (NSException and bad access, 5 each) ran to their
+15 s timeout, 11.3-12.0 s after the crash, with `timeout after 15s waiting for
+{"id":"never-there"} to appear`; a wait for an element that never appears always times out, so
+that arm only shows what an agent learned without the watcher. The latency includes the wait's
+own polling (it re-reads the UI tree between checks). The watcher's own cost per call:
+`AppState` 0.49 µs (474.6-501.6 ns, 5 runs of `BenchmarkAppState`, no allocations).
+
+For an NSException, the notice's 3 frames are the exception machinery's (`__exceptionPreprocess`,
+`objc_exception_throw`, `-[NSException init]`); the app's own frame is the 4th, in `crashes`,
+with its Swift name mangled. Signal and Swift crashes carry no frames in the notice.
+
+**The .ips comes later, and not always.** ReportCrash wrote 19 of the 40 crashes' reports, 1.7 to
+42.9 s after the crash (median 10.4 s: NSException 14.8 s, fatalError 10.4 s, bad access 7.0 s,
+abort 4.9 s; the 42.9 s was an NSException); outside these runs, four earlier reports came
+74-131 s after their crash (load average 14-135). Then it stopped: the Mac's
+`osanalyticshelper` logged `Saved type '309' report (25 of max 25)` for the test app and wrote
+none of its next 21 crash reports that day. So frames of a signal crash or a Swift runtime error
+come only with the `.ips`: for 13 of 30 such crashes, 1.7-17.5 s later, and for the other 17
+never; the crash itself is still reported at once. An NSException's name, reason and first throw call
+stack come from the app's own line (the unified log cuts that message at about 1 KB, so 4-6
+frames, Swift names mangled).
+
+**Reading logs** (12 rounds, arms interleaved; each round logs one line per level and every read
+must contain it; load ~15; the same earlier build): `logs dev.agemu.testapp --since 1m` over the
+daemon socket 1.11 ms (median; 0.79-19.9, n=12; 0.79 ms in the daemon), through the CLI 8.84 ms
+(6.1-47.0, n=12), against `xcrun simctl spawn <udid> log show --last 1m --predicate 'process ==
+"AgemuTestApp"'` 961 ms (885-1604, n=12). 12 of 12 reads found the line in every arm. The
+workloads differ: agemu returned at most 200 lines (the default limit) and filters by the app's
+bundle, `log show` a median 648 lines by process name; process start-up dominates its time.
+
+**Completeness**: the app logged 1000 numbered lines as fast as it could (38-74 ms): agemu held
+1000 of 1000, 5 of 5 bursts (the store too), and 12 of 12 more in the fidelity runs below.
+Bursts of 10,000 lines (414-488 ms): all 10,000 held, 3 of 3 (a 1 MiB `logs` result returned the
+newest 8456 and counted 1544 as omitted).
+
+**Cost** (capture on: the daemon as shipped, its stream running; off: a daemon with
+`AGEMU_IOS_LOG_CAPTURE=0`; the test app in front, relaunched for each 30 s window; arms ABBA,
+4 windows each; `.lab/meter.py` on the simulator's processes, which include the stream's `log`
+process, and on the daemon's, which include the helper and the stream's simctl relay; load
+average 8-24):
+
+| | simulator CPU, off / on | daemon CPU, off / on | daemon memory, off / on | simulator memory, off / on |
+|---|---|---|---|---|
+| app idle (6-37 lines/s on the device) | 8.2% / 7.5% of a core (ranges 7.0-15.6 / 6.4-9.3) | 0.0% / 0.0% (0-0.2) | 20.1 / 35.1 MB | 1547 / 1555 MB (ranges overlap) |
+| app logging 200 lines/s (208-289 lines/s on the device) | 11.3% / 14.6% (10.8-18.1 / 13.0-21.9) | 0.0% / 0.8% (0.7-1.0) | 20.1 / 41.8 MB | 1556 / 1571 MB (ranges overlap) |
+
+So at idle the capture costs no measurable CPU and about 15 MB in the daemon's processes (the
+relay 8.5 MB; `agemud` itself 7.5 MB without the stream, 18-27 MB with it while the app logged 200
+lines/s, n=6 samples each). While the app logs 200 lines/s it costs about 4% of a core (3.3 points
+in the simulator, where the stream's `log` process formats every line as JSON, 0.8 in the daemon,
+which parses them: 3.8 µs per 1.4 KB line in `BenchmarkIngest`) and about 22 MB in the daemon's
+processes. A read of the app's lines out of 20,000 held: 0.50-0.57 ms (`BenchmarkQueryApp`).
+The thesis' limit was 1% of a core: at 200 lines/s the capture is above it.
+
+Starting the capture is not free either: the first launch or install after a boot (or a daemon
+start) waits while agemu lists the Mac's processes (`ps`, about 30 ms here, to end streams nobody
+reads) and starts simctl, and an install first reads the bundle id with `plutil`. The one-time
+backfill (`log show`, 1.3-4.3 s) runs inside the simulator during the app's first seconds; its
+effect on the app's start-up was not measured.
+
+**Fidelity**:
+- The app's own logging is slower while the stream runs: 1000 lines took 29.2 ms (27.4-33.9)
+  with capture on and 24.3 ms (21.6-34.1) with it off: 4 ABBA windows per arm of 3 bursts each
+  (the bursts within a window are not independent); all 4 "on" window medians (28.96-29.42 ms)
+  are above all 4 "off" ones (22.13-25.67 ms). Two earlier ABBA sets showed no difference (59
+  against 64 ms, 100 against 96 ms); they were set aside because their "off" windows also had
+  streams that earlier daemons had left in the simulator (see "stopping it"), a plausible but
+  untested explanation, so one more clean set would make the result firm.
+- A line at each level (`Logger` debug, info, notice, warning, error, critical; `os_log`
+  default; `NSLog`; `print`; a three-line message): info and notice read as `info`, warning and
+  error as `error`, critical as `fatal`, `NSLog` is tagged `Foundation`, the multi-line message is
+  one entry; debug and `print()` lines are not captured.
+- The app's `os_log_type_enabled(.debug)` reads false with agemu's capture running, as without
+  it; with a `log stream --level debug` on the device it read true, also in an app already
+  running (and false again once that stream ended). That is why agemu streams at info level.
+- On the Simulator, FrontBoard gives a launching app 599.82 s before its scene-create watchdog
+  fires (its log: `Made scene-create policy ... timeValue: 599.82s`): a launch whose main thread
+  hung 25 s was not killed (its screen showed after 26.6 s; no crash, no notice). Jetsam was not
+  tried (the Mac's memory would run out first).
+- `crashes` reads the Mac's reports; ReportCrash, not agemu, decides whether one is written.
+
+**Device checks** (`.lab` smoke script through the CLI on agemu-r4logs, the same commands as the
+block added to `scripts/e2e-ios.sh`, plus `--app`, cursors, the exits agemu causes, reset and a
+reboot): 40 of 40 on the final build. Two earlier runs failed checks that led to fixes: an install
+over the running app was reported as `killed` (`runningboard 0`), and a crash 4 s after an
+install was hidden by the install's 5 s window; one check read too few lines. Covered: each level,
+`--app` holds only the app's processes, a cursor returns only newer lines, `since launch` holds the
+startup line, the crash fails the wait with exit 4 at once and `crashes` has the exception and the
+app's frame, the next call carries no second notice, relaunch / terminate / permission revoke /
+clear-data / permission reset give no notice, reset empties `logs` (no app line) and `crashes`,
+and after shutdown and boot the capture restarts (startup line held), an old cursor is partial and
+a crash is noticed.
+
+**Merged build** (agemu-iphone-17-pro, iOS 26.5, through the CLI; load average 20-67):
+`scripts/e2e-ios.sh` passed 125 of 127 checks; its logs and crash checks all passed, and the two
+failures were one event, a double paste in Settings' search field (see "Running"). Smoke:
+- `wait` for a missing element after `launch -- -crash <kind> -crash-delay-ms 1500`: exit 4
+  9 of 9, 145.5 ms (NSException), 131.9 ms (`fatalError`), 114.3 ms (bad access) after the
+  app's own crash time (medians, n=3 each, load 60-67).
+- A crash inside agemu's own call window: the app launched through agemu with a bad access 2.5 s
+  later, and 1 s after the launch `permission grant <app> location` (iOS kept the app running;
+  a camera grant ends it, `tcc`, before it can crash). The merged build reported 3 of 4: the
+  next call carried the note and `crashes` listed the SIGSEGV; in the fourth (the first trial
+  after a daemon restart) no exit of the app had been seen when it was checked 4 s later. The
+  same build without the crash-evidence rule, alternated with it: 0 of 3, although each of those
+  trials logged runningboardd's `signal ... SIGSEGV(11)` exit.
+
 ## Lean simulators
 
 A booted iOS 26.5 simulator runs the whole iOS userland. Measured headless on
@@ -479,7 +761,8 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    certificate (as a proxy's CA profile has), downloaded in Safari and installed in Settings at
    +65..83 s, installed in all 7. A second one was installed later in 6 of them (in the 7th it was
    not downloaded: Safari, launched right after `agemu key home`, was sent to the background about
-   1 s later by SpringBoard's emulated home press, a known race of the home key). In 2 boots its
+   1 s later by SpringBoard's emulated home press, a race of the home key fixed since, see "The
+   home button"). In 2 boots its
    final Install was tapped 0.9 s before the pass that stopped the subscribers, and the install
    finished. All 13 of these installs were in the device's profile store afterwards. No
    subscriber was running during the early installs (they start at +131..202 s), and in the
@@ -728,8 +1011,8 @@ the last frame change of any size, they are 3.6x (SwiftUI), 6.5x (UIKit) and 2.4
   With the app launched afresh before every alert, the same two calls lost no tap (0 of 5 at
   normal speed, at 0.1 and at 0.05): the loss depends on what came before (in the flow, a tab
   switch). A tap sent 48 ms after the alert was drawn at rest was lost at normal speed in 5 of 6,
-  at 0.05 in 2 of 6 and at 0.1 in 7 of 8; 100 ms or more later, none was lost (0 of 26). Check
-  the effect of such a tap (`--wait-text`) and repeat it.
+  at 0.05 in 2 of 6 and at 0.1 in 7 of 8; 100 ms or more later, none was lost (0 of 26). (Round
+  4 found the cause and fixed it for taps by selector: see "Taps on just-presented UI".)
 - **Typing: not slower in a targeted probe** (n=3 per arm, load about 20): `type hello` right
   after focusing a field took 288, 293 and 1073 ms normally, 257-281 ms at 0.1 and 242-294 ms at
   0.05, and the blinking caret drew the same 11-13 frames per second in every arm. In the agent
@@ -804,6 +1087,74 @@ unrelated work the whole time (an Android emulator, browsers, other sessions' si
 load average 47-78 during this run, swap nearly full), so every number is noisy; each row
 compares the two tools under the same conditions. Rows with n=2 (cold boot, profile switch,
 reset) are the slower of two runs.
+
+### Lost taps on just-presented UI (round 4, 2026-11-07)
+
+TapLab (a probe app) on its own iPhone 17 Pro simulator, iOS 26.5, lean. Each try is what an
+agent does: `tap --id <opener> --wait-text <the new UI's text>`, then at once `tap --text
+<button>` (the call measured), then `wait` up to 3 s for the button's effect in the UI tree. A
+try counts as lost when the effect did not show; a lost tap was then tapped again (not counted).
+The two daemons (before: the round-3 build; now: this one) drove the same simulator, alternating
+try by try (ABBA), 50 tries each. Load average 10-32. The permission row resets the microphone
+grant and relaunches the app before every try.
+
+| just presented | lost before | lost now | tap call before, landed taps only (median, range) | tap call now |
+|---|---|---|---|---|
+| SwiftUI alert, OK | 38 / 50 | **0 / 50** | 495 ms (455-507), n=12 | 532 ms (496-1753) |
+| UIKit alert, Done | 34 / 50 | **0 / 50** | 490 ms (332-505), n=16 | 522 ms (489-545) |
+| UIKit action sheet, an action | 49 / 50 | **0 / 50** | 202 ms, n=1 | 507 ms (484-531) |
+| SwiftUI sheet, its close button | 39 / 50 | **0 / 50** | 605 ms (563-641), n=11 | 606 ms (498-639) |
+| system permission alert (SpringBoard), Allow | 26 / 50 | **0 / 50** | 512 ms (45-552), n=24 | 524 ms (398-596) |
+
+Before, every lost tap on the two alerts and the permission alert came from a call of 15-36 ms:
+the tap went out before the presentation had drawn. The sheet lost 24 taps that way (13-34 ms)
+and 15 after waiting 486-495 ms (the settle ended in its tail); the action sheet lost all 49
+after 48-95 ms (the settle ended after the dimming, while the sheet slid in). A lost tap costs an
+agent its wait timeout (10 s by default).
+
+The "before" column counts only the taps that landed. Against all of the round-3 build's tap
+calls (most returned in 15-95 ms and were lost), the wait adds about 420-510 ms per tap (medians:
+SwiftUI alert 21 -> 532 ms, UIKit alert 25 -> 522, action sheet 87 -> 507, permission alert
+36 -> 524). Against the landed ones it adds 1-37 ms, except the action sheet: 507 ms against its
+single landed tap's 202 ms (+305 ms), because its wait ends on the 300 ms tail (see above).
+
+With `AGEMU_IOS_ANIMATIONS=0` in both daemons (same method, load 14-113), lost before / now: the
+SwiftUI alert 10 / **0** of 50, the UIKit alert 21 / **0**, the action sheet 0 / 0, the sheet
+(whose speed the setting does not change) 35 / **0**, the permission alert 17 / **0** with
+SpringBoard still at normal speed (agemu applies the setting after a boot; SpringBoard reads it at
+its next start) and 3 / **0** after a second boot with SpringBoard fast too. The tap calls took
+-3 to +20 ms more than the landed ones before (medians: 164 against 159, 149 against 129, 139
+against 137, 598 against 597, 521 against 510, 132 against 135 ms).
+
+The home button, `launch com.apple.Preferences` right after the call (30 tries per row, ABBA,
+load 13-64); lost = Settings not in front 2 s later:
+
+| | lost before | lost now | the call before | the call now |
+|---|---|---|---|---|
+| `key home` with an app in front | 15 / 15 | **0 / 15** | 9 ms (6-19) | 1120 ms (1095-1301) |
+| `key home` on the home screen | 15 / 15 | **0 / 15** | 10 ms (5-23) | 664 ms (661-709) |
+| `reset` with the home screen in front (the e2e's case) | 29 / 30 | **0 / 30** | 161 ms (137-809) | 160 ms (129-455) |
+| `reset` with Settings in front | 0 / 30 | 0 / 30 | 1747 ms (1685-2073) | 1734 ms (1681-1903) |
+
+`key home` now takes as long as SpringBoard needs to act on the press. Reset is not slower. With
+`AGEMU_IOS_ANIMATIONS=0` (load 10-51) the same rows lost 15, 15, 30 and 1 before and 0, 0, 0 and
+0 now.
+
+Where nothing is presented, a tap by selector costs the same (30 per row, ABBA, load 14-24; a
+tap on a label that does nothing, 1 s after the screen was read): an element read before the
+last input 159 ms (36-247) before, 160 ms (47-312) now; a second row, meant as an element new
+since a relaunch of the app but long drawn, 153 ms (44-205) before, 155 ms (46-206) now. That
+second row did not test what it meant to: terminate and launch read no UI tree, so the read
+before the launch already held the label at the same place, and the tap took the path for an
+element the agent had seen. So both rows measure that path; the cost of the wait for a new
+element on a still screen rests on the code (step 1 ends at once when the screen has changed
+since the input, step 2 when the column has been still for 48 ms), not on a measurement. Most
+of each call is the tap's wait of up to 120 ms for a frame that shows it, which a label never
+draws.
+
+Merged build smoke (agemu-iphone-17-pro, the same TapLab steps through the CLI, 3 tries per
+kind, load 51-69): 15 of 15 taps landed (tap calls 478-617 ms); `key home` with TapLab in front
+took 1095-1131 ms and Settings launched right after was in front 2 s later 3 of 3 times.
 
 ### Final run (2026-11-06, commit eab26c6)
 
@@ -1096,6 +1447,13 @@ go test ./internal/ios/...      # unit tests (no simulator needed)
 
 The helper is found next to the `agemud` daemon binary, or at `$AGEMU_IOS_HELPER`. Its source is
 `ios-helper/` (`swift build -c release`).
+
+Known e2e flake: `type` pastes, then reads the focused field right away and 150 ms later, and
+pastes once more if the field has not changed (a paste can be lost). Under heavy host load the
+app can take longer than that to show the paste, and the text then appears twice (`Wallpaper
+Wallpaper` in Settings' search field, load average 203, one check of the 2026-11-07 run; the
+daemon log says "the focused field did not change; pasting again"). The heuristic is unchanged
+since before round 4.
 
 ## Credits
 

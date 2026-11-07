@@ -71,10 +71,22 @@ type frameStream struct {
 	idleTimer *time.Timer
 	// Arrival times of the latest posted frames, a ring (a seq-0 first frame is not one); the
 	// idle check judges the guest's recent frame rate by them.
-	postedAt  [recentPosts]time.Time
-	postedI   int // next slot of postedAt
+	postedAt [recentPosts]time.Time
+	postedI  int // next slot of postedAt
+	// posted counts the frames the guest posted and lastPost is when the latest one arrived (a
+	// seq-0 first frame is not one); selector taps judge whether the screen moves by them.
+	posted    uint64
+	lastPost  time.Time
 	capturing bool
 	closed    bool
+
+	// The screen an input started from (noteInput): the pixels of the copy that was current when
+	// it was sent (nil: unknown), and the input's time. After that input, get does not take a
+	// frame with the same pixels for its effect, for up to changeWait.
+	inputRef []byte
+	inputAt  time.Time
+	refN     uint64 // cacheN that refSame was computed for
+	refSame  bool
 }
 
 const (
@@ -82,6 +94,12 @@ const (
 	reactWindow    = 300 * time.Millisecond  // how long a screenshot waits for an input's first frame
 	settleCap      = 1500 * time.Millisecond // how long after an input a screenshot waits for the screen to settle
 	reopenWait     = time.Second             // how long a screenshot after an input waits for a reopened subscription's first message (130-150 ms; up to 0.9 s at load 70)
+	// changeWait bounds how long after an input a screenshot skips frames that show the screen
+	// from before it. The guest can post frames right after an input that do not show its
+	// effect yet (posted 31-190 ms after a tap or the back key in Settings, see docs/ANDROID.md);
+	// after changeWait the screenshot takes the unchanged screen (the input may have changed
+	// nothing).
+	changeWait = 500 * time.Millisecond
 	// A stream idle for longer than its idle time stays open while the guest posts fewer frames
 	// than one per idleQuiet: each frame costs the emulator a readback and agemud a copy, so a
 	// near-static screen (the status bar clock posts one a minute) costs almost nothing, and
@@ -219,6 +237,86 @@ func (fs *frameStream) invalidate() {
 	fs.mu.Unlock()
 }
 
+// screenNow returns the pixels of the copy when it is current (no newer frame was posted), else
+// nil. An input takes it before it is sent (see noteInput).
+func (fs *frameStream) screenNow() []byte {
+	if fs == nil {
+		return nil
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.healthy && fs.cache.Pix != nil && fs.cacheN == fs.notes {
+		return fs.cache.Pix
+	}
+	return nil
+}
+
+// noteInput records that an input marked at was sent from the screen ref (screenNow before it was
+// sent; nil: unknown). Copies are never written after they are made, so ref is kept as it is.
+func (fs *frameStream) noteInput(at time.Time, ref []byte) {
+	if fs == nil {
+		return
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.inputAt, fs.inputRef, fs.refN = at, ref, 0
+}
+
+// unchangedLocked reports whether the current copy shows the screen the input marked at was sent
+// from (pixel for pixel). The comparison (about 1 ms for a 1080x2424 frame) is done once per copy.
+func (fs *frameStream) unchangedLocked(at time.Time) bool {
+	if fs.inputRef == nil || !fs.inputAt.Equal(at) || fs.cache.Pix == nil {
+		return false
+	}
+	if fs.refN != fs.cacheN {
+		fs.refN, fs.refSame = fs.cacheN, bytes.Equal(fs.cache.Pix, fs.inputRef)
+	}
+	return fs.refSame
+}
+
+// posts returns how many frames the guest has posted and when the latest arrived; ok is false
+// while the subscription is not delivering (closed after idle, reopening, failed), when posts
+// cannot tell whether the screen changes. Frames posted before the current subscription opened
+// were not seen, so its opening counts as the latest frame until one arrives.
+func (fs *frameStream) posts() (n uint64, last time.Time, ok bool) {
+	if fs == nil {
+		return 0, time.Time{}, false
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	last = fs.lastPost
+	if fs.opened.After(last) {
+		last = fs.opened
+	}
+	return fs.posted, last, fs.healthy && fs.sub != nil
+}
+
+// nextPost waits until the guest has posted a frame after the n-th, at most max. It returns
+// early when the subscription stops delivering (posts then reports !ok).
+func (fs *frameStream) nextPost(ctx context.Context, n uint64, max time.Duration) {
+	if fs == nil {
+		return
+	}
+	t := time.NewTimer(max)
+	defer t.Stop()
+	for {
+		fs.mu.Lock()
+		if fs.posted > n || !fs.healthy || fs.closed {
+			fs.mu.Unlock()
+			return
+		}
+		ch := fs.changed
+		fs.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			return
+		case <-ch:
+		}
+	}
+}
+
 // signalLocked wakes everyone waiting for a state change.
 func (fs *frameStream) signalLocked() {
 	close(fs.changed)
@@ -297,6 +395,8 @@ func (fs *frameStream) onFrame(img *emupb.Image, gen uint64, first bool) {
 	} else {
 		fs.postedAt[fs.postedI] = fs.lastNote
 		fs.postedI = (fs.postedI + 1) % recentPosts
+		fs.posted++
+		fs.lastPost = fs.lastNote
 	}
 	fs.w, fs.h = w, h
 	if fs.timer == nil {
@@ -357,7 +457,10 @@ func (fs *frameStream) capture() {
 //   - After an input (lastInput), get waits until the guest has posted a frame generated after
 //     it, or until reactWindow has passed without one (the input changed nothing on screen);
 //     then until the display has settled and that frame is copied, at most settleCap after the
-//     input.
+//     input. A copy with the same pixels as the screen the input was sent from (noteInput) is
+//     not taken for its effect until changeWait after the input: the guest can post frames
+//     before the app has drawn the input's effect (in Settings, 11 of 13 screenshots right after
+//     the back key showed the old screen).
 //   - Otherwise the copy is returned when no newer frame was posted. When frames were posted
 //     after it, get waits for their copy, but returns false if they keep coming.
 //   - A subscription stopped after idle is reopened. Without a recent input this screenshot
@@ -371,6 +474,7 @@ func (fs *frameStream) get(ctx context.Context, lastInput time.Time) (frame, boo
 	fs.touch()
 	var quietDeadline time.Time
 	var quietNotes uint64
+	skipped := false // an unchanged frame was passed over (logged if the wait gives up)
 	for {
 		fs.mu.Lock()
 		now := time.Now()
@@ -400,13 +504,21 @@ func (fs *frameStream) get(ctx context.Context, lastInput time.Time) (frame, boo
 		}
 		current := fs.cache.Pix != nil && fs.cacheN == fs.notes
 		framesAfterInput := fs.lastGen.After(lastInput)
+		// A frame posted after the input that still shows the screen it was sent from is not its
+		// effect yet: wait for one that differs, up to changeWait after the input.
+		unchanged := current && framesAfterInput && sinceInput < changeWait && fs.unchangedLocked(lastInput)
 		var until time.Time
 		waitingFirst := false
 		switch {
-		case current && (framesAfterInput || sinceInput >= reactWindow):
+		case current && (framesAfterInput || sinceInput >= reactWindow) && !unchanged:
+			if skipped && fs.unchangedLocked(lastInput) {
+				logf("%s: screenshot: no frame differed from the screen before the input within %v; taking the unchanged screen", fs.name, changeWait)
+			}
 			f := fs.cache
 			fs.mu.Unlock()
 			return f, true
+		case unchanged:
+			until, skipped = lastInput.Add(changeWait), true
 		case !framesAfterInput && sinceInput < reactWindow:
 			until, waitingFirst = lastInput.Add(reactWindow), true
 		case framesAfterInput && sinceInput < settleCap:

@@ -57,7 +57,9 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | (unset) | `1`: the emulator saves the baseline's RAM LZ4-compressed (`ram.bin` about 41% of the raw size). `0`: always raw. Unset leaves the choice to the emulator, which can turn compression on by itself when the host has little free RAM. Applies when a baseline is taken; both formats load. See Caveats (Disk). |
 | `AGEMU_ANDROID_BOOT_LOAD` | `inplace` | `startup`: restore the baseline with `-snapshot` at emulator start. This corrupts guest memory on emulator 37.1 (see Guest restarts). |
 | `AGEMU_ANDROID_EMULATOR_FLAGS` | (none) | Extra emulator flags, e.g. `-show-kernel` to log the guest kernel console. Never pass `-feature`: the emulator deletes snapshots whose feature set differs. |
-| `AGEMU_ANDROID_TRACE` | `0` | `1`: log whether each screenshot came from the frame stream. |
+| `AGEMU_ANDROID_LOGS` | `1` | `0`: no log capture: `logs` and `crashes` answer that capture is off, and calls carry no crash notice. See Logs and crashes. |
+| `AGEMU_ANDROID_TAP_WAIT` | `1` | `0`: a tap by selector touches the element where the first tree read found it, without waiting for transitions or for it to stop moving (agemu before 2026-11-07). See Selector taps. |
+| `AGEMU_ANDROID_TRACE` | `0` | `1`: log whether each screenshot came from the frame stream, how long each selector tap waited, each crash record the log capture makes, and each answer of the app watcher. |
 
 ## How each operation works
 
@@ -66,13 +68,14 @@ Environment variables (read by the daemon):
 | boot | cold boot | `shutdown` parks the device in **standby**: the baseline snapshot is restored in place and the VM is paused. `boot` resumes it. When the device is powered off, `boot` starts the emulator with `-no-snapshot-load` and restores the baseline **in place** (gRPC `LoadSnapshot`) as soon as gRPC answers, then waits for the restored agent over TCP. |
 | reset | cold boot | gRPC `LoadSnapshot(agemu-baseline)` in the running emulator. The agent restored with the snapshot answers over TCP 30–110 ms later; agemu does not wait for adb. The active screen profile is re-applied. |
 | screenshot | `adb exec-out screencap -p` | The latest frame from a `streamScreenshot` subscription (MMAP transport), already in host memory: crop, resample, encode. Falls back to `getScreenshot` while the screen keeps changing. The subscription is closed after 30 s without calls if the screen is still posting frames then, and reopened by the next call. See Screenshots. |
-| tap / swipe | `adb shell input tap/swipe` | gRPC `sendTouch` on the emulator's virtio multitouch screen, the same device a finger would use. Returns once the touch is queued. |
+| tap / swipe | `adb shell input tap/swipe` | gRPC `sendTouch` on the emulator's virtio multitouch screen, the same device a finger would use. Returns once the touch is queued. A tap by selector first waits (bounded) until the element can take it: no window transition runs and it has stopped moving. See Selector taps. |
 | type | `adb shell input text` | The agent inserts the text at the cursor of the focused editable node with `AccessibilityNodeInfo.ACTION_SET_TEXT` (what UiAutomator and Appium `setText` do). Returns once the app's UI thread has applied it, so its TextWatchers and listeners have run. `\n` / `\t` become Enter / Tab keys. `type --keys` (MCP `keys: true`) sends one key event per character through the IME, like `input text`. With no focused editable node, `type` also falls back to keys. |
 | key | `adb shell input keyevent` | The agent injects the key through `IInputManager.injectInputEvent` (the call `input` makes) in async mode: it returns once InputManager has queued the down and up events, like a tap. Follow with `wait` or `ui` to see the effect. |
 | UI tree | `uiautomator dump` + reading the XML | The agent walks `AccessibilityNodeInfo` of every on-screen window, top-most first, over its warm UiAutomation connection, and returns compact JSON. The Go side maps it to `api.Element`. After a `launch`, the first tree read waits (up to 3 s) until the accessibility layer reports the launched app's window. |
 | launch | `am start -W` | The agent calls `IActivityTaskManager.startActivityAndWait`, the call `am start -W` makes, and returns when it does (the activity has drawn). The wait for the app's accessibility window moved to the next tree read. A launch less than 300 ms after a `key` waits until then (see Caveats), and the wait is bounded at 20 s. |
 | open, permission, clipboard, appearance, apps, uninstall, clear-data | `am start -d`, `pm grant/revoke`, `cmd uimode`, `pm list/uninstall/clear` | The agent makes the system service call behind the standard command, as the shell. See Test capabilities. |
 | location | `adb emu geo fix` | Emulator gRPC `SetGps`, the same GNSS fix `geo fix` sets. |
+| logs, crashes, the crash notice | `adb logcat -d`, `dumpsys dropbox`, `dumpsys activity exit-info` | One `logcat -B` stream per device (adb `exec:` service) into ring buffers in the daemon; crash records from the crash and events buffers as they are logged. See Logs and crashes. |
 
 ### Screenshots
 
@@ -91,6 +94,18 @@ milliseconds; a `getScreenshot` call costs 25–40 ms on this host.
   after that input, or 300 ms without one (the input changed nothing on screen), and until
   that frame has settled (at most 1.5 s after the input). While the screen keeps changing
   with no input of ours (an animation), it reads the framebuffer directly instead.
+- **The input's effect, not the old screen.** The guest can post frames right after an input
+  that still show the screen from before it (the app has not drawn its effect yet). For tap,
+  swipe, key and type, agemu keeps the copy that was current when the input was sent, and a
+  screenshot after it does not take a frame with the same pixels for the input's effect until
+  500 ms after the input; then it returns the unchanged screen (the input may have changed
+  nothing) and logs that. It does not cover every case: there is no reference when the copy was
+  not current as the input was sent (a frame posted but not copied yet, or the stream reopening
+  after idle), and a screenshot that falls back to a framebuffer read is not checked. In the
+  measurement (Agent-loop reliability) 5 of 120 screenshots still showed the old screen; 4 of
+  them returned in 41-135 ms with no log line, so the skip did not engage for them (cause not
+  diagnosed). The skip also makes screenshots right after an input slower (Settings back 91 ->
+  381 ms, dialog open 334 -> 809 ms, medians).
 - **Snapshot loads** (reset, standby, resume) drop the copy: the display is restored without
   a new frame being posted.
 - **Idle stop.** The stream costs nothing while the screen is static, but every frame the
@@ -130,6 +145,55 @@ milliseconds; a `getScreenshot` call costs 25–40 ms on this host.
   byte-identical, 2 inconclusive (a frame was posted between the two reads), 0 stale. A
   streamed frame of a static screen was byte-identical to `getScreenshot` (0 of 10,471,680
   bytes differ). Right after `reset`, the screenshot shows the restored home screen.
+
+### Selector taps
+
+A tap by selector (`tap --text/--id/...`) reads the UI tree and touches the element's centre.
+On an element that has just appeared or is still moving, that touch often does not do what the
+agent asked (measured in Agent-loop reliability): a closing dialog takes every touch until its
+exit animation ends, a touch on a scrolling list stops the scroll instead of clicking the row,
+and the runtime permission dialog's buttons are first reported where the dialog's window comes
+from. So before the touch, like Playwright's actionability checks:
+
+1. **Still screen.** When the guest has posted no frame for 500 ms (the frame stream sees every
+   posted frame), the usual tree read is used as it is, and the touch goes out at once.
+2. **Window transitions.** Otherwise the agent waits until WindowManager runs no window
+   animation or transition and has synced its input windows (`IWindowManager.syncInputTransactions(true)`,
+   which UiAutomation also waits for before an injected event since API 33), at most 2 s.
+3. **At rest.** Then the element is read again, from the app rather than from the accessibility
+   cache (the cache keeps a node's bounds until an event about it arrives; a scrolling list
+   sends one at most every 100 ms), until the screen has posted no frame for 50 ms around a read,
+   or the element's frame stayed the same across posted frames (something else animates, such
+   as the previous tap's ripple). When step 2 waited for a transition (80 ms or more), the frame
+   must stay the same for 600 ms instead: after a window transition the UI tree kept a
+   permission dialog's buttons at their slide-in position for up to 435 ms while the screen
+   still changed. Then a second check for a transition (a dismissed dialog leaves the UI tree
+   before its exit animation starts). At most 1.5 s for the element, 2 s per transition wait.
+
+When a wait gives up, agemu logs it and taps the latest read, as before. An element that
+disappears while it moves is an error (`... (it disappeared while it was moving)`, no tap),
+where agemu before this change would have tapped. The touch itself is the same `sendTouch` down
+and up, but it reaches the app later: right after the screen moved, a tap now waits a median
+72-821 ms more (see Agent-loop reliability). The waits add up to about 5 s at worst (a first
+transition check under 80 ms, 1.5 s for the element, a second transition wait of up to 2 s,
+then 1.5 s more). Taps by coordinates do not wait.
+
+Limits and costs:
+- Every result was measured with the selector tap sent the moment the previous call returned
+  (no agent think time). An LLM agent usually waits a second or more between calls, longer than
+  these 150-1000 ms animations; both the failures and the added wait are expected to shrink
+  then, but that was not measured.
+- While the screen moves, each read after the first clears the accessibility cache, so the app's
+  UI thread serializes its whole node tree for every read (13-56 ms each in the traces), several
+  times per tap, during its animation. The effect on the app's frame timing was not measured; a
+  large Compose tree could make each read much slower.
+- A slow read (a hung UI thread) is not cut at the 1.5 s bound: the deadline is checked between
+  reads.
+- There is no per-call way to tap during a transition (Playwright's `force`); only the
+  daemon-wide `AGEMU_ANDROID_TAP_WAIT=0` turns the waits off.
+- The waits use agent commands (`settle`, `clearcache`) of the agent built with this change; on
+  an AVD whose baseline holds an older agent, every reset restarts the agent until the baseline
+  is retaken (agemu does that on the first boot with the new build).
 
 ### Agent transport
 
@@ -758,6 +822,318 @@ Fidelity, as the probe app showed it:
   reading the guest's). The other direction (guest to Mac) is reported checked, but no log of it
   was kept; the emulator does keep a copy of the guest's clip.
 
+### Agent-loop reliability (2026-11-07)
+
+How often does a tap by selector, or a screenshot, right after the screen changed do the wrong
+thing, and what does the fix (Selector taps; "The input's effect" in Screenshots) cost? Measured
+on agemu-lab (pixel-9 profile, host GPU, animations on) through the daemon socket, as `agemu mcp`
+uses it. Each try is checked through the UI tree: a probe app (TapRace: a dialog, a bottom sheet
+sliding up over 250 ms, a 100-row list with "Jump down" smooth-scrolling to row 40, a camera
+permission request, and filler buttons so that a misplaced tap is logged) shows the last click as
+"last: <target> #<count>". The step that makes the target appear is an action with a wait for the
+target (`tap X --wait-text Y`) from a still screen; the selector tap on the target follows at
+once (0 ms between the calls in every try: no agent think time). Accepted build against this
+one, alternating (A B, B A, ...), 5 rounds, n = 50 per arm (25 for the scenarios marked *),
+load average 13-85 at the starts of the blocks (per-scenario medians 17-35). Load was not
+balanced: the arm with the wait ran at higher load in 4 of 5 blocks. Shared host, another
+session's emulator and simulators running.
+
+| scenario: tap at once after | accepted build: failed | with the wait: failed | tap call, median: accepted / with the wait |
+|---|---|---|---|
+| "Open dialog", the moment the closing dialog left the UI tree | 48/50 (44 lost, 4 not found) | 0/50 | 7.8 / 311 ms |
+| row 42, as it first shows during a smooth scroll | 37/50 lost | 5/50 lost | 4.3 / 224 ms |
+| the permission dialog's "Don't allow" | 20/50 lost | 0/50 | 3.9 / 76 ms |
+| "Sheet two" in the sheet sliding up | 2/49 (1 lost, 1 wrong) | 0/50 | 5.0 / 247 ms |
+| a dialog's "Confirm" * | 0/25 | 0/25 | 3.9 / 825 ms |
+| row 3, right after the list screen opened * | 0/25 | 0/25 | 3.4 / 451 ms |
+| Settings "Internet", right after Network & internet opened * | 0/25 | 1/25 (the next screen did not show in 3 s, load 72) | 7.4 / 421 ms |
+| a still button 1 s after the previous tap (its ripple still running) | 0/50 | 0/50 | 4.0 / 98 ms |
+| a still button on a screen unchanged for 1.5 s | 0/50 | 0/50 | 4.5 / 4.6 ms |
+
+- An earlier series with the accepted build alone (n = 50 each, load medians 18-47): 50/50,
+  48/50, 16/50 and 0/50 failed in the first four rows, 0/50 in the dialog, list-open, Settings
+  and "1 s after the previous tap" rows. Screenshots: 13 of 52 showed the old screen (Settings
+  back 11/13).
+- Over the four rows that failed with the accepted build: 107/199 -> 5/200. The sheet's 2/49 is
+  not significant on its own (0/50 in the earlier series); the pooled figure rests mostly on the
+  dialog-reopen, list and permission rows. Over all nine rows: 107/374 -> 6/375.
+- The 5 remaining list failures were all the first try of a block, the first scroll of a list
+  screen just opened: the tap went to the row's resting place (y = 615) and the list did not
+  click it. 0 of the 45 other tries failed.
+- **Cost.** A tap on a screen that has not changed for 0.5 s costs nothing more (+0.1 ms). Right
+  after a change, the tap waits for the change to end: 72-304 ms more in the rows that failed,
+  and 414-821 ms more in the three rows (25 per arm) where the accepted build never failed (a
+  new window's transition makes the check wait 600 ms of unchanged frame while the previous
+  tap's ripple keeps the screen changing); +94 ms while a ripple still runs. No tap wait gave up
+  during the measured blocks. `AGEMU_ANDROID_ANIMATIONS=0` shortens screen changes;
+  `AGEMU_ANDROID_TAP_WAIT=0` turns the wait off.
+- **Why the UI tree is not enough.** After "Ask camera" (tree read back to back for 1.5 s),
+  the tree reported "Don't allow" at its slide-in position (y = 1562-1959) for up to 435 ms in
+  7 of 10 tries with the accessibility cache cleared before every read (1 of 6 with cached
+  reads); its final place is y = 1475, where the taps that failed did not go. (Screenshots
+  614-996 ms after the tap, in 3 other tries, showed the dialog only in its final place; the
+  frames at the time of the stale reads were not captured.) The screen kept posting frames
+  until 896-1227 ms after the tap, and in every try the tree was right before the last frame
+  (by at least 119 ms with fresh reads, 103 ms with cached ones). So the frame stream, which
+  sees every posted frame, decides when the screen is still. In this small sample fresh reads
+  were stale more often than cached ones (7/10 against 1/6, at different loads).
+- **Screenshots right after an input** (tap a row or "Open dialog", or press back; 30 tries per
+  case and arm): the screenshot was pixel-identical to the screen before the input, while the
+  settled screen differed, in 35 of 120 with the accepted build (Settings back 25/30, Settings
+  tap 2/30, dialog back 5/30, dialog tap 3/30) and 5 of 120 with the change (Settings back
+  4/30, Settings tap 1/30). Median screenshot call: Settings back 91 -> 381 ms, Settings tap
+  306 -> 261 ms, dialog back 301 -> 308 ms, dialog tap 334 -> 809 ms (it now waits for the
+  dialog's animation to settle instead of returning the unchanged first frame). For the dialog
+  tap the gain is small (3/30 -> 0/30) and 19 of its 30 screenshots still caught the dialog
+  mid-animation. Of the 5 stale screenshots left, 4 (Settings back 3, Settings tap 1) returned
+  in 41-135 ms with no "no frame differed" log line: the 500 ms skip did not engage for them
+  (no reference, or another path served them; not diagnosed). Only the fifth (544 ms) was
+  logged.
+- The touch is the same `sendTouch` down and up; only its timing changes. `scripts/e2e-android.sh`
+  passed 33/33 with the change. During it, one tap (the probe app's "Refresh") gave up after
+  1.5 s, was logged and sent, and its check passed.
+- **Merged build smoke** (with the log capture running; load 12): the same driver, n=5 per
+  scenario, 0 ms between calls: dialog reopen, list scroll, permission, sheet, dialog confirm and
+  still screen 30/30 landed (tap medians 307, 235, 706, 244, 821, 3.6 ms; the permission tap
+  waited 633-820 ms in 4 of 5 against a 76 ms median above, not investigated at this n); 12
+  screenshots right after an input (Settings and dialog, tap and back), 0 showed the old screen.
+  `scripts/e2e-android.sh`: 41/41, no tap wait gave up.
+
+### Logs and crashes (2026-11-07)
+
+`logs`, `crashes` and the crash notice of [CAPABILITIES.md](CAPABILITIES.md#logs-and-crashes)
+(`internal/android/logs.go`, `crashes.go`, `logcat.go`). One `logcat -B` per device, opened
+through the adb server's `exec:` service (no `adb` process on the Mac), streams logd's `main`,
+`system`, `crash` and `events` buffers into the daemon as binary records: the logger_entry
+header gives each record's pid, tid, uid, buffer and guest time, and a message logged in one
+call (a stack trace) stays one record.
+
+- **Lines** go into two rings of 2 MiB each (by the size `logs` counts): lines of user apps
+  (app uids that are not system packages, read once with `cmd package list packages -U -s`)
+  and all others, so system chatter cannot push an app's lines out. `logs <app>` matches the
+  package's uid, so all its processes (`:remote` too); a package that shares a system uid
+  (Settings) is matched by process name. Process names come from the process list read at
+  capture start, ActivityManager's `am_proc_start`, and a process-list read at most every 2 s
+  for a process the stream has not named. Levels map V D I W E F to verbose ... fatal
+  (`Log.wtf` is logged at E on this image).
+- **Crash records** come from what the system already logs:
+
+  | kind | first evidence (the record's time) | completed by |
+  |---|---|---|
+  | Java/Kotlin crash | AndroidRuntime's `FATAL EXCEPTION` in the crash buffer, logged by the app's own handler | `am_crash` (2 ms later); exception and reason are the root cause's, as ActivityManager reports them; frames are the root cause's stack, completed with the frames `... N more` shares with the exception that wraps it |
+  | native crash | libc's `Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 in tid ...`, logged by the crashing process before `crash_dump` runs | crash_dump's tombstone (tag `DEBUG`: `Cause:` or `Abort message:`, the crashing thread's backtrace), `tombstoned`'s path, then `am_crash` "Native crash" from system_server (0.8 s after the signal in the first look) |
+  | ANR | `am_anr` (package, reason) | the main thread's stack from the dropbox entry `data_app_anr`, read by `crashes` |
+  | killed | lmkd's `Kill '<process>' (pid), uid N, oom_score_adj ...`, or `am_kill` for excessive resource use or by the freezer | - |
+  | exited | `am_proc_died` of a user app's process with no crash, ANR or kill before it | a crash that is recorded later for the same pid (kept at the exit's time) |
+
+  A force-stop (`terminate`, Settings, `am force-stop`), cache trimming and a removed task log
+  `am_kill` with their reason and no `am_proc_died`: they are not reports. agemu also marks
+  its own exits (terminate, uninstall, clear-data, a permission revoke or reset): the app's
+  processes alive at the call are marked, and their deaths within 30 s are not reports. A
+  process the app starts later is reported as usual (an earlier build dropped every death of the
+  app for 3 s after the call, which hid a real `System.exit` of the app relaunched a second after
+  a terminate: 3 of 3 missed). A crash record (AndroidRuntime's or libc's line) is made even for
+  a marked process.
+
+  **Whose records count.** Any app can write any tag and text to the main and crash buffers and
+  any event tag (`EventLog.writeEvent`), but logd stamps each record with its writer's pid and
+  uid. So: ActivityManager's events count only from system_server (uid 1000); lmkd's and
+  tombstoned's lines only from a system uid (below 10000); AndroidRuntime's `FATAL EXCEPTION` and
+  libc's `Fatal signal` only from the crash buffer and only for the process that wrote them (a
+  report naming another pid is dropped); crash_dump's tombstone only for a process of the uid
+  that wrote it. A record's app is the writer's package: a process name that claims the package of
+  another uid is not believed. (An earlier build took the pid and process from the message text,
+  so another app could make agemu report that the app under test crashed, was killed or exited;
+  a unit test now writes each of those records from another uid and checks the app's state.)
+- **The watcher** (`AppState`) answers from memory: the app's live processes (the process list
+  at capture start, then every start and death in logd's order, backfilled ones included) minus
+  the ones with a crash record, and the newest record since the launch. While a capture is still
+  starting it answers "running, no crash" at once, so a crash during the first launch through
+  agemu is told by the next call, not by the launch's own result.
+- **Stream or dumps.** The capture follows logd with a live stream, and switches to a dump
+  (`logcat -d -T` from its newest record) every 250 ms once the device has logged more than 100
+  records in each of 3 consecutive seconds; it goes back to the stream when a dump brings fewer
+  than 10 new records. Measured below: a live stream costs the emulator per record. A cold
+  launch alone logs over 100 records in its first second; the builds measured below switched
+  after one such second, which delayed the notice of a crash right after a launch to 11-255 ms.
+  The merged build waits for a sustained rate (see "Crash to notice").
+- **Lifecycle.** The capture starts when a `launch` or `open` has returned (not waited for) or
+  at the first `logs` or `crashes` (waited for, at most 10 s), and backfills from logd's buffer with
+  `logcat -d -T`: from the start of the last snapshot load into this emulator process (kept in
+  `$AGEMU_HOME/android/<avd>.load.json`, so a restarted daemon finds it), at most 10 minutes
+  back. Older lines count as not captured (`partial`). A snapshot load (reset, standby) and
+  shutdown stop it: the restored logd holds the baseline's lines. A broken stream is reopened
+  from its newest record, and the records of that millisecond it sends again are dropped by key.
+- **The guest's clock.** Times are kept as the guest stamped them and converted when a result
+  is made, with an estimate of the Mac's clock minus the guest's that is an upper bound: a
+  guest timestamp seen at Mac time t was taken at or before t. Three `date` round trips give
+  the first bound; every record bounds it again as it arrives, so it settles at the stream's
+  delivery latency above the true offset (the smallest bound of the last one to two minutes,
+  which follows a drift). A converted time is never before the event. An earlier build used the
+  midpoint of the fastest `date` round trip (error up to half of its 20-30 ms): it put Java
+  crashes, which come about 5 ms after the request that causes them, up to 3 ms before that
+  request, and the daemon, which reports only crashes after the launch or link that started the
+  watch, missed 10 of 11 Java crashes, 8 of 11 native crashes and 1 of 11 exits (0 of 11
+  aborts, which come 50 ms later). Measured offsets (the guest behind the Mac): 72 ms
+  after a cold boot's in-place baseline load in the first look, 0.40-1.09 s after a reset,
+  standby or power-off boot in later runs.
+
+Measured on agemu-lab with the probe app's lab screen (`testapps/android`, `LabActivity`:
+buttons and `agemulab://<action>` links for each level, a Java exception, a null write and an
+abort in `libprobe.so`, an ANR, `System.exit`, a `:remote` process and log bursts), host load
+average 9-15 unless noted:
+
+**Crash to notice.** Per trial: terminate the app, cold-launch the lab screen, wait for its
+"lab: ready" line and 0.6 s more, trigger the crash with `open`, then poll a call that takes no
+device lock (`logs --limit 1`) every 2 ms until a response carries the notice. "After the
+request" is the Mac's own clock from sending the link to the notice: an upper bound of
+crash-to-notice, since the app crashes after it gets the link. Three builds ran this procedure:
+
+| kind | always streaming (n=10 each, 50 of 50 told) | switch after one busy second (n=3 each, 12 of 12) | merged build, 5 s quiet before each trial (n=5 each, 20 of 20) | merged build, trials back to back (n=5 each, 20 of 20) |
+|---|---|---|---|---|
+| Java exception | 10.1 (8.0-13.7) | 55.5 | 10.3 (9.1-21.8) | 13.0 (10.4-279.4) |
+| native SIGSEGV | 8.8 (7.5-20.0) | 53.4 | 10.3 (7.2-11.5) | 73.7 (11.5-168.5) |
+| native abort | 60.3 (55.9-63.3) | 227.1 | 62.1 (54.6-67.5) | 238.8 (59.0-345.0) |
+| `System.exit(0)` | 15.1 (11.7-20.0) | 238.6 | 19.2 (16.0-22.6) | 147.8 (17.7-201.2) |
+| ANR | 3.1 (1.1-9.8) after `am_anr` (15,535 ms after the request) | not run | 2.9-5.9 after `am_anr` (n=3; 15,529-15,551 ms after the request) | not run |
+
+Request to notice in ms, medians (ranges). The second build's trials ranged 11-255 ms over all
+kinds: the cold launch had switched the capture to dumps, so a crash waited for the next one.
+The merged build (same capture code as measured, load 9-23) keeps the stream through a cold
+launch: with 5 s between trials every notice came from the stream (the daemon's trace showed no
+switch during them). Back to back, a crash, its handling (a native crash's tombstone, dropbox,
+ActivityManager), the terminate and the next cold launch kept the device over 100 records a
+second for 3 s, so the next one or two trials ran in dumps (the trace showed the switches);
+an agent that crashes the app again within seconds after a crash meets that.
+
+Other columns of the always-streaming run: the crash's record to the notice took 3.2-4.2 ms
+(medians), and frames came in `crashes` at once for a Java crash (7.2 ms after it; 3 in the
+notice, 12 in the report), 121 ms (110-248) after a SIGSEGV and 120 ms (111-128) after an abort
+(the tombstone; ART's aborter dumps every thread for 49 ms before the signal). For an ANR the
+dropbox entry with the main thread's stack came for 6 of 10 (Android keeps at most 6 per process
+in 10 minutes), 1.07 s after `am_anr`: that delay was agemu's own, since `crashes` looked in
+dropbox at most once a second and its first look came before the entry was written. It now
+looks again after 150 ms (for up to 30 s after the ANR): on the merged build the stack came
+621-786 ms after `am_anr` (3 of 3, 16 frames each, `crashes` polled every 50 ms). In the merged
+build's quiet trials the frames came 7.5 ms (4.8-18.0) after a Java crash, 126 ms (118-164)
+after a SIGSEGV and 116 ms (113-124) after an abort.
+
+The ANR's 15.5 s is the system's own timeout: input dispatch waits 5 s × `ro.hw_timeout_multiplier`
+(3 on this emulator image) before `am_anr`. "Crash's record → notice" uses the converted guest
+time, which may be late by the bound's slack, so it is a lower bound of the latency, and
+"request → notice" an upper one. The app's own line logged just before the crash, converted the
+same way, came 4.4-11.3 ms after the request in every trial (none before it), so a converted
+time was at most that late. Every report named
+the app's function in its frames (`LabActivity.crashJava`, `probe_null_write` in
+`libprobe.so`, `abortNative`, `LabActivity.act` for the ANR); every failing tap after a
+crash or exit answered `app_crashed`.
+
+**What capture costs.** Capture on against off (`AGEMU_ANDROID_LOGS=0`), the daemon restarted
+for each 45 s window, ABBA, 4 windows per arm; the lab screen in front, idle, or the app logging
+500 lines/s (`agemulab://spam`, one `Log.i` per line on a background thread). CPU is % of one
+core (`.lab/meter.py`: the emulator process, which holds all guest work; the daemon; the adb
+server, which another session's emulator also uses), medians with ranges:
+
+| | emulator, off | emulator, on | daemon, on (off) | adb server, on | daemon footprint, on (off) |
+|---|---|---|---|---|---|
+| idle (stream) | 5.30 (5.00-5.50) | 5.25 (5.00-5.50) | 0.02 (0.02) | 0.02 | 78.7 (66.7) MB |
+| 500 lines/s, record-by-record stream (previous build) | 13.8 (12.5-15.2) | 58.7 (54.9-59.3) | 1.76 (0.02) | 2.2 | 84.4 (68.9) MB |
+| 500 lines/s, dumps every 250 ms (this build) | 12.6 (12.1-13.2) | 20.1 (20.0-20.2) | 0.27 (0.02) | 0.13 | 82.8 (66.7) MB |
+
+Where the stream's cost went (500 lines/s, 25 s windows, n=2 each, interleaved): no reader
+12.2-14.5%; a reader inside the guest writing to /dev/null 19.4-21.7%; the adb `exec:` stream
+56.2-59.4%; `logcat | nc 10.0.2.2` over the emulator's user-mode TCP 45.1-48.8%; a dump every
+250 ms 19.5-20.6%. Inside the guest, the stream cost adbd 5.2%, logd 1.2% and logcat 0.5% of a
+core: most of it is the emulator moving one small packet per record out of the VM. So the
+capture dumps in bursts while the device keeps logging over 100 records a second; in dumps,
+logd spends about 5.8% of a core finding each dump's start time in its compressed buffer.
+Not measured: the cost between about 40 and 100 records a second, where the stream stays on.
+From the 500 lines/s rows (+45 points for the stream), a stream costs roughly 0.09 points of a
+core per record a second, so up to about 9 points just below the switch (an estimate). How many
+records an idle agemu-lab logs a second was not measured either; the idle row shows no cost.
+
+**While the device logs heavily** the capture reads logd in dumps, so a crash waits for the next
+one: with the probe logging 500 lines/s, a Java crash's notice came 218.6 ms (49.7-290.0) after
+the request, n=10, 0 missed (a build that switched after one busy second), and the failing tap
+after it answered `app_crashed` 10 of 10 times. On the merged build, with the crash 4.5 s into
+the 500 lines/s (after the switch): 121.4 ms (25.2-143.2), n=5, 5 of 5 told, every failing tap
+`app_crashed`. The merged build streams the first 2-3 s of such a rate before it switches, which
+the cost table's 45 s windows did not include (they ran on the one-second build).
+
+**A failing action after a crash** (tap "Crash Java" by its coordinates, then
+`wait --text "Log levels" --timeout-ms 10000`, then `tap --text "Log levels"`; capture on and
+off alternating, the daemon restarted for each, n=5 each): with capture the wait stopped with
+`app_crashed` after 5.0 s (5004-5006 ms) and the tap answered `app_crashed` (`no element matches
+{...} (dev.agemu.probe crashed at ...: java.lang.IllegalStateException: probe crash #1; it is
+not running; crashes has the report)`); without, the wait timed out at 10.0 s and the tap said
+only `no element matches`. The 5 s were the first UI tree read after the crash: the agent's
+`getRoot()` on the dying app's window waits out Android's 5 s accessibility timeout (`ui` right
+after a crash: 5008 ms, then 2-18 ms), and the daemon's wait looked at the crash only after each
+read. The merged build asks the watcher (in memory) before each read and every 25 ms while one
+runs; once the crash shows, that read gets 300 ms more (an element still on screen, such as a
+system dialog, is found; a read held by the dying app is not waited for), and a cancelled read
+now ends the agent call instead of waiting out its deadline. Same procedure, merged build, n=5:
+the wait answered `app_crashed` after 326.2 ms (325.9-352.9). The agent's own read still runs
+on the device until the timeout, so the next call that reads the tree (here `tap --text`) took
+4,693 ms (4,667-4,711) and answered `app_crashed`: the 5 s moved from the wait to the next
+tree read, which an agent that reads `crashes` or relaunches first does not pay (not measured).
+(Two intermediate builds, n=5 each: a check before each read only, 5,079-5,087 ms in 4 trials,
+the fifth wait found the screen before the crash; watching during the read without ending the
+agent call, 5,004-5,015 ms.) Calls that do not read the tree (`logs`, `crashes`,
+`screenshot`, a tap by coordinates) carry the notice within milliseconds.
+
+**Reading lines.** `logs` against `adb logcat -d` with the same filter, both returning 100
+lines, interleaved, n=15 each, load 10.2-10.6. `logcat -t 100` takes the newest 100 lines of the
+whole buffer before `--uid` and `-e` filter them, so the baseline reads the filtered dump and
+keeps its newest 100 (on the Mac, included in the time):
+
+| lines | `adb logcat -d` | agemu CLI | agemu daemon |
+|---|---|---|---|
+| the app's newest 100 (`--uid`) | 252.1 ms (229.9-346.3) | 8.2 (7.8-12.3) | 0.56 (0.47-3.36) |
+| the app's warnings and worse (`--uid '*:W'`) | 223.2 (202.9-262.7) | 8.6 (6.9-22.7) | 0.48 (0.40-1.08) |
+| the app's lines containing a text (`--uid -e`) | 197.5 (185.0-237.4) | 12.1 (10.3-15.5) | 3.83 (3.39-5.44) |
+| the device's newest 100 (`-t 100`) | 42.7 (40.9-50.1) | 9.1 (8.1-15.1) | 1.38 (0.76-3.65) |
+
+The rings held about 7,500 lines. Two earlier runs of this comparison are in the runs but not
+used: the first's adb arms used `-t 100` with the filters (0 lines) and its text filter matched
+nothing; the second's agemu arms kept the default 16 KiB bound (about 40 device lines).
+
+**Completeness.** agemu holds what logd holds: for a 5,000- or 10,000-line burst that the app
+logged in 5-17 ms, agemu had exactly the lines logd kept, 5 of 5 (2,562 to 9,227), and 4 of 4
+in the capture-on runs below. logd itself does not keep such a burst: its intake socket drops
+lines before any reader sees them (logd kept 51-92% of a burst). At a steady 500 lines/s for 8 s (4,000 lines), logd held all
+4,000 in 4 of 4 runs, capture on or off, and agemu all 4,000 in both capture-on runs.
+
+**Fidelity**, capture on against off (`AGEMU_ANDROID_LOGS=0`), the daemon restarted per arm,
+interleaved, 4 arms each:
+- What the app logs is unchanged: for one `log-levels` action logd held the same six lines and
+  levels (V D I W E E; `Log.wtf` is logged at E on this image) in all 8 arms. Capture sets no
+  property, buffer size or log level.
+- An overflowing burst loses more lines in logd with a reader: of 5,000 lines logged in 6-16 ms,
+  logd kept 2,073-4,129 with capture on (median 3,153) against 3,661-4,997 off (median 4,618).
+  A live reader makes logd wake for every record while the app writes. With n=4 per arm this is
+  borderline (Mann-Whitney U=1, two-sided p≈0.06). The app's own time for the burst: pooling all
+  five runs (20 bursts per arm), a median 7.54 ms with capture on against 6.43 ms off (U=293 of
+  400, p≈0.01), so the app's `Log.i` calls are measurably slower during a burst while the stream
+  reads.
+- Calls: the daemon-side time of a UI tree read (medians per arm 1.41-1.59 ms on, 1.41-1.69
+  off) and of a tap (0.26-0.32 against 0.28-0.31 ms) did not change with the watcher asking
+  after every call.
+- Launch: the first launch after a daemon start, which starts the capture, 95-175 ms on against
+  111-128 ms off; a cold launch with the capture running 118-217 against 116-214 ms. Two earlier
+  builds were slower and were fixed: one started the capture before the launch (its setup and
+  backfill ran beside the app's start: 369-763 ms), the next made the daemon's crash check after
+  the launch wait for the starting capture (up to its 250 ms bound).
+
+**Across reset, standby, a daemon restart and a power-off boot** (`lifecycle.py`, the probe
+reinstalled after each, one round each):16 of 16 checks: after a reset, standby and a
+power-off boot, `logs` and `crashes` return nothing from before and the new lines and crash
+after; an old cursor answers `partial`; a restarted daemon backfills the lines and the crash
+since the reset (from the recorded load) and its cursors stay above the old ones; `logs` on a
+device in standby answers that it is shut down; `since launch` holds the app's startup line.
+The capture measured the guest clock 0.40-1.09 s behind the Mac's after a snapshot load, and
+72 ms after a cold boot's first load.
+
 ## Caveats
 
 - **2 GB guest RAM needs `-lowram`.** Emulator 37.1 raises guest RAM to 4096 MB for every API > 36 image.
@@ -789,5 +1165,10 @@ Fidelity, as the probe app showed it:
   - **Guest:** coarse checks found no difference: uptime and boot count continued, the crash buffer stayed empty, the kernel console was clean on 4 compressed loads, and one Settings, typing and screenshot pass behaved the same. Guest RAM was not compared byte for byte.
   - It stays opt-in, for a host that is short of disk.
 - **Rotation is not handled.** Profiles are portrait; a landscape app or device rotation is not mapped.
+- **After an app's crash** (see Logs and crashes): the first UI tree read takes 5 s (Android's
+  accessibility timeout on the dying app's window), so a `wait` stops on the crash after 5 s; the
+  second crash within a minute leaves "keeps stopping" on screen with the crashed process frozen,
+  and a `launch` then can fail after 20 s (dismiss it or `terminate` first); an ANR's frames come
+  from dropbox, which Android writes for at most 6 ANRs of a process in 10 minutes.
 - **Emulator features are part of a snapshot.** Starting the emulator with a `-feature` set that differs from the snapshot's makes it print "different emulator features" and **delete** the snapshot, then cold boot. Do not pass `-feature` flags through `AGEMU_ANDROID_EMULATOR_FLAGS`.
 - **The measurements ran on a shared, often saturated host.** The M2 Pro with 16 GB shared the machine with another emulator, iOS simulators, a browser and other sessions; load averages ranged from 3 to 450 and swap was nearly full during this round. Absolute numbers are noisy (see the p95 columns and the run times listed with the table); both sides of each row ran back to back under the same conditions.

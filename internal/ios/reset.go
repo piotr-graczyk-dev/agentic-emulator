@@ -33,7 +33,8 @@ type ResetReport struct {
 //  3. resets the keychain, and puts back what the test capabilities change
 //     (resetCapabilities): light appearance, no simulated location, an empty pasteboard, and no
 //     privacy grant for any app,
-//  4. presses home and waits until SpringBoard is frontmost.
+//  4. brings SpringBoard to the front (goHome: home is pressed only when another app is
+//     still in front) and waits for a still screen.
 //
 // Not reset (unlike `simctl erase`): data of built-in apps (Settings search history, Safari,
 // Contacts, Photos...), other system settings an agent changed (language...), notification
@@ -60,6 +61,9 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 		}
 	}
 	udid := d.UDID
+	// Every app is about to end at agemu's request; the capture is emptied at the end.
+	defer b.expectExits(udid, "")(0)
+	b.noteInput(udid)
 
 	// simctl is slow to start (~100 ms, seconds on a loaded Mac): reset the keychain alongside
 	// the app cleanup. (`simctl privacy reset all` without a bundle id, used before, changes
@@ -132,8 +136,15 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	if capErr != nil {
 		return rep, fmt.Errorf("reset: %w", capErr)
 	}
-	if err := b.goHome(ctx, udid); err != nil {
+	if err := goHome(ctx, helperHome{b, udid}); err != nil {
 		return rep, fmt.Errorf("reset: %w", err)
+	}
+	// Logs and crash records from before the reset are not returned (the stream keeps running).
+	b.mu.Lock()
+	dl := b.logs[udid]
+	b.mu.Unlock()
+	if dl != nil {
+		dl.clear()
 	}
 	rep.Ms = ms(time.Since(start))
 	log.Printf("ios reset %s: %.0f ms (app lists %.0f, terminate %d apps %.0f, uninstall %v %.0f, appearance/location/pasteboard/privacy %.0f, simctl keychain done at %.0f, home %.0f)",
@@ -165,44 +176,6 @@ func (b *Backend) systemApps(ctx context.Context, d simDevice) ([]string, error)
 	b.systemAppCache[d.Runtime] = out
 	b.mu.Unlock()
 	return out, nil
-}
-
-const springboardBundle = "com.apple.springboard"
-
-// goHome presses home and waits (up to 15 s) until SpringBoard is the frontmost application,
-// recognised by the bundle id accessibility reports. On iPad the helper finds the frontmost
-// application by a hit test on the screen (the bridge itself names the dock's
-// DockFolderViewService there), so SpringBoard is confirmed on iPads too.
-func (b *Backend) goHome(ctx context.Context, udid string) error {
-	if err := b.call(ctx, "key", map[string]any{"udid": udid, "key": "home"}, nil); err != nil {
-		return err
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	last := "nothing yet"
-	for {
-		var front struct {
-			Pid      int    `json:"pid"`
-			BundleID string `json:"bundleId"`
-		}
-		err := b.call(ctx, "frontmost", map[string]any{"udid": udid, "timeoutMs": 3000}, &front)
-		switch {
-		case err != nil:
-			last = err.Error()
-		case front.BundleID == springboardBundle:
-			// SpringBoard reports itself frontmost before it has finished handling the
-			// press, and apps just terminated may still be exiting; an app launched in that
-			// window starts in the background or fails to launch. Wait until the screen has
-			// been still for 300 ms (at most 2 s).
-			_ = b.call(ctx, "settle", map[string]any{"udid": udid, "quietMs": 300, "maxMs": 2000}, nil)
-			return nil
-		default:
-			last = fmt.Sprintf("frontmost is %q (pid %d)", front.BundleID, front.Pid)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("SpringBoard did not come to the front within 15 s after pressing home (%s)", last)
-		}
-		time.Sleep(30 * time.Millisecond)
-	}
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }

@@ -100,6 +100,29 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 /// change for quietMs; at most maxMs in all. {changed, waitedMs}. For changes the system
 /// animates after a delay (the appearance crossfade starts 50-100 ms after the call).
 - (NSDictionary *)waitForBigChangeWithin:(double)startMs quiet:(double)quietMs max:(double)maxMs;
+/// Waits until a tap on an element that covers rect (screen pixels) can land, for an element the
+/// caller saw appear since the last input (a just-presented alert, sheet or screen). UIKit drops
+/// every touch from the moment a presentation begins until its completion: the scene ignores
+/// interaction events for the transition, and the touch never reaches the app.
+///  1. If neither rect nor the screen (a big change) has changed since the last input, the
+///     presentation's first frame may not have shown yet (it showed 32-146 ms after it began, at
+///     load average 14-67): wait up to startMaxMs for either to change.
+///  2. Then wait until no sample of a pixel grid in rect's column (its x range, full height) has
+///     changed for quietMs and the screen has had no big change for stillQuietMs (0: not
+///     required). An alert's or a sheet's completion comes 20-33 ms before its last change
+///     shows; an action sheet's glass keeps changing after it. Once the screen is still, the
+///     column may keep changing for at most tailMaxMs more (a spinner or a video never stops).
+/// At most maxMs in all. {settled, pending (step 1 waited), waitedMs}.
+- (NSDictionary *)waitForRectReady:(CGRect)rect
+                             quiet:(double)quietMs
+                        stillQuiet:(double)stillQuietMs
+                          startMax:(double)startMaxMs
+                           tailMax:(double)tailMaxMs
+                               max:(double)maxMs;
+/// When the last input was sent (a HID message, or markInput), CFAbsoluteTime; 0 before any.
+@property (atomic, readonly) CFAbsoluteTime lastInputAt;
+/// Marks input that is not a HID message (a launch, an opened URL).
+- (void)markInput;
 /// Frame counter to take before sending input (NSUIntegerMax without a framebuffer).
 - (NSUInteger)inputFrameMark;
 /// After input: waits for the first frame newer than `mark`, then for `quietMs` without frames;

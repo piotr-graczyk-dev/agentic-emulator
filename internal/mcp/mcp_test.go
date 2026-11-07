@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/backend"
@@ -21,6 +22,7 @@ func TestToolList(t *testing.T) {
 		"terminate", "wait_for",
 		"open_url", "permission", "location", "clipboard", "appearance", "apps", "uninstall",
 		"clear_app_data", "push",
+		"logs", "crashes",
 	}
 	var names []string
 	for _, tl := range tools {
@@ -92,6 +94,14 @@ func (r *recorder) Push(ctx context.Context, id, app string, payload []byte) err
 	r.add("push %s %s", app, payload)
 	return nil
 }
+func (r *recorder) Logs(ctx context.Context, id string, q api.LogQuery) (api.LogBatch, error) {
+	r.add("logs app=%s level=%s contains=%s regex=%s after=%d", q.App, q.Level, q.Contains, q.Regex, q.After)
+	at := time.Now().Add(-time.Second)
+	return api.LogBatch{Cursor: 99, Entries: []api.LogEntry{
+		{Time: at, Level: api.LogInfo, Pid: 7, Process: "AgemuTestApp", Tag: "com.example:net", Message: "GET /items"},
+		{Time: at, Level: api.LogError, Pid: 7, Process: "AgemuTestApp", Tag: "com.example:net", Message: "request failed"},
+	}}, nil
+}
 
 func connect(t *testing.T, b backend.Backend) *client.Client {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,6 +142,9 @@ func TestToolArgumentsReachTheBackend(t *testing.T) {
 		{"location", `{"latitude":52.5,"longitude":-0.12}`, "loc 52.5,-0.12"},
 		{"location", `{"action":"clear"}`, "clearloc"},
 		{"push", `{"app":"com.app","payload":{"aps":{"alert":{"title":"Hi"}}}}`, `push com.app {"aps":{"alert":{"title":"Hi"}}}`},
+		{"logs", `{"app":"pl.app","level":"error","contains":"Failed","regex":"fail(ed)?","since":"c5"}`, "logs app=pl.app level=error contains=failed regex=fail(ed)? after=5"},
+		{"logs", `{}`, "logs app= level= contains= regex= after=0"},
+		{"tap", `{"contains":"Log"}`, "tap 25,25"}, // contains is the selector's, not a logs filter
 	}
 	for _, c := range cases {
 		r := &recorder{}
@@ -161,5 +174,62 @@ func TestToolResults(t *testing.T) {
 	res = callTool(cl, "permission", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`), "app": json.RawMessage(`"com.app"`), "action": json.RawMessage(`"grant"`)})
 	if res["isError"] != true || !strings.Contains(resultText(res), "needs at least one permission") {
 		t.Fatalf("permission without names: %v", res)
+	}
+
+	// logs: text lines by default, with the cursor at the end; JSON on request.
+	res = callTool(cl, "logs", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`), "level": json.RawMessage(`"warn"`)})
+	out := resultText(res)
+	if res["isError"] == true || !strings.Contains(out, " E AgemuTestApp[7] com.example:net: request failed\n") || strings.Contains(out, "GET /items") || !strings.Contains(out, "-- cursor c99") {
+		t.Fatalf("logs text:\n%s", out)
+	}
+	res = callTool(cl, "logs", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`), "json": json.RawMessage(`true`)})
+	var l api.Logs
+	if err := json.Unmarshal([]byte(resultText(res)), &l); err != nil || len(l.Entries) != 2 || l.Cursor != "c99" {
+		t.Fatalf("logs JSON: %v %s", err, resultText(res))
+	}
+	res = callTool(cl, "logs", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`), "level": json.RawMessage(`"loud"`)})
+	if res["isError"] != true || !strings.Contains(resultText(res), `unknown log level "loud"`) {
+		t.Fatalf("logs with a bad level: %v", res)
+	}
+	res = callTool(cl, "crashes", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`)})
+	if res["isError"] != true || resultText(res) != "crashes is not implemented on ios" {
+		t.Fatalf("crashes on a backend without it: %v", res)
+	}
+}
+
+// crashed is an iOS backend whose launched app crashes when the test says so.
+type crashed struct {
+	recorder
+	crash *api.Crash
+}
+
+func (c *crashed) Launch(ctx context.Context, id, app string) error { return nil }
+func (c *crashed) AppState(ctx context.Context, id, app string, since time.Time) (api.AppState, error) {
+	if c.crash == nil || c.crash.Time.Before(since) {
+		return api.AppState{Running: true}, nil
+	}
+	return api.AppState{Crash: c.crash}, nil
+}
+
+func TestCrashNoticeInToolResults(t *testing.T) {
+	b := &crashed{}
+	cl := connect(t, b)
+	dev := json.RawMessage(`"ios:y"`)
+	if res := callTool(cl, "launch", map[string]json.RawMessage{"device": dev, "app": json.RawMessage(`"pl.app"`)}); res["isError"] == true || strings.Contains(resultText(res), "NOTE") {
+		t.Fatalf("launch: %v", res)
+	}
+	b.crash = &api.Crash{Time: time.Now(), App: "pl.app", Kind: api.CrashKindCrash, Exception: "EXC_BAD_ACCESS (SIGSEGV)"}
+	res := callTool(cl, "ui_tree", map[string]json.RawMessage{"device": dev})
+	content := res["content"].([]map[string]any)
+	if res["isError"] == true || len(content) != 2 || !strings.HasPrefix(content[0]["text"].(string), "NOTE: pl.app crashed at") || !strings.Contains(content[1]["text"].(string), `button "Log in"`) {
+		t.Fatalf("ui_tree after the crash: %v", res)
+	}
+	res = callTool(cl, "ui_tree", map[string]json.RawMessage{"device": dev})
+	if strings.Contains(resultText(res), "NOTE:") {
+		t.Fatalf("the notice repeated: %v", res)
+	}
+	res = callTool(cl, "tap", map[string]json.RawMessage{"device": dev, "text": json.RawMessage(`"Pay"`)})
+	if res["isError"] != true || !strings.Contains(resultText(res), "no element matches") || !strings.Contains(resultText(res), "pl.app crashed at") {
+		t.Fatalf("a failed tap while the app is down: %v", res)
 	}
 }

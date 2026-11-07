@@ -134,12 +134,18 @@ func (a *agentClient) Close() {
 }
 
 // call sends one request. A broken connection is re-dialled once (the agent survives
-// snapshot loads, but the adb stream to it does not).
+// snapshot loads, but the adb stream to it does not). The call ends with ctx: a cancelled
+// context (a wait that learned the app crashed, a client that went away) interrupts the read,
+// and the connection is dropped (the agent's late answer would be taken for the next call's);
+// the next call dials anew.
 func (a *agentClient) call(ctx context.Context, req map[string]any, out any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if a.conn == nil {
 			c, r, via, err := a.dial(ctx)
 			if err != nil {
@@ -156,12 +162,23 @@ func (a *agentClient) call(ctx context.Context, req map[string]any, out any) err
 		} else {
 			a.conn.SetDeadline(time.Now().Add(60 * time.Second))
 		}
+		conn := a.conn
+		stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
 		if _, err := a.conn.Write(b); err != nil {
+			stop()
 			lastErr = err
 			a.closeLocked()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			continue
 		}
 		line, err := a.r.ReadBytes('\n')
+		if !stop() && err == nil {
+			// ctx ended just as the answer came: the answer is complete, but the connection's
+			// deadline is in the past now.
+			a.closeLocked()
+		}
 		if err != nil {
 			lastErr = err
 			a.closeLocked()

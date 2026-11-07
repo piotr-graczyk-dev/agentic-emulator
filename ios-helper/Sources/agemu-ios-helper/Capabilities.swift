@@ -122,7 +122,9 @@ func privacyGrants(_ d: AGDevice) throws -> [String: Any] {
 func handleCapability(_ cmd: String, _ req: [String: Any]) throws -> Any? {
     switch cmd {
     case "openurl":
-        try device(req).openURL(try req.string("url"))
+        let d = try device(req)
+        d.markInput()
+        try d.openURL(try req.string("url"))
         return ["ok": true]
     case "privacy":
         let d = try device(req)

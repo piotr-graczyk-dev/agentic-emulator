@@ -255,6 +255,20 @@ public final class Agent {
             case "idle":
                 sb.append(idle(req.optLong("quietMs", 100), req.optLong("timeoutMs", 2000)) ? "true" : "false");
                 return;
+            case "settle": {
+                long t0 = SystemClock.uptimeMillis();
+                boolean settled = awaitWindowsSettled(req.optLong("maxMs", 2000));
+                sb.append("{\"settled\":").append(settled);
+                sb.append(",\"ms\":").append(SystemClock.uptimeMillis() - t0).append('}');
+                return;
+            }
+            case "clearcache":
+                // The next tree read asks the apps for every node again. The accessibility cache
+                // keeps a node's bounds until an event about it arrives, and moving content does
+                // not always send one (a list scrolling, a permission dialog moving into place):
+                // read through the cache, a moved element can stay where it was for 400 ms and more.
+                synchronized (uaLock) { sb.append(ua.clearCache() ? "true" : "false"); }
+                return;
             case "launch":
                 launch(req.getString("pkg"), req.optString("activity", ""), sb);
                 return;
@@ -412,6 +426,60 @@ public final class Agent {
             wm.getClass().getMethod("syncInputTransactions", boolean.class).invoke(wm, true);
         } catch (Throwable ignored) {
             SystemClock.sleep(500);
+        }
+    }
+
+    /** The settle in progress (null: none); later callers wait for it instead of starting another. */
+    static java.util.concurrent.CountDownLatch settling;
+    static boolean settledOK;
+
+    /**
+     * Waits, at most maxMs, until WindowManager runs no window animation or transition (an
+     * activity or a dialog opening or closing, a permission dialog sliding in) and has handed
+     * the resulting input windows to the input dispatcher: IWindowManager.syncInputTransactions
+     * (true), which UiAutomation also waits for before an injected event since API 33. Until
+     * then a touch can go to a window that is leaving (a closing dialog takes every touch while
+     * its exit animation runs) or land at a place the window is only moving to.
+     *
+     * WindowManager bounds its own wait at 5 s and cannot be interrupted, so it runs on a thread:
+     * when maxMs passes first, this returns false and the thread ends on its own; a call meanwhile
+     * waits for the same thread instead of starting another.
+     */
+    static boolean awaitWindowsSettled(long maxMs) {
+        final java.util.concurrent.CountDownLatch done;
+        synchronized (Agent.class) {
+            if (settling == null) {
+                settling = new java.util.concurrent.CountDownLatch(1);
+                final java.util.concurrent.CountDownLatch mine = settling;
+                Thread t = new Thread(new Runnable() {
+                    public void run() {
+                        boolean ok;
+                        try {
+                            Object wm = windowManager();
+                            Object r = wm.getClass().getMethod("syncInputTransactions", boolean.class).invoke(wm, true);
+                            ok = !(r instanceof Boolean) || (Boolean) r;
+                        } catch (Throwable e) {
+                            ok = false;
+                        }
+                        synchronized (Agent.class) {
+                            settledOK = ok;
+                            settling = null;
+                        }
+                        mine.countDown();
+                    }
+                }, "agemu-settle");
+                t.setDaemon(true);
+                t.start();
+            }
+            done = settling;
+        }
+        try {
+            if (!done.await(maxMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return false;
+        } catch (InterruptedException e) {
+            return false;
+        }
+        synchronized (Agent.class) {
+            return settledOK;
         }
     }
 

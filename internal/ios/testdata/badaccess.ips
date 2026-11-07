@@ -1,0 +1,193 @@
+{"app_name":"AgemuTestApp","timestamp":"2026-11-07 06:32:15.00 +0100","app_version":"1.0","bug_type":"309","bundleID":"dev.agemu.testapp","name":"AgemuTestApp","incident_id":"50FEF637-03FF-4901-A76B-B2295CDA81F7"}
+{
+ "captureTime": "2026-11-07 06:31:01.3317 +0100",
+ "pid": 16612,
+ "procName": "AgemuTestApp",
+ "procPath": "\/Users\/USER\/Library\/Developer\/CoreSimulator\/Devices\/151A1D97-95B5-4D1D-A495-E08DDE41A661\/data\/Containers\/Bundle\/Application\/BEDADDA3-F548-4858-969F-EF8C2C30CE28\/AgemuTestApp.app\/AgemuTestApp",
+ "bundleInfo": {
+  "CFBundleShortVersionString": "1.0",
+  "CFBundleVersion": "1",
+  "CFBundleIdentifier": "dev.agemu.testapp"
+ },
+ "exception": {
+  "codes": "0x0000000000000001, 0x0000000000000010",
+  "rawCodes": [
+   1,
+   16
+  ],
+  "type": "EXC_BAD_ACCESS",
+  "signal": "SIGSEGV",
+  "subtype": "KERN_INVALID_ADDRESS at 0x0000000000000010"
+ },
+ "termination": {
+  "flags": 0,
+  "code": 11,
+  "namespace": "SIGNAL",
+  "indicator": "Segmentation fault: 11",
+  "byProc": "exc handler",
+  "byPid": 16612
+ },
+ "faultingThread": 0,
+ "threads": [
+  {
+   "triggered": true,
+   "queue": "com.apple.main-thread",
+   "frames": [
+    {
+     "imageOffset": 92244,
+     "symbol": "specialized static LogProbe.badAccess()",
+     "symbolLocation": 8,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 93236,
+     "symbol": "specialized static LogProbe.crash(_:)",
+     "symbolLocation": 984,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 14400,
+     "symbol": "thunk for @escaping @callee_guaranteed () -> ()",
+     "symbolLocation": 28,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 114328,
+     "symbol": "_dispatch_client_callout",
+     "symbolLocation": 12,
+     "imageIndex": 3
+    },
+    {
+     "imageOffset": 24680,
+     "symbol": "_dispatch_continuation_pop",
+     "symbolLocation": 776,
+     "imageIndex": 3
+    },
+    {
+     "imageOffset": 102212,
+     "symbol": "_dispatch_source_invoke",
+     "symbolLocation": 1800,
+     "imageIndex": 3
+    },
+    {
+     "imageOffset": 68388,
+     "symbol": "_dispatch_main_queue_drain",
+     "symbolLocation": 644,
+     "imageIndex": 3
+    },
+    {
+     "imageOffset": 67728,
+     "symbol": "_dispatch_main_queue_callback_4CF",
+     "symbolLocation": 40,
+     "imageIndex": 3
+    },
+    {
+     "imageOffset": 604820,
+     "symbol": "__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__",
+     "symbolLocation": 12,
+     "imageIndex": 4
+    },
+    {
+     "imageOffset": 601196,
+     "symbol": "__CFRunLoopRun",
+     "symbolLocation": 1884,
+     "imageIndex": 4
+    },
+    {
+     "imageOffset": 579844,
+     "symbol": "_CFRunLoopRunSpecificWithOptions",
+     "symbolLocation": 496,
+     "imageIndex": 4
+    },
+    {
+     "imageOffset": 10688,
+     "symbol": "GSEventRunModal",
+     "symbolLocation": 116,
+     "imageIndex": 5
+    },
+    {
+     "imageOffset": 18990284,
+     "symbol": "-[UIApplication _run]",
+     "symbolLocation": 776,
+     "imageIndex": 6
+    },
+    {
+     "imageOffset": 26306832,
+     "symbol": "UIApplicationMain",
+     "symbolLocation": 120,
+     "imageIndex": 6
+    },
+    {
+     "imageOffset": 8109988,
+     "symbol": "closure #1 in KitRendererCommon(_:)",
+     "symbolLocation": 164,
+     "imageIndex": 7
+    },
+    {
+     "imageOffset": 8109336,
+     "symbol": "runApp<A>(_:)",
+     "symbolLocation": 180,
+     "imageIndex": 7
+    },
+    {
+     "imageOffset": 5558420,
+     "symbol": "static App.main()",
+     "symbolLocation": 148,
+     "imageIndex": 7
+    },
+    {
+     "imageOffset": 70768,
+     "symbol": "main",
+     "symbolLocation": 64,
+     "imageIndex": 0
+    },
+    {
+     "imageOffset": 45284,
+     "symbol": "start_sim",
+     "symbolLocation": 20,
+     "imageIndex": 1
+    },
+    {
+     "imageOffset": 132324,
+     "symbol": "start",
+     "symbolLocation": 6992,
+     "imageIndex": 2
+    }
+   ]
+  }
+ ],
+ "usedImages": [
+  {
+   "name": "AgemuTestApp",
+   "path": "\/Users\/USER\/Library\/Developer\/CoreSimulator\/Devices\/151A1D97-95B5-4D1D-A495-E08DDE41A661\/data\/Containers\/Bundle\/Application\/BEDADDA3-F548-4858-969F-EF8C2C30CE28\/AgemuTestApp.app\/AgemuTestApp"
+  },
+  {
+   "name": "dyld_sim",
+   "path": "\/Volumes\/VOLUME\/*\/dyld_sim"
+  },
+  {
+   "name": "dyld",
+   "path": "\/usr\/lib\/dyld"
+  },
+  {
+   "name": "libdispatch.dylib",
+   "path": "\/Volumes\/VOLUME\/*\/libdispatch.dylib"
+  },
+  {
+   "name": "CoreFoundation",
+   "path": "\/Volumes\/VOLUME\/*\/CoreFoundation.framework\/CoreFoundation"
+  },
+  {
+   "name": "GraphicsServices",
+   "path": "\/Volumes\/VOLUME\/*\/GraphicsServices.framework\/GraphicsServices"
+  },
+  {
+   "name": "UIKitCore",
+   "path": "\/Volumes\/VOLUME\/*\/UIKitCore.framework\/UIKitCore"
+  },
+  {
+   "name": "SwiftUI",
+   "path": "\/Volumes\/VOLUME\/*\/SwiftUI.framework\/SwiftUI"
+  }
+ ]
+}

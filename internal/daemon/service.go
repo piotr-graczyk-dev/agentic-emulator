@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
@@ -73,6 +74,16 @@ type Params struct {
 	Longitude   *float64        `json:"longitude,omitempty"`   // location set
 	Mode        string          `json:"mode,omitempty"`        // appearance: light|dark; empty reads it
 	Payload     json.RawMessage `json:"payload,omitempty"`     // push: JSON object with "aps"
+
+	// logs and crashes (logs.go, docs/CAPABILITIES.md); App is shared
+	Since    string `json:"since,omitempty"`    // a time, a duration back from now, "launch" or a logs cursor
+	Level    string `json:"level,omitempty"`    // logs: minimum level
+	Contains string `json:"contains,omitempty"` // logs: case-insensitive substring of the tag or the message
+	Regex    string `json:"regex,omitempty"`    // logs: RE2 pattern matched against the tag or the message
+	Limit    int    `json:"limit,omitempty"`    // logs, crashes: at most this many, the newest
+	MaxBytes int    `json:"maxBytes,omitempty"` // logs: at most about this many bytes of lines
+
+	start time.Time // when the call arrived (set by the daemon)
 }
 
 // Service is safe for concurrent use.
@@ -81,10 +92,11 @@ type Service struct {
 	tmpDir   string
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
+	states   map[string]*devState // logs, crashes and the crash notice (logs.go)
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {
-	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}}
+	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}}
 	for _, b := range bs {
 		s.backends[b.Platform()] = b
 	}
@@ -177,45 +189,73 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 	return "", fmt.Errorf("unknown device %q", ref)
 }
 
-// Call dispatches one method.
+// Call dispatches one method. It drops the crash notice; Handle returns it.
 func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	res, _, err := s.Handle(ctx, method, raw)
+	return res, err
+}
+
+// Handle dispatches one method. crash, when set, tells the agent that the app it launched
+// through agemu crashed (logs.go): once in a result, and in every error while the app is down.
+func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage) (res any, crash *api.AppCrash, err error) {
+	start := time.Now()
 	var p Params
 	if len(raw) > 0 && string(raw) != "null" {
 		if err := json.Unmarshal(raw, &p); err != nil {
-			return nil, fmt.Errorf("bad params: %w", err)
+			return nil, nil, fmt.Errorf("bad params: %w", err)
 		}
 	}
+	p.start = start
 	if p.Selector != nil && p.Selector.Index < 0 {
-		return nil, fmt.Errorf("selector index must be >= 0, got %d", p.Selector.Index)
+		return nil, nil, fmt.Errorf("selector index must be >= 0, got %d", p.Selector.Index)
 	}
 	switch method {
 	case "ping":
-		return map[string]any{"ok": true, "pid": os.Getpid()}, nil
+		return map[string]any{"ok": true, "pid": os.Getpid()}, nil, nil
 	case "devices":
-		return s.listAll(ctx)
+		res, err = s.listAll(ctx)
+		return res, nil, err
 	case "profiles":
-		return profiles.All(p.Platform), nil
+		return profiles.All(p.Platform), nil, nil
 	case "create":
 		if p.Platform == "" {
-			return nil, fmt.Errorf("create needs platform (android|ios)")
+			return nil, nil, fmt.Errorf("create needs platform (android|ios)")
 		}
 		b, ok := s.backends[p.Platform]
 		if !ok {
-			return nil, fmt.Errorf("platform %q not available", p.Platform)
+			return nil, nil, fmt.Errorf("platform %q not available", p.Platform)
 		}
-		return b.Create(ctx, api.CreateRequest{Platform: p.Platform, Name: p.Name, Profile: p.Profile})
+		res, err = b.Create(ctx, api.CreateRequest{Platform: p.Platform, Name: p.Name, Profile: p.Profile})
+		return res, nil, err
 	}
 
 	// Everything below targets one device.
 	id, err := s.resolve(ctx, p.Device)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	b, err := s.backendFor(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// Arguments are checked before the device lock and the backend: a bad call fails at once.
+	if err := checkCapability(method, &p); err != nil {
+		return nil, nil, err
+	}
+	if err := s.checkObserve(id, method, &p); err != nil {
+		return nil, nil, err
 	}
 
+	res, err = s.onDevice(ctx, b, id, method, p)
+	switch method {
+	case "boot", "shutdown", "reset", "crashes": // they end the watch or report crashes themselves
+		return res, nil, err
+	}
+	return s.report(ctx, b, id, res, err)
+}
+
+// onDevice runs one method on a resolved device whose arguments were checked.
+func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
 	switch method {
 	case "ui":
 		return b.UITree(ctx, id)
@@ -243,18 +283,23 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		return b.Screenshot(ctx, id, opts)
 	case "wait":
 		return s.wait(ctx, b, id, p)
-	}
-
-	// Capability arguments are checked before the device lock: a bad call fails at once.
-	if err := checkCapability(method, &p); err != nil {
-		return nil, err
+	case "logs": // reads of what the backend captured: no device lock
+		return s.logs(ctx, b, id, p)
+	case "crashes":
+		return s.crashes(ctx, b, id, p)
 	}
 
 	l := s.deviceLock(id)
 	l.Lock()
 	defer l.Unlock()
 
+	if method == "launch" {
+		s.launching(id, appOf(p.App), p.start) // a crash during the launch counts
+	}
 	res, err := s.act(ctx, b, id, method, p)
+	if err == nil {
+		s.track(id, method, p, res)
+	}
 	compound := p.WaitFor != nil && !p.WaitFor.Empty()
 	if err != nil || (!compound && !p.ReturnUI) {
 		return res, err
@@ -263,7 +308,7 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 	// call (one round trip, and one agent tool call, per step).
 	out := map[string]any{"result": res}
 	if compound {
-		waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs})
+		waited, werr := s.wait(ctx, b, id, Params{Selector: p.WaitFor, Gone: p.WaitGone, TimeoutMs: p.WaitTimeoutMs, start: p.start})
 		if werr != nil {
 			return nil, fmt.Errorf("%s done, but: %w", method, werr)
 		}
@@ -311,7 +356,9 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		if err != nil {
 			return nil, err
 		}
-		if st, ok := b.(backend.Settler); ok && atRest {
+		if et, ok := b.(backend.ElementTapper); ok && el != nil {
+			err = et.TapElement(ctx, id, el, atRest)
+		} else if st, ok := b.(backend.Settler); ok && atRest {
 			err = st.TapNow(ctx, id, x, y)
 		} else {
 			err = b.Tap(ctx, id, x, y)
@@ -389,13 +436,6 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 	if p.Selector == nil || p.Selector.Empty() {
 		return 0, 0, nil, false, fmt.Errorf("tap needs x,y or a selector")
 	}
-	// A frame read while the content still scrolls is stale by the time the tap lands (a
-	// "log out" button tapped right after a swipe was hit 200 px above its resting place).
-	st, settler := b.(backend.Settler)
-	still := false
-	if settler {
-		still, _ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
-	}
 	find := func() (*api.Element, error) {
 		t, err := b.UITree(ctx, id)
 		if err != nil {
@@ -407,8 +447,24 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 		}
 		return m[p.Selector.Index], nil
 	}
-	if el, err = find(); err != nil {
-		return 0, 0, nil, false, err
+	// A frame read while the content still scrolls is stale by the time the tap lands (a
+	// "log out" button tapped right after a swipe was hit 200 px above its resting place).
+	st, settler := b.(backend.Settler)
+	still := false
+	if ac, ok := b.(backend.Actionability); ok {
+		// The backend waits for transitions and for the element to stop moving (bounded; when
+		// it gives up, the tap goes to the latest read, as without the wait).
+		if el, _, err = ac.AwaitActionable(ctx, id, find); err != nil {
+			return 0, 0, nil, false, err
+		}
+		settler = false
+	} else {
+		if settler {
+			still, _ = st.Settle(ctx, id) // best effort: an unsettled screen still gets its tap
+		}
+		if el, err = find(); err != nil {
+			return 0, 0, nil, false, err
+		}
 	}
 	// Actionability: a disabled element ignores the tap (a "send" button enabled by text the
 	// app has not processed yet). Give it a moment to become enabled; tap it anyway after that.
@@ -489,9 +545,21 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		if floor := time.Now().Add(time.Second); rdl.Before(floor) {
 			rdl = floor
 		}
-		rctx, cancel := context.WithDeadline(ctx, rdl)
-		t, err := b.UITree(rctx, id)
-		cancel()
+		// A wait for an element while the launched app is down after a crash the agent has not
+		// heard of yet (during this call, or since its last call) would only time out: one more
+		// read, bounded short (on Android the first read after a crash waited out the
+		// accessibility timeout on the dying app's window, 5 s), then the crash ends the wait. A
+		// crash that comes during a read cuts that read short the same way.
+		var crashed *api.AppCrash
+		if !p.Gone {
+			if crashed = s.crashedUntold(ctx, b, id, p.start); crashed != nil {
+				rdl = time.Now().Add(crashedRead)
+			}
+		}
+		t, during, err := s.readWatchingCrash(ctx, b, id, p.start, rdl, !p.Gone && crashed == nil)
+		if crashed == nil {
+			crashed = during
+		}
 		lastErr = err
 		if err == nil {
 			m := Find(t, *p.Selector)
@@ -501,6 +569,12 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 			if !p.Gone && len(m) > 0 {
 				return m[0], nil
 			}
+		}
+		if !p.Gone && crashed == nil && time.Now().After(deadline) {
+			crashed = s.crashedUntold(ctx, b, id, p.start) // a crash during the last read
+		}
+		if crashed != nil {
+			return nil, &api.AppCrashedError{Crash: *crashed, Err: fmt.Errorf("stopped waiting for %s to appear", describe(*p.Selector))}
 		}
 		if time.Now().After(deadline) {
 			state := "appear"
@@ -532,6 +606,57 @@ func (s *Service) wait(ctx context.Context, b backend.Backend, id string, p Para
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// crashedRead bounds the last UI tree read of a wait once the watched app is known to have
+// crashed: the element may still show (a system window), but a read held up by the dying app
+// must not hold the answer. crashPoll is how often a wait asks the watcher (in memory) while a
+// read runs.
+const (
+	crashedRead = 300 * time.Millisecond
+	crashPoll   = 25 * time.Millisecond
+)
+
+// readWatchingCrash reads the UI tree within rdl. With watch set it asks the watcher every
+// crashPoll while the read runs; once the watched app's untold crash shows, the read gets
+// crashedRead more, and the crash is returned with whatever the read gave.
+func (s *Service) readWatchingCrash(ctx context.Context, b backend.Backend, id string, start, rdl time.Time, watch bool) (*api.UITree, *api.AppCrash, error) {
+	rctx, cancel := context.WithDeadline(ctx, rdl)
+	defer cancel()
+	if !watch {
+		t, err := b.UITree(rctx, id)
+		return t, nil, err
+	}
+	var crashed atomic.Pointer[api.AppCrash]
+	done := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		tick := time.NewTicker(crashPoll)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
+			if c := s.crashedUntold(rctx, b, id, start); c != nil {
+				crashed.Store(c)
+				t := time.NewTimer(crashedRead)
+				defer t.Stop()
+				select {
+				case <-done:
+				case <-t.C:
+					cancel()
+				}
+				return
+			}
+		}
+	}()
+	t, err := b.UITree(rctx, id)
+	close(done)
+	<-watched
+	return t, crashed.Load(), err
 }
 
 // frameDeadline bounds one frame request: never past the wait's deadline (plus the 1 s a last
