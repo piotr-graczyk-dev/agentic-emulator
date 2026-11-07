@@ -300,6 +300,9 @@ type deviceLogs struct {
 
 	intern map[string]string
 
+	// paste is what the stream delivered from the pasteboard daemon (paste.go).
+	paste pasteLog
+
 	// procs are the app processes the crash watcher knows (crashes.go); expect lists agemu's
 	// calls that end apps; changed is closed when the stream adds an exit's details.
 	procs   map[int]*appProc
@@ -483,6 +486,9 @@ func (b *Backend) ingest(dl *deviceLogs, s *logStream, ev *streamEvent) {
 		}
 	}
 	rec := dl.recordLocked(ev, t)
+	if isPastedLine(ev, rec.bundle) {
+		dl.paste.add(t, ev.EventMessage)
+	}
 	dl.seq++
 	rec.seq = dl.seq
 	if strings.HasPrefix(rec.bundle, "user/") {

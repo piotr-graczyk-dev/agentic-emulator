@@ -166,8 +166,13 @@ What each capability does differently from a person using a real device:
   - The Mac's clipboard does not reach the device (iOS: the helper's pasteboard is private;
     Android: checked from the Mac to the guest).
   - agemu's own iOS typing pastes through the clipboard and puts the old content back once the
-    focused field shows the paste. When that cannot be confirmed (a secure field, a web view, a
-    second paste), the typed text stays on the clipboard, so the app never pastes the old content.
+    focused field shows the paste. When the field cannot show it (a secure field, a web view, a
+    repeated paste), the typed text stays on the clipboard, so the app never pastes the old
+    content.
+- **type** (iOS) also uses the log capture below: a paste is repeated when the pasteboard daemon
+  logged no app reading it, or once more when an app read it but a field that reads back as text
+  had not changed 2 s later ([IOS.md](IOS.md#confirming-a-paste)). With no focused field a call
+  now sends 3 Cmd-Vs (1.6-2.6 s).
 - **appearance**: a real configuration change (Android `uimode`; iOS interface style). Apps
   redraw as on a device. Android recreates activities that do not handle the change, and waits
   for the new window; an activity that handles `uiMode` itself redraws in place, and agemu does
@@ -457,10 +462,12 @@ host load average 9-15:
   the CLI (one process per call) 8.2-12.1 ms.
 - **Deviations**: verbose and debug lines are captured (Android's logd does not change what an
   app logs when someone reads); `Log.wtf` logs at E on this image, so it is `error`. A wait
-  after a crash stops 326 ms after it (n=5; 5.0 s before the merge), but the first UI tree read
-  after a crash still waits out Android's 5 s accessibility timeout on the dying app's window
-  inside the device, so the next call that reads the tree took about 4.7 s (calls that do not
-  read the tree carry the notice within milliseconds). With a 5,000-line burst that overflows
+  after a crash stops 30-169 ms after it (medians per crash kind, n=8 each; 326-377 ms on the
+  round-4 build, 5.0 s before it). The on-device agent no longer waits for the window of an app
+  whose process is gone (crashing, dead, or stopped by `crash_dump`): the first UI tree read once
+  the crash is known took 3.4-113 ms (medians per kind, n=12) instead of up to 5.0 s, and the
+  read after the wait 2.8-5.3 ms instead of 4.7 s (see ANDROID.md, "The first tree read after a
+  crash"). Calls that do not read the tree carry the notice within milliseconds. With a 5,000-line burst that overflows
   logd, logd kept fewer lines with capture on (median 3,153 against 4,618, n=4 each, p≈0.06)
   and the app's own `Log.i` calls were slower (median 7.54 against 6.43 ms per burst, 20 each,
   p≈0.01). The second crash of an app within a minute shows "keeps stopping": its

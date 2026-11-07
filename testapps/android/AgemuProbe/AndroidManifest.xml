@@ -27,6 +27,9 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- a normal permission (raw name; granted at install, cannot be changed) -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- ParkActivity: a TCP stream from the host and an exact alarm (both granted at install) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application android:label="Agemu Probe" android:allowBackup="false">
         <!-- Launcher and deep links that a link in another app may open (BROWSABLE). -->
@@ -59,6 +62,8 @@
                 <data android:scheme="agemulab" />
             </intent-filter>
         </activity>
+        <!-- What an app sees of agemu park and resume: am start -n dev.agemu.probe/.ParkActivity. -->
+        <activity android:name=".ParkActivity" android:exported="true" />
         <!-- A second process of the app (same uid): dev.agemu.probe:remote. -->
         <service android:name=".RemoteService" android:process=":remote" android:exported="false" />
     </application>

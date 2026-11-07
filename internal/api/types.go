@@ -134,11 +134,15 @@ type Device struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Platform  Platform `json:"platform"`
-	State     string   `json:"state"` // "shutdown" | "booting" | "booted"
+	State     string   `json:"state"` // "shutdown" | "booting" | "booted" | "parked"
 	Profile   string   `json:"profile,omitempty"`
 	Screen    *Screen  `json:"screen,omitempty"`
 	OSVersion string   `json:"osVersion,omitempty"`
 }
+
+// StateParked is the state of a booted device that `park` stopped in place
+// (backend.Parker); the next call on it resumes it.
+const StateParked = "parked"
 
 // Screen is the current logical screen as seen by apps and screenshots.
 type Screen struct {

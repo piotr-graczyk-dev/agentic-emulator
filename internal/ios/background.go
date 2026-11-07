@@ -237,18 +237,34 @@ type deviceBackground struct {
 	ready time.Time
 }
 
+// waitUntil also holds a pass while the simulator is parked, and moves the later passes by as
+// long (waitWhileParked): a pass that fell into the park runs once it is resumed.
 func (e *deviceBackground) waitUntil(at time.Duration) bool {
-	select {
-	case <-e.b.bg.Done():
-		return false
-	case <-time.After(time.Until(e.ready.Add(at))):
-		return true
+	for {
+		select {
+		case <-e.b.bg.Done():
+			return false
+		case <-time.After(time.Until(e.ready.Add(at))):
+		}
+		held, ok := e.b.waitWhileParked(e.d.UDID, e.gen)
+		if !ok {
+			return false
+		}
+		if held < parkPoll {
+			return true
+		}
+		e.ready = e.ready.Add(held)
 	}
 }
 
 func (e *deviceBackground) current() bool { return e.b.currentBoot(e.d.UDID, e.gen) }
 
 func (e *deviceBackground) processes() ([]simProc, error) {
+	if e.b.isParked(e.d.UDID) {
+		// Parked after waitUntil let the pass run: its processes cannot be asked whether they
+		// are in front, so the pass finds nothing and stops nothing.
+		return nil, nil
+	}
 	out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return nil, err

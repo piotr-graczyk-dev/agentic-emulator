@@ -38,6 +38,9 @@ Device commands (-d <device> optional when exactly one device is booted):
   create --platform android|ios --name N [--profile P]
   boot <device> [--cold]                    boot (warm snapshot by default)
   shutdown | reset                          stop / restore clean baseline
+  park | resume                             stop a booted device in place (no CPU, memory the
+                                            host can reclaim) / continue it; any other command
+                                            on a parked device resumes it first
   profile <name> | --width W --height H --density D
   screenshot [-o file.png] [--scale 0.5] [--format png|jpeg]
   ui [--json]                               UI tree (text outline by default)
@@ -320,7 +323,7 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 		p.Platform = api.Platform(c.flags["platform"])
 		p.Name = c.flags["name"]
 		p.Profile = c.flags["profile"]
-	case "boot", "shutdown", "reset":
+	case "boot", "shutdown", "reset", "park", "resume":
 		if len(c.pos) > 0 {
 			p.Device = c.pos[0]
 		}

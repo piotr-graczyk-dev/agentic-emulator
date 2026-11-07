@@ -257,6 +257,9 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		st, verr := e.vmState(c)
 		cancel()
 		if verr == nil && st == emupb.VmRunState_PAUSED {
+			if d.parked() {
+				return nil, nil, fmt.Errorf("device android:%s is parked; agemu resume -d android:%s", d.name, d.name)
+			}
 			return nil, nil, fmt.Errorf("device android:%s is shut down (in standby); agemu boot android:%s", d.name, d.name)
 		}
 		// First contact with this emulator from this daemon: make sure our agent version runs.
@@ -437,7 +440,9 @@ func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
 	d.mu.Unlock()
 	if _, ok := run[a.Name]; ok {
 		dev.State = "booted"
-		if standbyEnabled() && d.inStandby(context.Background()) {
+		if d.parked() {
+			dev.State = api.StateParked // paused in place (park.go)
+		} else if standbyEnabled() && d.inStandby(context.Background()) {
 			dev.State = "shutdown" // standby: paused at the baseline, boots in a moment
 		}
 	}
@@ -579,18 +584,28 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 
 // snapshotCompressEnv maps AGEMU_ANDROID_SNAPSHOT_COMPRESS to the emulator's
 // ANDROID_SNAPSHOT_COMPRESS, which it reads when it saves a snapshot (loads read either format).
-// "1": LZ4-compressed RAM, ram.bin about 41% of the raw size, at about 3 CPU-seconds more per
-// load. "0": always raw. Unset (or any other value) leaves the emulator's own choice, which is
-// not always raw: emulator 37.1 can turn compression on by itself when the host has little free
-// RAM or the snapshot is on an HDD ("Enabling RAM compression: only %u MB of free RAM").
-// See docs/ANDROID.md, Caveats (Disk).
+// The baseline's RAM is saved LZ4-compressed unless the setting is "0" (raw). On agemu-lab
+// (2026-11-07, 16 blocks alternating the format, each with its own baseline, on a host whose
+// disk and CPU other sessions shared) ram.bin took 0.83-0.89 GB instead of 2.04-2.05 GB, resets
+// were faster (medians 1.75 against 2.28 s with the page cache as found, 2.35 against 2.66 s
+// read from the SSD), powered-off boots 7-9% faster by median but 13% slower in one set of 4 at
+// a higher load, and each reset cost the emulator 1.9-3.6 more CPU-seconds (LZ4 decompresses on
+// a thread pool). On a quiet disk raw loads were faster in round 1 (1.36 s), not measured
+// again. The variable is always passed, so an ANDROID_SNAPSHOT_COMPRESS the daemon inherited
+// no longer applies: without it emulator 37.1 chooses by itself (it compresses when the host has
+// little free RAM or the snapshot is on an HDD). See docs/ANDROID.md, Caveats (Disk).
 func snapshotCompressEnv(v string) []string {
-	switch v {
-	case "0", "1":
-		// Appended after the daemon's environment: exec uses the last value of a duplicate key.
-		return []string{"ANDROID_SNAPSHOT_COMPRESS=" + v}
+	if v == "0" {
+		return []string{"ANDROID_SNAPSHOT_COMPRESS=0"}
 	}
-	return nil
+	return []string{"ANDROID_SNAPSHOT_COMPRESS=1"}
+}
+
+// emulatorEnv is the environment agemu starts the emulator with: the daemon's (environ), then
+// the snapshot compression setting. exec uses the last value of a duplicate key, so the setting
+// also wins over an ANDROID_SNAPSHOT_COMPRESS the daemon inherited.
+func emulatorEnv(environ []string) []string {
+	return append(environ, snapshotCompressEnv(os.Getenv("AGEMU_ANDROID_SNAPSHOT_COMPRESS"))...)
 }
 
 // inPlaceBootLoad: a new emulator process starts without loading a snapshot and the baseline
@@ -614,7 +629,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	}
 	if _, ok := findRunning(d.name); ok {
 		if !opts.Cold && d.inStandby(ctx) {
-			if err := d.resume(ctx); err != nil {
+			if err := d.resume(ctx, nil); err != nil {
 				return api.Device{}, err
 			}
 			d.mu.Lock()
@@ -766,10 +781,11 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 		return err
 	}
 	defer lf.Close()
+	d.clearPark() // a new emulator process starts running
 	args := emulatorArgs(d.name, p, a, loadBaseline)
 	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
-	cmd.Env = append(os.Environ(), snapshotCompressEnv(os.Getenv("AGEMU_ANDROID_SNAPSHOT_COMPRESS"))...)
+	cmd.Env = emulatorEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
 	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
 	if err := cmd.Start(); err != nil {
@@ -1055,6 +1071,9 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 func standbyEnabled() bool { return env("AGEMU_ANDROID_STANDBY", "1") != "0" }
 
 func (d *device) inStandby(ctx context.Context) bool {
+	if d.parked() {
+		return false // paused in place, not at the baseline (park.go)
+	}
 	e, _, err := d.connRaw(ctx)
 	if err != nil {
 		return false
@@ -1100,8 +1119,9 @@ func (d *device) enterStandby(ctx context.Context) error {
 	return nil
 }
 
-// resume wakes a device from standby and waits until the agent answers.
-func (d *device) resume(ctx context.Context) error {
+// resume wakes a device from standby and waits until the agent answers. running, if not nil,
+// is called once the VM runs again, before that wait.
+func (d *device) resume(ctx context.Context, running func()) error {
 	e, a, err := d.connRaw(ctx)
 	if err != nil {
 		return err
@@ -1109,6 +1129,9 @@ func (d *device) resume(ctx context.Context) error {
 	e.stream.invalidate()
 	if err := e.setVM(ctx, emupb.VmRunState_RUNNING); err != nil {
 		return err
+	}
+	if running != nil {
+		running()
 	}
 	defer d.markInput()
 	return waitAgent(ctx, a, 30*time.Second)
@@ -1140,6 +1163,7 @@ func (d *device) shutdown(ctx context.Context) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	d.drop()
+	d.clearPark()
 	// The emulator removes its discovery file on exit; a killed one may leave it behind.
 	if !pidAlive(r.PID) || d.reaped(r.PID) {
 		_ = os.Remove(filepath.Join(discoveryDir(), fmt.Sprintf("pid_%d.ini", r.PID)))

@@ -75,6 +75,12 @@ type Backend struct {
 	reports *reportDir
 	// seen holds, per udid, the elements of recent UI tree reads (see ready.go).
 	seen map[string]*seenElements
+	// parked holds the simulators that are parked (park.go); parkScan fills it once with the
+	// simulators a previous daemon left parked. stoppedPids holds, per parked simulator, the
+	// processes this daemon's park stopped (the only ones its resume continues).
+	parked, parking map[string]bool
+	stoppedPids     map[string]map[int]bool
+	parkScan        sync.Once
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -88,7 +94,8 @@ type Backend struct {
 func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
 		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, bootGen: map[string]int{},
-		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{}}
+		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{},
+		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -260,9 +267,20 @@ func (b *Backend) List(ctx context.Context) ([]api.Device, error) {
 	}
 	all := envOn("AGEMU_IOS_ALL_DEVICES")
 	out := []api.Device{}
+	var marked []string
+	for _, d := range ds {
+		if d.StateCode == stateBooted && b.isParked(d.UDID) {
+			marked = append(marked, d.UDID)
+		}
+	}
+	stopped := b.stillParked(psTree, marked)
 	for _, d := range ds {
 		if all || managed(d.Name) {
-			out = append(out, d.api())
+			dev := d.api()
+			if stopped[d.UDID] {
+				dev.State = api.StateParked
+			}
+			out = append(out, dev)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -491,7 +509,13 @@ func (b *Backend) bootReadyOnce(ctx context.Context, udid string, afterBootCall 
 	}
 	cold := d.StateCode != stateBooted
 	var bootCall time.Duration
+	galleryBefore := ""
 	if cold {
+		if managed(d.Name) && leanOn() {
+			// Read while the device is down; PosterBoard logs its next update a few seconds
+			// into the boot (see posterboard.go).
+			galleryBefore = galleryUpdateBeforeBoot(d.DataPath)
+		}
 		if err := b.call(ctx, "boot", map[string]any{"udid": udid}, &d); err != nil {
 			return simDevice{}, err
 		}
@@ -544,7 +568,7 @@ func (b *Backend) bootReadyOnce(ctx context.Context, udid string, afterBootCall 
 			return simDevice{}, err
 		}
 	}
-	b.leanDevice(dev, cold)
+	b.leanDevice(dev, cold, galleryBefore)
 	b.animateDevice(ctx, dev, cold)
 	return dev, nil
 }
@@ -564,6 +588,11 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 }
 
 func (b *Backend) shutdown(ctx context.Context, udid string) error {
+	// A parked simulator (an eviction victim, say) is continued first: its stopped launchd_sim
+	// cannot take part in the shutdown.
+	if _, _, err := b.unpark(udid); err != nil {
+		log.Printf("ios shutdown %s: continuing the parked simulator: %v", udid, err)
+	}
 	if err := b.call(ctx, "shutdown", map[string]any{"udid": udid}, nil); err != nil {
 		return err
 	}
@@ -873,7 +902,9 @@ func (b *Backend) TypeKeys(ctx context.Context, id, text string) error {
 
 // paste types text by pasting it, and puts the pasteboard back as it was (every item and type),
 // so typing does not change what the app or the agent's clipboard calls see. The pasteboard is
-// put back only once the focused field shows the paste (see pasteRestoring).
+// put back only once the focused field shows the paste (see pasteRestoring). Cmd-V is sent again
+// when the pasteboard daemon logged no app reading the paste, or once more when an app read it but
+// a field that reads back as text had not changed 2 s later (see paste.go).
 //
 // The helper's pasteboard uses a private CoreSimulator class. If it is not available (another
 // Xcode), typing falls back to `simctl pbcopy`, as before the clipboard capability, and leaves
@@ -882,97 +913,39 @@ func (b *Backend) paste(ctx context.Context, udid, text string) error {
 	if text == "" {
 		return nil
 	}
-	read := func() (string, bool) { return b.focusedFieldValue(ctx, udid) }
-	key := func() error { return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil) }
-	retrying := func() { log.Printf("ios type on %s: the focused field did not change; pasting again", udid) }
+	p := &paster{
+		read: func() (string, bool) { return b.focusedFieldValue(ctx, udid) },
+		key:  func() error { return b.call(ctx, "key", map[string]any{"udid": udid, "key": "paste"}, nil) },
+		retrying: func(why string) {
+			log.Printf("ios type on %s: pasting again: %s", udid, why)
+		},
+		now:   time.Now,
+		sleep: time.Sleep,
+		// A read of the pasteboard through the helper makes pasted log a line.
+		obs: b.pasteObserverFor(udid, func() {
+			go func() { _ = b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "get"}, nil) }()
+		}),
+	}
 	save := func() error { return b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "save"}, nil) }
 	if err := save(); err != nil {
 		log.Printf("ios type on %s: the helper's pasteboard is not available (%v); typing through simctl pbcopy, which leaves the text on the pasteboard", udid, err)
-		_, err := pasteVerified(func() error { return simctlStdin(ctx, text, "pbcopy", udid) }, key, read, retrying)
+		p.set = func() error { return simctlStdin(ctx, text, "pbcopy", udid) }
+		_, err := p.run()
 		return err
+	}
+	p.set = func() error {
+		return b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "set", "text": text}, nil)
 	}
 	return pasteRestoring(
 		func() error { return nil }, // saved above
-		func() (bool, error) {
-			return pasteVerified(
-				func() error {
-					return b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "set", "text": text}, nil)
-				},
-				key, read, retrying,
-			)
-		},
+		p.run,
 		func() error { return b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "restore"}, nil) },
 		func() {
 			// Drop the saved copy; the typed text stays on the pasteboard.
 			_ = b.call(ctx, "pasteboard", map[string]any{"udid": udid, "op": "discard"}, nil)
-			log.Printf("ios type on %s: the paste could not be confirmed in the focused field; the typed text stays on the pasteboard", udid)
+			log.Printf("ios type on %s: the paste could not be confirmed in the focused field (%s); the typed text stays on the pasteboard", udid, p.describe())
 		},
 	)
-}
-
-// pasteRestoring saves the pasteboard, pastes, and puts the pasteboard back once the paste is
-// confirmed: the focused field changed, so the app has read the pasteboard. An unconfirmed paste
-// (a secure field, a web view or custom input that does not read back as text, or a paste that
-// had to be sent twice) keeps the typed text on the pasteboard (keep), because the app may still
-// be about to read it, and a restore that won that race would make the app paste the old
-// content. A failed paste restores it.
-func pasteRestoring(save func() error, paste func() (bool, error), restore func() error, keep func()) error {
-	if err := save(); err != nil {
-		return fmt.Errorf("saving the pasteboard before typing: %w", err)
-	}
-	confirmed, err := paste()
-	if err == nil && !confirmed {
-		keep()
-		return nil
-	}
-	if rerr := restore(); rerr != nil {
-		if err == nil {
-			err = fmt.Errorf("typed, but restoring the pasteboard failed: %w", rerr)
-		}
-	}
-	return err
-}
-
-// pasteVerified sets the pasteboard (setPasteboard), pastes (paste) and checks that the
-// focused field changed, using read (ok=false: no literal text field in focus). The field is
-// read before the paste, while the pasteboard is set, so a lost paste can be told apart from
-// one the field transformed (a formatted phone number, upper-casing): only a field that did
-// not change at all gets a second paste. The first read finishes before the paste is sent, or
-// a late read could see the pasted text and trigger a duplicate. confirmed reports that the
-// field was seen to change.
-func pasteVerified(setPasteboard, paste func() error, read func() (string, bool), retrying func()) (confirmed bool, err error) {
-	type fieldState struct {
-		value string
-		ok    bool
-	}
-	before := make(chan fieldState, 1)
-	go func() {
-		v, ok := read()
-		before <- fieldState{v, ok}
-	}()
-	if err := setPasteboard(); err != nil {
-		<-before
-		return false, err
-	}
-	pre := <-before
-	if err := paste(); err != nil {
-		return false, err
-	}
-	if !pre.ok {
-		return false, nil
-	}
-	for _, pause := range []time.Duration{0, 150 * time.Millisecond} {
-		time.Sleep(pause)
-		v, ok := read()
-		if !ok {
-			return false, nil // the field went away: the paste may have arrived; it cannot be told
-		}
-		if v != pre.value {
-			return true, nil // the field changed: the paste arrived (possibly transformed)
-		}
-	}
-	retrying()
-	return false, paste()
 }
 
 // focusedFieldValue returns the text of the focused text field. ok is false when there is no

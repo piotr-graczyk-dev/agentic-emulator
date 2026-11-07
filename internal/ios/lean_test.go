@@ -93,43 +93,52 @@ func TestGalleryToStop(t *testing.T) {
 func TestNextGalleryPass(t *testing.T) {
 	s := time.Second
 	type step struct {
-		known, stopped bool
-		want           time.Duration
-		more           bool
+		known, stopped, settled bool
+		want                    time.Duration
+		more                    bool
 	}
 	for name, c := range map[string]struct {
 		steps []step
 	}{
-		// A later boot: the store is known and the 45 s pass stops nothing, so it ends there.
-		"known, quiet": {[]step{{true, true, 8 * s, true}, {true, false, 20 * s, true}, {true, false, 45 * s, true}, {true, false, 0, false}}},
+		// A later boot: the store is known, the keynote mode settled and the 45 s pass stops
+		// nothing, so it ends there.
+		"known, quiet": {[]step{{true, true, true, 8 * s, true}, {true, false, true, 20 * s, true},
+			{true, false, true, 45 * s, true}, {true, false, true, 0, false}}},
 		// The 45 s pass still stopped something: one more pass 15 s later, until one stops nothing.
-		"known, still starting": {[]step{{true, true, 8 * s, true}, {true, true, 20 * s, true}, {true, true, 45 * s, true},
-			{true, true, 60 * s, true}, {true, false, 0, false}}},
+		"known, still starting": {[]step{{true, true, true, 8 * s, true}, {true, true, true, 20 * s, true},
+			{true, true, true, 45 * s, true}, {true, true, true, 60 * s, true}, {true, false, true, 0, false}}},
 		// A first boot: the lock screen's poster is written late, so the passes go on until it is.
-		"first boot": {[]step{{false, false, 8 * s, true}, {false, false, 20 * s, true}, {false, false, 45 * s, true},
-			{false, false, 60 * s, true}, {false, false, 75 * s, true}, {true, true, 90 * s, true}, {true, false, 0, false}}},
+		"first boot": {[]step{{false, false, true, 8 * s, true}, {false, false, true, 20 * s, true},
+			{false, false, true, 45 * s, true}, {false, false, true, 60 * s, true}, {false, false, true, 75 * s, true},
+			{true, true, true, 90 * s, true}, {true, false, true, 0, false}}},
+		// PosterBoard is still building its gallery after 45 s (the keynote mode is not settled):
+		// the passes go on until it is, although none stops anything.
+		"gallery still building": {[]step{{true, false, false, 8 * s, true}, {true, false, false, 20 * s, true},
+			{true, false, false, 45 * s, true}, {true, false, false, 60 * s, true}, {true, false, true, 0, false}}},
 	} {
-		at, more := nextGalleryPass(0, false, false)
+		at, more := nextGalleryPass(0, false, false, false)
 		if at != 3*s || !more {
 			t.Fatalf("%s: first pass %v %v, want 3s", name, at, more)
 		}
 		for i, st := range c.steps {
-			at, more = nextGalleryPass(at, st.known, st.stopped)
+			at, more = nextGalleryPass(at, st.known, st.stopped, st.settled)
 			if more != st.more || (more && at != st.want) {
 				t.Fatalf("%s step %d: %v %v, want %v %v", name, i, at, more, st.want, st.more)
 			}
 		}
 	}
-	// Never past 5 minutes, even when the store is never written.
-	at, more := 45*s, true
-	n := 0
-	for more {
-		at, more = nextGalleryPass(at, false, false)
-		if more && at > galleryRetryUntil {
-			t.Fatalf("pass at %v, after %v", at, galleryRetryUntil)
-		}
-		if n++; n > 100 {
-			t.Fatal("passes never end")
+	// Never past 5 minutes, even when the store is never written or the gallery never built.
+	for _, known := range []bool{false, true} {
+		at, more := 45*s, true
+		n := 0
+		for more {
+			at, more = nextGalleryPass(at, known, false, !known)
+			if more && at > galleryRetryUntil {
+				t.Fatalf("pass at %v, after %v", at, galleryRetryUntil)
+			}
+			if n++; n > 100 {
+				t.Fatal("passes never end")
+			}
 		}
 	}
 }
@@ -227,7 +236,7 @@ func TestClosedBackendStartsNothing(t *testing.T) {
 	if _, err := b.helper(); err == nil {
 		t.Fatal("helper() after Close started a helper")
 	}
-	b.leanDevice(simDevice{UDID: "U", Name: NamePrefix + "x"}, true)
+	b.leanDevice(simDevice{UDID: "U", Name: NamePrefix + "x"}, true, "")
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.leaning) != 0 || len(b.bootGen) != 0 {

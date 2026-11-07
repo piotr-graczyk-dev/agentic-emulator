@@ -90,9 +90,11 @@ func leanOn() bool {
 // checked once per daemon and again after every cold boot; a request that arrives while the
 // device is being reconciled runs once that finishes. After a cold boot of a lean device the
 // wallpaper gallery and what iOS starts in the background are stopped too, each on its own
-// schedule (a newer boot restarts them). Failures are logged and leave the device unchecked, so
-// the next boot tries again: a device that is not lean still works.
-func (b *Backend) leanDevice(d simDevice, cold bool) {
+// schedule (a newer boot restarts them), and PosterBoard's gallery is kept from starting at later
+// boots (see posterboard.go; galleryBefore is its newest update entry before this boot). Failures
+// are logged and leave the device unchecked, so the next boot tries again: a device that is not
+// lean still works.
+func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 	if !managed(d.Name) {
 		return
 	}
@@ -108,7 +110,7 @@ func (b *Backend) leanDevice(d simDevice, cold bool) {
 		b.bgWG.Add(2)
 		go func() {
 			defer b.bgWG.Done()
-			b.stopWallpaperGallery(d, gen)
+			b.stopWallpaperGallery(d, gen, galleryBefore)
 		}()
 		go func() {
 			defer b.bgWG.Done()
@@ -151,6 +153,20 @@ func (b *Backend) applyLean(ctx context.Context, d simDevice, on bool) {
 	b.mu.Lock()
 	delete(b.lean, d.UDID)
 	b.mu.Unlock()
+	if !on {
+		// A failure here (a defaults spawn that failed just after boot, say) is logged and
+		// leaves the device unchecked, so the next boot tries again; the launchd jobs below are
+		// turned back on regardless.
+		unfrozen := unfreezeGallery(devicePosterBoard{b, d.UDID}, d.Name)
+		if unfrozen != nil {
+			log.Printf("ios lean %s: turning PosterBoard's keynote mode off: %v (tried again at the next boot)", d.Name, unfrozen)
+			defer func() {
+				b.mu.Lock()
+				delete(b.lean, d.UDID)
+				b.mu.Unlock()
+			}()
+		}
+	}
 	start := time.Now()
 	out, err := b.launchctl(ctx, d.UDID, "print-disabled", "system")
 	if err != nil {
@@ -239,14 +255,18 @@ func disabledJobs(out string) map[string]bool {
 // are (see postersInUse). Nothing is stopped until the store has been read, and only the
 // gallery's own extensions are (see galleryToStop).
 // After the first 45 s stopped gallery extensions stayed stopped, also through lock and unlock,
-// and the lock screen drew its wallpaper, clock and notifications. The passes run on the schedule
-// of nextGalleryPass. A newer cold boot of the device (gen) or the backend closing ends it.
-func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
+// and the lock screen drew its wallpaper, clock and notifications. The passes also turn
+// PosterBoard's keynote mode on once it has built its gallery (freezeGalleryStep; before is its
+// newest update entry before this boot), after which later boots start no gallery extension and
+// these passes find none. They run on the schedule of nextGalleryPass. A newer cold boot of the
+// device (gen) or the backend closing ends it.
+func (b *Backend) stopWallpaperGallery(d simDevice, gen int, before string) {
 	ready := time.Now()
 	stopped := map[string]int{}
 	var keep map[string]bool
 	var keepErr error
-	at, more := nextGalleryPass(0, false, false)
+	settled := false
+	at, more := nextGalleryPass(0, false, false, false)
 	for more {
 		select {
 		case <-b.bg.Done():
@@ -255,6 +275,13 @@ func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 		}
 		if !b.currentBoot(d.UDID, gen) {
 			return
+		}
+		// A pass that falls into a park runs once the simulator is resumed, and the later
+		// passes move by as long.
+		if held, ok := b.waitWhileParked(d.UDID, gen); !ok {
+			return
+		} else if held >= parkPoll {
+			ready = ready.Add(held)
 		}
 		// ww: the provider is in the extension's launch arguments, so the command lines must not
 		// be cut (ps cuts them to the terminal's width when it has one).
@@ -277,10 +304,16 @@ func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 				n++
 			}
 		}
-		at, more = nextGalleryPass(at, keep != nil, n > 0)
+		if !settled {
+			settled = freezeGalleryStep(devicePosterBoard{b, d.UDID}, before, d.Name)
+		}
+		at, more = nextGalleryPass(at, keep != nil, n > 0, settled)
 	}
 	if keep == nil && keepErr != nil {
 		log.Printf("ios lean %s: wallpaper gallery left running: %v", d.Name, keepErr)
+	}
+	if !settled {
+		log.Printf("ios lean %s: PosterBoard did not finish building its wallpaper gallery in %v; its keynote mode stays off until a later boot", d.Name, galleryRetryUntil)
 	}
 	if len(stopped) > 0 {
 		log.Printf("ios lean %s: stopped %s; kept the posters in use: %s", d.Name, stoppedSummary(stopped), strings.Join(sortedKeys(keep), ", "))
@@ -306,14 +339,15 @@ const (
 // nextGalleryPass returns when the pass after the one at last runs (as a time after the device is
 // ready), or false when the stop is done. After the fixed passes it goes on every 15 s, up to 5
 // min after ready, while the lock screen's providers are not known yet (the first boot of a new
-// device) or the last pass stopped an extension (the gallery was still starting).
-func nextGalleryPass(last time.Duration, known, stoppedSome bool) (time.Duration, bool) {
+// device), the last pass stopped an extension (the gallery was still starting), or PosterBoard's
+// keynote mode is not settled yet (settled false: PosterBoard is still building its gallery).
+func nextGalleryPass(last time.Duration, known, stoppedSome, settled bool) (time.Duration, bool) {
 	for _, p := range galleryPasses {
 		if p > last {
 			return p, true
 		}
 	}
-	if (known && !stoppedSome) || last+galleryRetryEvery > galleryRetryUntil {
+	if (known && !stoppedSome && settled) || last+galleryRetryEvery > galleryRetryUntil {
 		return 0, false
 	}
 	return last + galleryRetryEvery, true

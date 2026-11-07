@@ -161,6 +161,21 @@ if [[ -n "$TESTAPP" ]]; then
   expect "relaunch after the crash" launch dev.agemu.testapp --relaunch -- -logs
   expect "terminate (no notice)" terminate dev.agemu.testapp
   grep -qF "note:" <<<"$LAST" && bad "terminate produced a crash notice" || ok "terminate is not a crash"
+
+  step "park: the simulator stops in place and the next call resumes it with the app as it was"
+  expect "launch the test app" launch dev.agemu.testapp --relaunch
+  expect "wait for the Increment button" wait --id increment --timeout-ms 20000
+  expect "tap Increment" tap --id increment --wait-text "Count: 1"
+  expect "park" park
+  ag devices
+  grep -qF '"state":"parked"' <<<"$LAST" && ok "devices lists the simulator as parked" || bad "devices: $LAST"
+  expect "a wait on the parked simulator resumes it; the count is kept" wait --text "Count: 1" --timeout-ms 10000
+  ag devices
+  grep -qF '"state":"parked"' <<<"$LAST" && bad "still parked after a call: $LAST" || ok "not parked after the call"
+  expect "resume of a running simulator" resume
+  has "resume had nothing to do" '"resumed":false'
+  expect "tap Increment after the resume" tap --id increment --wait-text "Count: 2"
+  expect "terminate the test app" terminate dev.agemu.testapp
 fi
 
 step "screen profiles: screenshot pixels equal the profile size"

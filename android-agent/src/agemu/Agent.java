@@ -489,7 +489,7 @@ public final class Agent {
                 if (win.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(win.isActive() || win.isFocused())) continue;
                 Rect b = new Rect();
                 win.getBoundsInScreen(b);
-                AccessibilityNodeInfo r = win.getRoot();
+                AccessibilityNodeInfo r = Windows.root(win);
                 if (r == null || r.getChildCount() == 0) return false;
                 Rect rb = new Rect();
                 r.getBoundsInScreen(rb);
@@ -525,9 +525,10 @@ public final class Agent {
         sb.append(",\"rotation\":").append(intField(di, "rotation"));
         sb.append(",\"windows\":[");
         boolean first = true;
-        for (AccessibilityWindowInfo w : ws) {
-            AccessibilityNodeInfo root = w.getRoot();
-            Rect wb = new Rect();
+        List<Integer> ids = new ArrayList<>(ws.size());
+        for (final AccessibilityWindowInfo w : ws) {
+            ids.add(w.getId());
+            final Rect wb = new Rect();
             w.getBoundsInScreen(wb);
             if (!wb.intersect(screen)) continue;
             if (!first) sb.append(',');
@@ -538,15 +539,27 @@ public final class Agent {
             sb.append(",\"focused\":").append(w.isFocused());
             sb.append(",\"title\":"); str(sb, cs(w.getTitle()));
             sb.append(",\"b\":["); rect(sb, wb); sb.append(']');
-            if (root != null) {
-                String pkg = cs(root.getPackageName());
+            // The content is read from the window's app, which may be dying (see Windows): null
+            // when the window has no root or its process is gone.
+            String[] content = Windows.read(w, new java.util.concurrent.Callable<String[]>() {
+                public String[] call() {
+                    AccessibilityNodeInfo root = w.getRoot();
+                    if (root == null) return null;
+                    StringBuilder nb = new StringBuilder(1 << 12);
+                    node(nb, root, wb, 0);
+                    return new String[]{cs(root.getPackageName()), nb.toString()};
+                }
+            });
+            if (content != null) {
+                String pkg = content[0];
+                Windows.learn(w.getId(), pkg);
                 sb.append(",\"pkg\":"); str(sb, pkg);
                 if (app.isEmpty() && w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && (w.isActive() || w.isFocused())) app = pkg;
-                sb.append(",\"root\":");
-                node(sb, root, wb, 0);
+                sb.append(",\"root\":").append(content[1]);
             }
             sb.append('}');
         }
+        Windows.keepOnly(ids);
         sb.append("],\"app\":"); str(sb, app);
         sb.append('}');
     }
@@ -596,12 +609,18 @@ public final class Agent {
         sb.append('}');
     }
 
+    /**
+     * The package of the active application window. A window whose app is gone (see Windows) is
+     * still the one in front: its package is the one its content had when it was last read.
+     */
     static String foreground() {
         try {
             for (AccessibilityWindowInfo w : ua.getWindows()) {
                 if (w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && (w.isActive() || w.isFocused())) {
-                    AccessibilityNodeInfo r = w.getRoot();
+                    AccessibilityNodeInfo r = Windows.root(w);
                     if (r != null) return cs(r.getPackageName());
+                    String p = Windows.pkgOf.get(w.getId());
+                    if (p != null) return p;
                 }
             }
         } catch (Throwable ignored) {}
@@ -763,7 +782,7 @@ public final class Agent {
                 for (AccessibilityWindowInfo w : ua.getWindows()) {
                     if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(w.isActive() || w.isFocused())) continue;
                     cur = w.getId();
-                    AccessibilityNodeInfo r = w.getRoot();
+                    AccessibilityNodeInfo r = Windows.root(w);
                     content = r != null && r.getChildCount() > 0;
                     break;
                 }
@@ -778,7 +797,9 @@ public final class Agent {
 
     /**
      * Waits (up to 3 s after the launch) until the accessibility layer reports the launched app's
-     * window as the active one. Returns whether a launch was pending.
+     * window as the active one, or until the launched app has no live process (it crashed or
+     * exited right after it started: its window is not coming). Returns whether a launch was
+     * pending.
      */
     static boolean awaitPendingLaunch() {
         String pkg, prev;
@@ -787,7 +808,17 @@ public final class Agent {
             pkg = pendingPkg; prev = pendingPrevFg; until = pendingUntil;
         }
         if (pkg == null) return false;
-        while (SystemClock.uptimeMillis() < until && !appWindowReady(pkg, prev)) SystemClock.sleep(5);
+        long check = SystemClock.uptimeMillis() + Windows.CHECK_MS;
+        while (SystemClock.uptimeMillis() < until && !appWindowReady(pkg, prev)) {
+            if (SystemClock.uptimeMillis() >= check) {
+                if (Windows.appGone(pkg)) {
+                    System.out.println("agemu-agent: launched " + pkg + " has no live process; not waiting for its window");
+                    break;
+                }
+                check = SystemClock.uptimeMillis() + Windows.CHECK_MS;
+            }
+            SystemClock.sleep(5);
+        }
         synchronized (launchLock) {
             if (pendingUntil == until) pendingPkg = null;
         }
@@ -795,21 +826,49 @@ public final class Agent {
     }
 
     /**
-     * The launched task is in front once the active application window has content and is
-     * either the app's own window or a new window (a task's top activity may belong to another
-     * package, e.g. Settings' search screen).
+     * The launched task is in front once the active application window has content, is on screen
+     * (a tree read leaves out a window that is not), and is either the app's own window or a new
+     * window (a task's top activity may belong to another package, e.g. Settings' search screen).
+     * The home screen is not the launch's window (unless home was launched): it shows for a moment
+     * when the app in front before the launch crashed and its task closed; the launched window
+     * can then also be reported off screen at first, while it slides in.
      */
     static boolean appWindowReady(String pkg, String prevFg) {
         try {
+            String home = homePackage();
+            Object di = displayInfo();
+            Rect screen = new Rect(0, 0, intField(di, "logicalWidth"), intField(di, "logicalHeight"));
             for (AccessibilityWindowInfo w : ua.getWindows()) {
                 if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(w.isActive() || w.isFocused())) continue;
-                AccessibilityNodeInfo r = w.getRoot();
+                Rect b = new Rect();
+                w.getBoundsInScreen(b);
+                if (!Rect.intersects(b, screen)) continue;
+                AccessibilityNodeInfo r = Windows.root(w);
                 if (r == null || r.getChildCount() == 0) continue;
                 String p = cs(r.getPackageName());
-                if (p.equals(pkg) || !p.equals(prevFg)) return true;
+                if (Owners.launchedWindow(p, pkg, prevFg, home)) return true;
             }
         } catch (Throwable ignored) {}
         return false;
+    }
+
+    static volatile String homePkg;
+
+    /** The package of the default home activity ("" if unknown; asked again then). */
+    static String homePackage() {
+        String h = homePkg;
+        if (h != null) return h;
+        h = "";
+        try {
+            Object pm = Class.forName("android.app.ActivityThread").getMethod("getPackageManager").invoke(null);
+            List<ResolveInfo> all = new ArrayList<>();
+            Object cn = pm.getClass().getMethod("getHomeActivities", List.class).invoke(pm, all);
+            if (cn instanceof ComponentName) h = ((ComponentName) cn).getPackageName();
+            else if (all.size() == 1) h = all.get(0).activityInfo.packageName;
+        } catch (Throwable ignored) {
+        }
+        if (!h.isEmpty()) homePkg = h;
+        return h;
     }
 
     static void forceStop(String pkg) throws Exception {

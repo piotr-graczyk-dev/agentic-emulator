@@ -47,6 +47,11 @@ agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.so
 `logs`, `crashes` and the crash notice run without the device lock: they read what the capture
 holds in memory (docs/CAPABILITIES.md, "Logs and crashes").
 
+A device can be parked (`backend.Parker`: iOS SIGSTOPs the simulator's processes, Android
+pauses the VM in place). The daemon resumes a parked device under its device lock before any
+other call on it, `logs` and `crashes` excepted, so backends never see a call for a stopped
+device.
+
 ## Conventions
 
 - Device ids carry a platform prefix: `android:<avd-name>` or `ios:<udid>`.

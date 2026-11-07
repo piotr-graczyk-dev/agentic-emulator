@@ -17,12 +17,17 @@
 // crashes (docs/CAPABILITIES.md "Logs and crashes"): a line at each unified-log level, a burst
 // of numbered lines, and one button per way an app ends (see LogProbe). Launch arguments do the
 // same without a tap: -crash <kind> [-crash-delay-ms N], -hang-launch <seconds>.
+//
+// The "Park" screen (the -park launch argument) shows what the app sees of `agemu park` and the
+// resume after it (see ParkProbe): a counter, a ticking timer and its largest gap, a TCP line
+// stream from the host (-park-port N) and a local notification scheduled for later.
 import AVFoundation
 import Contacts
 import CoreLocation
 import CoreMotion
 import EventKit
 import MediaPlayer
+import Network
 import Photos
 import Security
 import SwiftUI
@@ -40,7 +45,9 @@ struct AgemuTestApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if probe.showLogs {
+                if ParkProbe.enabled {
+                    ParkView()
+                } else if probe.showLogs {
                     LogsView()
                 } else if probe.showProbe {
                     ProbeView()
@@ -140,7 +147,9 @@ final class Probe: NSObject, ObservableObject, CLLocationManagerDelegate, UNUser
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let info = notification.request.content.userInfo
+        let at = Date()
         DispatchQueue.main.async {
+            if info["park"] != nil { ParkProbe.shared.delivered(at) }
             self.push = "fg: " + Probe.describe(info)
             self.pushCount += 1
         }
@@ -531,5 +540,167 @@ struct ProbeView: View {
 
     private func button(_ title: String, _ id: String, _ action: @escaping () -> Void) -> some View {
         Button(title, action: action).buttonStyle(.bordered).controlSize(.small).accessibilityIdentifier(id)
+    }
+}
+
+/// What an app sees of a park (`agemu park`) and the resume after it. Every value is on screen
+/// with an accessibility identifier, so `agemu ui` reads it:
+///   - park-count: a counter (the Increment button), state that must survive;
+///   - park-ticks: a 0.5 s Timer's ticks; park-gap: the largest gap between two ticks by the
+///     wall clock and by the uptime clock (a park shows as a gap of about its length);
+///   - park-net: a TCP connection to 127.0.0.1:<-park-port> that reads lines (a host server
+///     writes one a second): its state, lines read, reconnects, and how old the newest line's
+///     server time was when it came (the backlog of a park arrives at once, late);
+///   - park-notif: a local notification scheduled with the Notify button, -park-notify-s
+///     seconds (default 20) after the tap: when it was shown, against when it was due.
+final class ParkProbe: ObservableObject {
+    static let shared = ParkProbe()
+    static let enabled = ProcessInfo.processInfo.arguments.contains("-park")
+
+    @Published var count = 0
+    @Published var ticks = 0
+    @Published var maxWallGapMs = 0.0
+    @Published var maxUptimeGapMs = 0.0
+    @Published var net = "off"
+    @Published var lines = 0
+    @Published var reconnects = 0
+    @Published var lineAgeMs = 0.0
+    @Published var maxLineAgeMs = 0.0
+    @Published var notif = "none"
+
+    private var timer: Timer?
+    private var lastWall = Date()
+    private var lastUptime = ProcessInfo.processInfo.systemUptime
+    private var conn: NWConnection?
+    private var buffer = Data()
+    private var due: Date?
+
+    func start() {
+        guard timer == nil else { return }
+        lastWall = Date()
+        lastUptime = ProcessInfo.processInfo.systemUptime
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
+        if let p = LogProbe.arg("-park-port").flatMap(UInt16.init), p > 0 { connect(p) }
+    }
+
+    private func tick() {
+        let now = Date(), up = ProcessInfo.processInfo.systemUptime
+        maxWallGapMs = max(maxWallGapMs, now.timeIntervalSince(lastWall) * 1000)
+        maxUptimeGapMs = max(maxUptimeGapMs, (up - lastUptime) * 1000)
+        lastWall = now
+        lastUptime = up
+        ticks += 1
+    }
+
+    // MARK: Network
+
+    private func connect(_ port: UInt16) {
+        let c = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        conn = c
+        c.stateUpdateHandler = { [weak self] st in
+            DispatchQueue.main.async {
+                guard let self, self.conn === c else { return }
+                switch st {
+                case .ready: self.net = "ready"
+                case .failed(let e), .waiting(let e): self.net = "error \(e)"; self.retry(port)
+                case .cancelled: self.net = "closed"
+                default: break
+                }
+            }
+        }
+        c.start(queue: .main)
+        receive(c, port)
+    }
+
+    private func receive(_ c: NWConnection, _ port: UInt16) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, err in
+            guard let self, self.conn === c else { return }
+            if let data { self.read(data) }
+            if done || err != nil {
+                self.net = done ? "eof" : "error \(err!)"
+                self.retry(port)
+            } else {
+                self.receive(c, port)
+            }
+        }
+    }
+
+    /// Lines are "<server unix ms> <seq>".
+    private func read(_ data: Data) {
+        buffer.append(data)
+        while let nl = buffer.firstIndex(of: 10) {
+            let line = String(decoding: buffer[buffer.startIndex..<nl], as: UTF8.self)
+            buffer.removeSubrange(buffer.startIndex...nl)
+            lines += 1
+            if let sent = line.split(separator: " ").first.flatMap({ Double($0) }) {
+                lineAgeMs = Date().timeIntervalSince1970 * 1000 - sent
+                maxLineAgeMs = max(maxLineAgeMs, lineAgeMs)
+            }
+        }
+    }
+
+    private func retry(_ port: UInt16) {
+        guard let c = conn else { return }
+        conn = nil
+        c.cancel()
+        reconnects += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.conn == nil else { return }
+            self.buffer = Data()
+            self.connect(port)
+        }
+    }
+
+    // MARK: Notification
+
+    func notify() {
+        let secs = Double(LogProbe.arg("-park-notify-s") ?? "20") ?? 20
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            DispatchQueue.main.async {
+                guard granted else { self.notif = "denied"; return }
+                let content = UNMutableNotificationContent()
+                content.title = "park"
+                content.body = "due after \(Int(secs)) s"
+                content.userInfo = ["park": 1, "probe": "park"]
+                let req = UNNotificationRequest(identifier: "park", content: content,
+                                                trigger: UNTimeIntervalNotificationTrigger(timeInterval: secs, repeats: false))
+                UNUserNotificationCenter.current().add(req) { err in
+                    DispatchQueue.main.async {
+                        if let err { self.notif = "error \(err)"; return }
+                        self.due = Date().addingTimeInterval(secs)
+                        self.notif = "scheduled \(Int(secs)) s"
+                    }
+                }
+            }
+        }
+    }
+
+    func delivered(_ at: Date) {
+        guard let due else { notif = "shown (not scheduled here)"; return }
+        notif = String(format: "shown late=%.0f ms", at.timeIntervalSince(due) * 1000)
+    }
+}
+
+struct ParkView: View {
+    @StateObject private var m = ParkProbe.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Park").font(.headline).accessibilityIdentifier("park-title")
+            Text("count=\(m.count)").accessibilityIdentifier("park-count")
+            Text("ticks=\(m.ticks)").accessibilityIdentifier("park-ticks")
+            Text(String(format: "gap wall=%.0f uptime=%.0f", m.maxWallGapMs, m.maxUptimeGapMs)).accessibilityIdentifier("park-gap")
+            Text(String(format: "net=%@ lines=%d reconnects=%d age=%.0f maxage=%.0f", m.net, m.lines, m.reconnects, m.lineAgeMs, m.maxLineAgeMs))
+                .accessibilityIdentifier("park-net")
+            Text("notif=\(m.notif)").accessibilityIdentifier("park-notif")
+            HStack {
+                Button("Increment") { m.count += 1 }.buttonStyle(.bordered).accessibilityIdentifier("park-increment")
+                Button("Notify") { m.notify() }.buttonStyle(.bordered).accessibilityIdentifier("park-notify")
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { m.start() }
     }
 }

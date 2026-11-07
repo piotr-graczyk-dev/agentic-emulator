@@ -103,6 +103,27 @@ type ElementTapper interface {
 	TapElement(ctx context.Context, id string, el *api.Element, atRest bool) error
 }
 
+// Parker is implemented by backends that can park a booted device: stop it in place, so it uses
+// no CPU and the host can compress or swap out its memory, and resume it later with everything
+// as it was (the apps, their processes and state, the screen). iOS stops the simulator's
+// processes (SIGSTOP); Android pauses the VM without restoring the baseline (unlike standby).
+//
+//   - Park returns once the device is stopped.
+//   - Parked reports, from memory, whether the device is parked; the daemon calls it before
+//     every call on a device, so it must not touch the device.
+//   - Resume continues a parked device and returns once it is agent-ready; on a device that is
+//     not parked it does nothing and reports false.
+//
+// The daemon resumes a parked device before any other call on it (logs and crashes excepted:
+// they read what was captured), so an agent never acts on a stopped device. Fidelity: the
+// device's clocks run on during a park (apps see a jump of its length and their timers fire
+// on resume); docs/IOS.md and docs/ANDROID.md ("Parking") list what was measured.
+type Parker interface {
+	Park(ctx context.Context, id string) error
+	Parked(id string) bool
+	Resume(ctx context.Context, id string) (bool, error)
+}
+
 // FrameWaiter is implemented by backends that can block until the screen shows a new frame.
 // The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
 // on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns

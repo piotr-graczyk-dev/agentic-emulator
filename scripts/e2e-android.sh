@@ -207,6 +207,18 @@ ag appearance dark >/dev/null
 ui_has "appearance: dark" 2000 || fail "app is not dark right after appearance dark returned"
 ok "appearance dark: the app is recreated dark when the call returns"
 
+step "park: the device stops in place and the next call resumes it with the app as it was"
+probe
+pid=$(ag ui | grep -o '"pid: [0-9]*' | head -1)
+ag park >/dev/null
+"$AG" devices | grep -q "\"id\":\"$DEV\"[^}]*\"state\":\"parked\"" || fail "devices does not list $DEV as parked: $("$AG" devices)"
+ok "devices lists $DEV as parked"
+[[ "$(ag ui | grep -o '"pid: [0-9]*' | head -1)" == "$pid" ]] || fail "ui after park does not show the same app process ($pid)"
+"$AG" devices | grep -q "\"id\":\"$DEV\"[^}]*\"state\":\"booted\"" || fail "not booted after the call that resumed it: $("$AG" devices)"
+ok "ui resumed it, with the same app process ($pid) on screen"
+ag resume | grep -q '"resumed":false' || fail "resume of a running device: $(ag resume)"
+ok "resume of a running device does nothing"
+
 step "capabilities: reset restores light, the default location, an empty clipboard, no probe"
 timed ag reset >/dev/null
 [[ "$(ag appearance)" == '{"appearance":"light"}' ]] || fail "appearance after reset: $(ag appearance)"
@@ -280,12 +292,19 @@ sleep 1
 set +e
 ag tap --text "Log levels" >"$OUT/crash-tap.out" 2>&1; rc=$?
 set -e
-[[ $rc == 4 ]] || fail "tap after the crash: exit $rc, want 4: $(cat "$OUT/crash-tap.out")"
+# A crash is told once, with the first call that ends after it. When the app crashed before
+# `open` returned, `open` carried the notice and the tap fails like any tap on a missing element.
+if grep -q "crashed at" "$OUT/crash-open.err"; then
+  [[ $rc == 1 ]] || fail "tap after a crash open already told: exit $rc, want 1: $(cat "$OUT/crash-tap.out")"
+  grep -q "crashed at" "$OUT/crash-tap.out" && fail "the crash was told twice: $(cat "$OUT/crash-open.err" "$OUT/crash-tap.out")"
+else
+  [[ $rc == 4 ]] || fail "tap after the crash: exit $rc, want 4: $(cat "$OUT/crash-tap.out")"
+fi
 grep -q "crashed at .*java.lang.IllegalStateException: probe crash" "$OUT/crash-open.err" "$OUT/crash-tap.out" || fail "no crash notice: $(cat "$OUT/crash-open.err" "$OUT/crash-tap.out")"
 ag crashes "$PROBE" --limit 1 >"$OUT/crash-java.txt"
 grep -q "java.lang.IllegalStateException: probe crash" "$OUT/crash-java.txt" || fail "crashes: $(cat "$OUT/crash-java.txt")"
 grep -q "at dev.agemu.probe.LabActivity.crashJava" "$OUT/crash-java.txt" || fail "crashes lacks the app's frame: $(cat "$OUT/crash-java.txt")"
-ok "Java crash: notice, tap exits 4 with the crash, crashes has the exception and the app's frame"
+ok "Java crash: one notice (with open, or with the tap, which then exits 4), crashes has the exception and the app's frame"
 lab
 ag open "agemulab://crash-native" >/dev/null 2>&1 || true
 for _ in 1 2 3 4 5 6; do
@@ -297,6 +316,11 @@ grep -q "SIGSEGV (SEGV_MAPERR)" "$OUT/crash-native.txt" && grep -q "probe_null_w
   || fail "native crash: $(cat "$OUT/crash-native.txt")"
 ok "native crash: SIGSEGV (SEGV_MAPERR) with the tombstone's frame in libprobe.so"
 ag terminate "$PROBE" >/dev/null # no "keeps stopping" dialog left over
+# For this second crash within a minute Android may already show "keeps stopping" (in one run
+# 24 ms after ActivityManager handled the crash, before the terminate, which does not close it).
+if ag wait --contains "keeps stopping" --timeout-ms 1000 >/dev/null 2>&1; then
+  ag tap --text "Close app" >/dev/null
+fi
 lab
 ag open "agemulab://exit" >/dev/null 2>&1 || true
 set +e

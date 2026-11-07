@@ -23,7 +23,7 @@ agemu CLI / MCP ──unix socket──► agemud daemon (Go, internal/ios)
 |---|---|---|
 | screenshot | `simctl io screenshot`: new process, connects to the device, renders, encodes | The helper keeps the main display's framebuffer **IOSurface** (and its change callbacks) for the life of the process. A screenshot copies the surface (~2 ms) and encodes the copy: PNG with agemu's parallel encoder (`AGPNG.c`: the image is cut into 12 bands that are filtered and deflated on separate cores at zlib level 1, then joined into one valid zlib stream, as pigz does), JPEG with Core Image's encoder (~7 ms for 1206×2622 vs ~10 ms with ImageIO; its distance to the lossless frame, mean abs. difference 0.30, matches simctl's own JPEG at 0.29; `AGEMU_IOS_JPEG=imageio` selects ImageIO). Core Image is warmed up when the helper starts. |
 | tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, and waits up to 3 s for a disabled element to become enabled. On a still screen the tap then keeps the helper's settle, which returns at once unless a transition started during the tree read. An element confirmed at rest by its repeating frame is tapped at once, since a second settle on a screen that keeps changing would only time out. **An element that is new since the last input** (an alert's button, a sheet's) is tapped only once its presentation has finished; see "Taps on just-presented UI". `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
-| type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (the helper's pasteboard connection, then Cmd-V; see "Test capabilities"): the app gets the whole text in one change, as with Android's set-text path. The pasteboard's previous content (every item and type) is saved before and put back after, so typing does not change what the app or `agemu clipboard` sees. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is checked against the focused text field's text and repeated once if it did not arrive. Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
+| type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (the helper's pasteboard connection, then Cmd-V; see "Test capabilities"): the app gets the whole text in one change, as with Android's set-text path. The pasteboard's previous content (every item and type) is saved before and put back after, so typing does not change what the app or `agemu clipboard` sees. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is confirmed by the focused text field's text or by the pasteboard daemon's log line that an app read it; it is repeated when no app read it, or once more when an app read it but a readable field had not changed 2 s later (see "Confirming a paste"). Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
 | key | — | `home` and `lock` are the hardware buttons (`home` returns once SpringBoard has acted on the press, see "The home button"); `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. `launch` takes process arguments and `--relaunch` (`agemu launch <bundle> --relaunch -- --initialUrl http://127.0.0.1:8081` opens an Expo development client on its Metro), and the MCP tool also takes an environment. |
@@ -255,6 +255,83 @@ Costs and limits:
   reset: the home-screen page, an open folder, Spotlight. Notification Center, Control Center
   and the lock screen were not checked, nor iPad.
 
+### Confirming a paste
+
+`type` pastes: the text goes on the device pasteboard, then Cmd-V. A paste can arrive late (the
+app's main thread is busy, or its own read of the pasteboard is slow) or be lost (UIKit drops
+Cmd-V while the field is not ready for it). A second Cmd-V repairs a lost paste and doubles a late
+one. Up to round 4 agemu read the focused field right after Cmd-V and again 150 ms later, and
+pasted again when it had not changed: a paste the app showed later than that appeared twice
+(`Wallpaper Wallpaper` in Settings' search field at load average 203 in the round-4 e2e). A field
+that does not read back as text (a secure field, a web view) was not checked at all, so a lost
+paste there stayed lost.
+
+agemu now pastes again only when no app read the paste. The device's pasteboard daemon, `pasted`,
+logs the line `KeyCommand` for each item an app reads for a paste that Cmd-V started (iOS 26.5;
+for a web view the app's UI process reads it), and agemu's log stream (see "Logs and crashes")
+already carries `pasted`'s lines. A paste is confirmed when the focused field changed (as before;
+only then is the pasteboard put back) or when `KeyCommand` was logged after the Cmd-V. For a
+field that does not read back as text that read ends the wait; a readable field gets 2 s from
+the read to show the paste and is pasted once more if it has not (below). It counts as lost only
+when, since the Cmd-V:
+- no `KeyCommand` was logged and the field did not change;
+- the app answered two UI tree reads (a tree read waits while the app's main thread is blocked:
+  one sent during a 2 s block returned after 1.87 s) and at least 150 ms passed;
+- `pasted` logged a line at least 100 ms (or as long as the last tree read took) after the last
+  read returned, so a read logged before it has been delivered. agemu reads the pasteboard through
+  the helper to make `pasted` log one. This relies on the log stream delivering one process's
+  lines in order.
+
+Each of these waits grows with the load. A lost paste is pasted again, up to three Cmd-Vs per
+call. A field that does not read back as text is done once the read is in the log. An app can
+read the paste and still drop it: once in 1,400 pastes of an earlier build of this change (Cmd-V
+0.11 s after the field got focus), the app read it and neither inserted it nor called the
+field's `paste(_:)`; so a readable field that has
+not changed 2 s after the read is pasted once more (a paste the app shows more than 2 s after
+reading it would then appear twice; none was seen). Without a
+running log capture (`AGEMU_IOS_LOG_CAPTURE=0`, or before an app was installed or launched
+through agemu or `logs` was called), the old window decides. Until `pasted` has logged one
+`KeyCommand` on the device, a paste with no read in the log follows the old window's rule after
+the longer wait (an unchanged readable field is pasted once more; an unreadable one is not), so a
+runtime whose `pasted` does not log the line cannot make every paste look lost. A log that has not
+caught up 3 s after that point decides nothing: no second paste.
+
+Measured on the SE simulator against the round-4 build (results in "Paste confirmation" under
+Benchmarks). Limits:
+- The signal is a private log line of iOS 26.5's `pasted`; other runtimes were not checked.
+- A web view's paste takes 49 ms (load average 11-19) to 87 ms (load 3-6) longer (medians). Its
+  read was logged 120-131 ms after `backboardd` routed Cmd-V (3 pastes), but reached agemu later
+  than that; why it arrives later on a quieter host was not diagnosed. While the app's main
+  thread is blocked the call waits for the read (the old build returned without knowing whether
+  the paste arrived).
+- An app that reads the paste and then rejects or filters it (a numeric-only field typed with
+  letters, a field at its maximum length): a field that cannot be read is not pasted again; a
+  readable one is pasted once more 2 s after the read and again waited for, so the app sees two
+  pastes, as with the old build, and the call takes about 4.5 s instead of about 0.3 s
+  (designed and unit-tested, not measured on a device).
+- The premise that a `KeyCommand` read means the paste will arrive failed once (the read-then-drop
+  above, an earlier build). A readable field is covered by the 2 s repeat; in a field that cannot
+  be read such a paste stays lost, as before.
+- `type` with no focused field: no app reads the paste, so it is sent 3 times (1 before), and the
+  call took 1.6-2.6 s instead of about 0.5 s (3 trials, a web view input the tap had not focused).
+- Once `pasted` has logged one `KeyCommand` on a device (any UIKit paste), every later paste on it
+  follows the log. An input whose paste read is not logged as `KeyCommand` (another toolkit's text
+  input, a programmatic `UIPasteboard` read) would get up to 3 pastes if it cannot be read back,
+  where the old build sent 1. Only UIKit text fields, SwiftUI `SecureField` and a `WKWebView`
+  input were tested.
+- The double-paste guard assumes that the stream delivers `pasted`'s lines in order, that the
+  margin covers the app's background read, and that log timestamps agree with the Mac's clock to
+  within a few ms (`SecureField` reads were logged about 4 ms after Cmd-V; a read stamped before
+  the Cmd-V would not count). A stream event lost under load would make a read look missing, and
+  the paste would be repeated. Of the final build's 700 slowed calls, 38 ran above load average
+  100; load around 200 was not tried.
+- The pasteboard is still put back only after the field showed the paste; after a secure field, a
+  web view or a repeated paste the typed text stays on it.
+- The host load of the round-4 failure (203) was not reproduced; the probe's slowdowns stand in
+  for it. All of the old build's failures (147 of 560) came from three of those slowdowns (slow
+  paste, a text field and a secure field refusing pastes); Settings' search had no failure on
+  either build.
+
 ## Fast boot and reset
 
 There are no snapshots for iOS Simulators: a cold boot costs what CoreSimulator and iOS take,
@@ -304,7 +381,88 @@ the memory available): on the test host an iPhone SE booted in 18.5 s next to a 
 17 Pro and in 6.3 s alone. With memory to spare, the old device's shutdown overlaps the new
 boot, but only after the new device's boot call returned: a boot call issued while another
 simulator was shutting down failed with "Invalid argument", and that device's next boot came up
-without a display (`AGEMU_IOS_OVERLAP_SWITCH=1/0` forces the overlap on or off).
+without a display (`AGEMU_IOS_OVERLAP_SWITCH=1/0` forces the overlap on or off). See "Several
+devices at once" for what that limit cost in round 5's measurement.
+
+### Several devices at once
+
+How many devices one Mac runs at a useful speed, measured on the M2 Pro (16 GB, 12 cores) while
+another session's work ran on it (an Expo/Metro server, Gradle, a booted iPhone 17 Pro Max
+simulator with an app, OrbStack; 7-11 GB of swap in use; not controlled). Each device ran one
+fixed agent flow with no think time, one `agemu` CLI process per call:
+- iOS, 15 calls: relaunch Settings and wait for General, find and tap General (waiting for
+  About), read the tree, tap About (waiting for its version row), screenshot; relaunch the test
+  app, tap Increment twice (each waiting for the count), tap the name field, type, wait for the
+  greeting, find it, screenshot, read the tree;
+- Android (agemu-lab), 16 calls: terminate Settings and its search, launch Settings (waiting
+  for "Network & internet"), find and tap it (waiting for Internet), read the tree, `key back`,
+  tap the search field, type, wait for results, screenshot; terminate and launch the probe app,
+  tap Refresh, read the tree, screenshot.
+
+All active devices ran the flow at the same time, each at least 4 times per configuration; a
+device that finished first ran more flows, not counted, until the others had (every counted
+flow overlapped the other devices' flows by at least 99.5%). Speed is a device's median flow
+time alone (only it booted; 5.7 s Android, 6.1 s iPad mini, 7.0-7.1 s iPhones) over its median
+in the configuration; the total is the sum over the devices, in units of one device alone.
+Devices were added and removed one at a time (for example 1, 2, 3, 4, 4, 3, 2, 1 devices),
+each new device booted at least 60 s before, in sessions A1 (round 4's build plus parking), B1
+(f4286db), A2 (as A1), then P and Q; host load average 4-61 (`.lab/r5/r5-s1-density`;
+`AGEMU_IOS_MAX_BOOTED=6` throughout):
+
+| devices running the flow | each device's speed (per session) | total | flows per minute | macOS memory pressure (max) |
+|---|---|---|---|---|
+| 1 | 1 | 1 | 8.4-10.6 | normal |
+| 2: iPhone 17 Pro, Android | 0.97-1.00 | 1.98 (A1), 1.99 (Q) | 18.7-18.9 | normal |
+| 3: + iPhone SE | 0.86-0.87 (A1), 0.62-0.80 (A2, one configuration of 4 flows), 0.88-0.91 (Q) | 2.58, 2.17, 2.68 | 20.1-24.7 | warn in 7 of 9 configurations |
+| 4: + iPad mini | 0.57-0.67 (A1), 0.51-0.58 (A2) | 2.43, 2.27 | 22.8, 21.2 | warn |
+| 5: + a new iPhone 17 | 0.49-0.54 | 2.59 | 23.8 | warn |
+| 4, f4286db (B1) | 0.58-0.65 | 2.42 | 25.5 | warn |
+
+Per-session medians of 4-12 flows per device and row. The 2-device row of A1 has 7 flows for the
+iPhone 17 Pro.
+- **The total levels off at about 2.2-2.7 one-device units from 3 devices on**: a further
+  device divides it. A flow cost each device more CPU when others ran (an iPhone's process tree
+  15 CPU-s per flow alone and about 16-21 CPU-s with 2-5 devices running, the iPad mini 21-24;
+  the emulator 7.6 alone and 8.7-14 CPU-s; 1.2-2.3 cores per device during its flows), the host
+  paged (9,900-42,000 pages swapped in per configuration of about a minute with 4 devices; with
+  one device 80-1,500 in 17 of 19 configurations, 4,400 and 58,000 in the two right after five
+  devices had run), and agemu's daemon with its helper and log streams took 0.1-0.8 CPU-s per
+  flow. With 4 devices the device trees used 6.2-6.3 of 12 cores while the load average was
+  18-61; the other session's CPU, compression and paging were not measured, so device CPU and
+  host-wide contention are both consistent with the data.
+- **Rounds 1-4's leaner devices did not move the curve.** The accepted build's simulators held
+  1.8-2.5 GB each after a configuration (a fifth, the new iPhone 17, 3.3 GB), f4286db's 2.7-3.1
+  GB. With 4 devices the bracketed sessions A1 and B1 gave 2.43 against 2.42, and A2 2.27 (A2
+  had no solo flows of its own, used A1's and P's, and paged more: 32,000-42,000 swap-ins per
+  configuration against 9,900-23,500). f4286db completed more flows per minute (25.5 against
+  21.2-22.8): about 70% of that gap is its Android flow being faster alone (3.8 against 5.7 s:
+  the tap and screenshot waits of "Selector taps" in ANDROID.md at zero think time), the rest its
+  iOS flows being 3-13% faster at 4 devices. The builds were not alternated per configuration,
+  and an effect under about 10% cannot be excluded at these n.
+- **Parking idle devices did not speed up the active ones**: with 3 devices running the flow
+  and two more booted, parked (0.0% of a core each) or idle (6-40%), the three ran at 0.83-0.86
+  and 0.76-0.86 (8 flows per device per arm, alternated idle, parked, parked, idle). The two
+  idle devices took 0.2-0.55 of a core together, the three running ones 5.2-5.6 cores; parking
+  frees CPU, not memory (see Parking).
+- **Memory pressure and the simulator limit**: with one simulator and the emulator booted,
+  macOS reported normal pressure (once warn, right after the SE shut down) and 41-54% of memory
+  available (`kern.memorystatus_level`); with two simulators and the emulator, warn in 7 of 9
+  configurations (2 stayed normal) and 29-41% available. agemu keeps one simulator booted while
+  memory is short (warn or critical, or less than half available), so without
+  `AGEMU_IOS_MAX_BOOTED` it would have shut one of the two simulators down when the second
+  booted or at a later `boot` call. Alternating the two (2, 3, 3, 2, 2, 3 devices; 12 flows per
+  device and arm), the two simulators and the emulator made 24.7 flows per minute against 18.9
+  (totals 2.68 and 1.99). The rule is unchanged: this is one 16 GB host at zero think time;
+  critical pressure did not occur, the load-~400 case that made the rule (see "End-to-end run")
+  was not retried, and 8 GB Macs were not measured.
+- **Taps on a list that changes after the read**: 13 of the 570 flows (warm-up and uncounted
+  ones included) failed, all at the tap on Settings' General: 8 on the iPhone SE and 5 on the
+  iPhone 17 Pro, 3 of them with f4286db, 5 in the first flow after a boot. In the 8 failures with
+  a capture, Settings had inserted a "Ready for Apple Intelligence" row above General after the
+  tree read, which moved General down (to y=1141 on the 17 Pro, y=713 on the SE): the tap at
+  General's old position hit the inserted row, and 6 of the captures showed Apple Intelligence &
+  Siri's page, 2 the Settings list. A tap by selector does not check that the element is still
+  where it was read.
 
 ### Soft reset
 
@@ -351,6 +509,80 @@ It does **not** reset what `simctl erase` would: data stored by built-in apps (S
 history, Safari, Contacts, Photos...), other system settings an agent changed (language...),
 notification permissions given to built-in apps in their system alert, and media added with
 `simctl addmedia`. Use `agemu shutdown` + `xcrun simctl erase <udid>` for a full wipe.
+
+### Parking
+
+`agemu park` stops a booted simulator in place: it sends SIGSTOP to its `launchd_sim`, then to
+every process `launchd_sim` started (all simulator processes are its direct children on iOS
+26.5; about 120-150 processes), looking again until none is left running. `agemu resume`
+sends SIGCONT to the children, then to `launchd_sim`, and returns once the device answers as
+after a boot (the helper's readiness check: accessibility, framebuffer, HID). Any other call on
+a parked device resumes it first (`logs` and `crashes` excepted, they read what was captured),
+so an agent never acts on a stopped device; `devices` lists it as `parked`. A daemon that
+restarts finds parked agemu simulators (a stopped `launchd_sim`) on its first look; a stopped
+simulator that is not agemu's is left alone, and a call naming it is refused as any other call
+is. The resume continues only what the park stopped: a process that was stopped before (by a
+debugger, say) stays stopped, except after a daemon restart, which does not know them. Shutting
+down a parked simulator, also to make room for another boot, continues it first. A post-boot
+lean pass that falls into a park waits for the resume, and the passes after it move by as long.
+Parking is opt-in: nothing parks a device by itself.
+
+Measured on agemu-iphone-17-pro (iOS 26.5) with the test app's Park screen (`-park`: a counter,
+a 0.5 s timer, a TCP connection to a host server that writes a line a second, and a local
+notification due 20 s after it was scheduled), 60 s parks, arms interleaved, host load average
+3-35 (`.lab/r5/r5-s2-parking`). CPU is `.lab/meter.py` over the simulator's process tree
+(`launchd_sim` and its children), which a park stops by construction; agemu's helper, the
+daemon and CoreSimulatorService were not measured in either arm:
+
+| | parked (SIGSTOP) | running idle | shutdown + cold boot |
+|---|---|---|---|
+| simulator CPU over 52 s | **0.0 CPU-s** (17 of 17; and 0.0 over 592 s of a 600 s park) | 6.5 CPU-s, 12.5% of a core (10.5-57%, n=11) | none while shut down |
+| `agemu park` | 87 ms (82-106, n=11; 121-152 processes) | - | `shutdown` 0.3 s |
+| back to agent-ready, the app on screen | **133 ms** (81-209, n=10) through `agemu resume` or the next call; 138 ms (72-358, n=17) counting the lab script's SIGCONT arm | first `ui` 32 ms (18-55, n=11) | **9.7 s** (8.3-15.1, n=7): boot 8.4 s, then the app's launch |
+| after a 600 s park | 490 ms (n=1) | - | - |
+| the app's state (counter, process) | kept, 18 of 18 | kept | lost (new process) |
+
+What the app saw after a resume (18 parks, 17 of 60 s and one of 600 s):
+- **Clocks**: the timer's next tick came one park later, by the wall clock and by the uptime
+  clock alike (60.0-60.5 s; 600.4 s). Unlike a device that sleeps, `mach_absolute_time` runs on
+  through a park: the simulator's processes are host processes and the host's clock does not
+  stop.
+- **Network**: the TCP connection to the host stayed open in 16 of 18 parks; the lines the
+  server wrote during the park arrived at once on resume (the newest line's age peaked at
+  59.4-60.0 s; 599 s). In the other 2 the connection had ended: in one it was open before the
+  park and at end of file after it (reconnects 0 -> 1), in the other it was already at end of
+  file when the park began (reconnects 3 -> 4, only 4 lines). The host server's log was not
+  kept, so whether the server or the park ended them is not known.
+- **A pending local notification** due 20 s into the park was shown on resume, 41.5-41.7 s late
+  (582 s in the 600 s park); in the idle arm it was 18-40 ms late.
+- **No crash, no watchdog kill**: the same SpringBoard, backboardd, `launchd_sim` and app pids
+  before and after in 18 of 18, no crash report or unexpected exit of the app (`agemu crashes`),
+  no log line of a watchdog firing, a jetsam kill or a termination with a reason. `maild` logged
+  "Remote service has not checked in recently. Re-starting" after 1 of the 17 parks whose log
+  was checked (0 of 11 idle windows). One park record right after a cold boot also lists
+  Calendar killed, most likely agemu's own post-boot stop (the lab's parks did not tell the
+  daemon). The UI tree read the app's screen and a tap landed after every resume.
+- **Memory**: a parked simulator keeps its memory; the host can compress or swap it out because
+  no process touches it. On this host, which was already swapping, a running idle simulator
+  held 0.31-0.46 GB of its 1.6-2.2 GB footprint uncompressed in RAM (1.0-1.2 GB in the first
+  minutes after a cold boot; `footprint --swapped`: dirty minus swapped, summed over the
+  simulator's processes); parked, that fell by a median 0.054 GB over 52 s (0.003-0.64 GB, n=18;
+  idle in the same series: 0.041 GB) and to 0.19 GB after 10 minutes.
+
+When memory ran short (agemu-iphone-se-3 and agemu-ipad-mini booted while the test app's
+simulator waited, the host's free memory down to 0.11-0.39 GB, 3 trials per arm,
+interleaved; the parks here were made by the lab's own SIGSTOP script, not `agemu park`): the
+parked simulator kept 0.095-0.174 GB uncompressed (it had 0.19-1.00 GB), the running idle one
+0.169-0.300 GB (it had 0.23-0.34 GB); medians 0.108 against 0.208 GB. The simulator went from
+130 to 70 processes during this series (agemu's lean pass stopped 10; others exited, 10 of them
+while it was parked), and pids were not checked in these trials. After the other two shut
+down, the parked one was agent-ready 99-135 ms after the resume, with the app's state; the idle
+one's first `ui` took 43-56 ms. So on this host parking returned about 0.1 GB more to the host
+than leaving the simulator idle (n=3, the ranges almost touch); the rest of an idle simulator's
+memory was already compressed.
+
+`agemu shutdown` frees all of a simulator's memory; parking keeps the app as it is and is
+agent-ready 70x sooner than a cold boot plus the app's launch.
 
 ### Bounded calls
 
@@ -453,10 +685,12 @@ that failed in earlier runs (content-available delivery, and a running app losin
   through the pasteboard and no longer starts simctl: a whole `agemu type <word>` took 118 ms
   (CLI median, n=12), against 111 ms for the old path's `simctl pbcopy` step alone,
   interleaved. It saves the pasteboard (every item and type) first and puts it back once the
-  focused field shows the paste. When that cannot be confirmed (a secure field, a web view or
-  custom input that does not read back as text, or a paste that had to be sent twice), the typed
-  text stays on the pasteboard, as before: the app may not have read it yet, and a restore that
-  won that race would make it paste the old content. The restore was checked with one plain-text
+  focused field shows the paste. When the field cannot show it (a secure field, a web view or
+  custom input that does not read back as text, or a paste that had to be sent again), the typed
+  text stays on the pasteboard, as before: the app may not have finished reading it, and a restore
+  that won that race would make it paste the old content. (Such a paste is now confirmed by the
+  pasteboard daemon's log, see "Confirming a paste"; the log shows when the read started, not
+  when it ended, so the restore rule is unchanged.) The restore was checked with one plain-text
   string, read back by agemu. The restored items come from the host, so an app that copied text
   itself may get iOS's "Allow Paste" prompt when it reads it back programmatically, and the
   pasteboard's `changeCount` moves; neither was checked. The helper's pasteboard uses a private
@@ -715,7 +949,48 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    on: with PosterBoard disabled, the lock screen was not drawn (the UI tree reported the lock
    screen while the screenshot showed the home screen). `pluginkit -e ignore` on a gallery provider
    did not keep PosterBoard from starting it.
-3. **Background work started after boot is stopped once it is idle** (`internal/ios/background.go`).
+3. **From the second boot on, the wallpaper gallery does not start** (`internal/ios/posterboard.go`).
+   Why PosterBoard starts it at every boot: it records when it last refreshed each provider's
+   wallpaper suggestions in `TransientInfo-*.plist` files in the device's `tmp/PFTemporaryDirectory`,
+   and those of one boot were gone at the next, so at every boot its log reports each provider's
+   suggestions as expired (an 8-hour interval) and it starts all 14 providers (the lock screen's
+   among them) to fetch them again, then renders the gallery's snapshots. Stopping the extensions
+   (item 2) comes after they have rendered. PosterBoard has a switch for this, its keynote (demo)
+   mode: `KEYNOTE_MODE` in `com.apple.PosterBoard.unprotectedUserDefaults`. With it on, PosterBoard
+   skipped its boot-time update (its update log, `PBFExecuteUpdateHistory`: "Keynote mode is enabled;
+   we aren't going to prewarm anything") and started only the lock screen's provider. agemu turns it
+   on with the device's `defaults` during the gallery passes of a cold boot, once PosterBoard has
+   logged a successful update in that boot for the iOS build of its data store; on the first boot
+   of 5 new iPhone 17 Pro devices that was at the 45 s pass on 4 (45.8-46.1 s after agent-ready)
+   and at 70.8 s on the fifth (a 55 s boot on a loaded host). The passes go on (every 15 s, up to
+   5 min) until then. `AGEMU_IOS_LEAN=0` deletes the setting (a failure to delete it is logged and
+   tried again at the next boot; the launchd jobs are turned back on regardless). PosterBoard's
+   data store migration, which runs when the iOS build changes, deletes it too according to its
+   log text (not tried here); agemu then sets it again after PosterBoard has rebuilt the gallery.
+
+   What stays the same, checked through agemu after 9 boots with the setting and 4 without: the lock
+   screen draws its wallpaper and clock (screenshots of 226-229 KB in both arms), the poster
+   switcher (long press on the lock screen) opens, its "+" opens the wallpaper gallery (Emoji,
+   Colour, Collections, ...), an Emoji wallpaper from it opens in the editor (its provider starts
+   then; 13 of 13), and Cancel goes back to the switcher (12 of 13; in the first check the script
+   tapped the editor's emoji picker closed too early). The home screen was looked at in only 2
+   screenshots with the setting (wallpaper and icons; its widgets are empty, as lean mode already
+   makes them). The first time the gallery is opened on a new device (at its second boot), both
+   builds render its previews on demand: the first preview showed after 17.8 and 18.9 s and all 9
+   on screen after 19.5-19.8 s without the setting (2 new devices, host load 27-53), after
+   4.5-17.0 s and 16.0-17.5 s with it (5 new devices, load 9-42; all 9 timed on 3 of them; the
+   two fast ones, 4.5 and 7.8 s, are not explained), so "not slower" rests on thin, unevenly
+   loaded data. On a device where it had been opened before, its first preview showed after 0.9
+   and 1.1 s with the setting (n=2) and 1.8 s without (n=1). This simulator's Settings has no
+   Wallpaper row either way (16-17 rows in its root list in all 13 checks). What changes:
+   PosterBoard does not refresh the gallery's wallpaper suggestions at boot, so the gallery
+   shows those it fetched when it was built. Not checked with the setting: adding a new
+   wallpaper, the contact poster editor and contact posters in an app's
+   `CNContactViewController`, appearance or locale changes, an iOS build change, anything later
+   than about 200 s after boot, and the iPhone SE and iPad beyond round 5's merge e2e (the mode
+   was set on both and their next boots ran only the lock screen's provider; the e2e does not
+   look at the lock screen or the gallery).
+4. **Background work started after boot is stopped once it is idle** (`internal/ios/background.go`).
    In the first minutes after a cold boot iOS starts some apps, extensions and services for one-off
    work and then keeps them idle; a phone's jetsam reclaims such processes when it needs memory,
    the simulator only when the Mac runs short of memory. agemu stops these (sizes and times
@@ -793,7 +1068,9 @@ next boot:
   Image Playground and Genmoji;
 - Maps turn-by-turn navigation, Safari password monitoring and iCloud bookmark sync;
 - Shortcuts: the app opens but lists no actions (`siriactionsd` is off), so App Intents actions
-  cannot be run from it.
+  cannot be run from it;
+- after the first boot, refreshed wallpaper suggestions: the wallpaper gallery keeps those of the
+  boot that built it (PosterBoard's keynote mode, item 3 above).
 
 HealthKit (`healthd`), CoreSpotlight indexing, the share sheet, Wallet and Apple Pay (`passd`),
 notifications and push, Game Center, StoreKit, CloudKit, Watch pairing and WatchConnectivity
@@ -862,7 +1139,7 @@ setting stops 13-19 per boot, and they ran for a while first (6-37 s of CPU of e
 the minute, against 7-14 s). These runs also stopped `PhotosPosterProvider`, which is kept now
 (one more extension of 35-75 MB may stay running).
 
-**Stopping the background work** (item 3) against the same lean setting without it, on one new
+**Stopping the background work** (item 4) against the same lean setting without it, on one new
 `iphone-17-pro` simulator, 6 pairs of cold boots in ABBA order, each with a freshly started daemon
 (2026-11-07, 02:25-03:29; host load 10-100 at the start of a boot, median 14-49 during it; 11.4-16.9
 GB of swap in use; host memory pressure "warn" 82% of the time, never "critical"; medians, range
@@ -910,6 +1187,40 @@ it changes how often they happen, and the earlier variant (which also stopped
 `remotemanagementd`) is not cleared. The idle-exit counts come from `log show`; the 2 s
 process-count series shows no other drop of 5 or more processes within 30 s outside the stop
 passes, which supports the zeros.
+
+**Keeping the gallery from starting** (item 3) against the build before it (items 1, 2 and 4
+only), on one `iphone-17-pro` simulator after its first boots, 6 pairs of cold boots in
+counterbalanced order (VB, BV, VB, BV, BV, VB), each arm in its steady state (the setting written
+into the shut-down device's preferences file before its boot, standing for what the build had
+written at an earlier boot; without it, deleted), a freshly started daemon for every boot
+(2026-11-07, 12:18-13:04; host load 7.5-23.8 at the start of a boot, 6.5-11.0 GB of swap in use;
+medians, range in brackets; the same meter, its first-minute window starting when `agemu boot`
+returned). That the build sets the key itself is shown by the first boots of new devices
+(above). A boot of the round-4 build with the key written by hand took 38.9 CPU-s, so the effect
+is the key's:
+
+| | before (n=6) | gallery kept from starting (n=6) |
+|---|---|---|
+| simulator CPU in the first minute after agent-ready | 67.9 s [58.5-74.8] | **41.4 s** [32.4-47.6] (-39%) |
+| of which processes that exited in the minute | 13.3 s [10.4-18.9] | 0.8 s [0.7-1.6] |
+| simulator CPU in the second minute | 2.0 s [1.9-4.6] | 2.1 s [1.9-3.0] |
+| memory 1 min after agent-ready | 1.99 GB [1.91-1.99] | **1.89 GB** [1.88-1.89] |
+| memory 2 min after agent-ready | 1.86 GB [1.64-1.86] | **1.75 GB** [1.75-1.76] |
+| processes 2 min after agent-ready | 118 [100-119] | 114 |
+| wallpaper extension processes started in the first 200 s | 15 [12-15] | 1 (the lock screen's) |
+| cold boot until agent-ready | 10.0 s [8.7-12.1] | 10.1 s [8.5-14.9] |
+
+Every boot with it took less first-minute CPU than every boot without it; per pair -26.6 s
+(median; -10.9 to -40.4 s, -18.7% to -55.5%). At 1 minute every boot with it was at least 22 MB
+below every boot without it (per pair -103 MB, median). One boot without it had 100 processes and
+1.64 GB at 2 minutes (the others 118-119 and 1.84-1.86 GB): launchd_sim idle exits
+(`JETSAM_REASON_MEMORY_IDLE_EXIT`, 22 log lines) at +75..130 s of that boot. Two boots with it had
+such exits too, at +134..234 s, after their measured 2 minutes; none fell into a first minute.
+
+The first boot of a new device is not changed: PosterBoard builds the gallery in it, and the
+setting comes only at its end (new devices, first boot: 165.1 and 146.1 s of first-minute CPU
+before, 161.6 s with it; 2.42-2.49 GB at 2 minutes in all three). The second boot of the device
+whose first boot set it took 42.4 s and started only the lock screen's provider.
 
 Turning off 18 more jobs (Game Center, weather, Mail, Exchange accounts, sleep
 schedule, family, Managed Settings, Watch pairing, ...) brought it to 1.57 GB but broke the
@@ -1088,6 +1399,56 @@ load average 47-78 during this run, swap nearly full), so every number is noisy;
 compares the two tools under the same conditions. Rows with n=2 (cold boot, profile switch,
 reset) are the slower of two runs.
 
+### Paste confirmation (round 5, 2026-11-07)
+
+`agemu type <6 random letters>` through the CLI on agemu-iphone-se-3 (iOS 26.5), each call right
+after a tap on the field, against the round-4 build (r4). Ground truth: a probe app (UIKit text
+field, SwiftUI `SecureField`, UIKit secure text field, `<input>` in a `WKWebView`) writes every
+change of its fields to a file in its data container, read once it had not changed for 0.6 s
+(r4 and v2 sessions) or 1.2 s after the tap and then once quiet for 0.6 s (the final build's
+sessions); Settings' search field is read through the UI tree 1.2 s after the call (it had no
+slowdown).
+A double paste is the text twice (UIKit's smart insert puts a space between). The probe makes
+itself slow on purpose: `block` holds its main thread 100-800 ms, starting 0-300 ms after the
+field got focus; `slow paste` inserts a paste it has read 100-800 ms later (`UITextPasteDelegate`)
+with the main thread free; `refuse` makes the field refuse pastes for 100-400 ms after it got
+focus (UIKit then drops Cmd-V). r4 and v2 alternated in blocks (40 r4, 100 v2, 40 r4, 100 v2
+per scenario); the final build (100 per scenario, which adds the repeat 2 s after an unshown read
+and drops a redundant check) ran afterwards, with no r4 arm and the longer harness wait, so only
+v2 is a matched comparison. r4's failures are structural (it never repeats into an unreadable
+field, and a refused paste never arrives late), so the shorter wait of its runs can only have
+undercounted its doubles. Host load average 2.6-126.4, other sessions' work included.
+
+| scenario | r4: wrong | new: wrong (v2 / final) | median call, r4 / v2 / final |
+|---|---|---|---|
+| UIKit field, block | 0 of 80 | 0 of 200 / 0 of 100 | 424 / 454 / 424 ms |
+| UIKit field, slow paste | 53 of 80 (double) | 1 of 200 (lost) / 0 of 100 | 578 / 627 / 665 ms |
+| UIKit field, refuse | 14 of 80 (lost) | 0 of 200 / 0 of 100 | 475 / 473 / 479 ms |
+| SwiftUI `SecureField`, block | 0 of 80 | 1 of 200 (lost) / 0 of 100 | 175 / 188 / 196 ms |
+| UIKit secure field, refuse | 80 of 80 (lost) | 0 of 200 / 0 of 100 | 174 / 466 / 465 ms |
+| `WKWebView` input, block | 0 of 80 | 0 of 200 / 0 of 100 | 522 / 876 / 887 ms |
+| Settings' search field | 0 of 80 | 0 of 200 / 0 of 100 | 1170 / 1164 / 1159 ms |
+
+The v2 slow-paste failure is the dropped read described in "Confirming a paste" (the final build
+pastes again in that case). The v2 `SecureField` failure was read by the app 4 ms after Cmd-V
+and was most likely recorded while the probe was still blocked (that run read the file once it
+had been quiet for 0.6 s, shorter than a block; not proven); the final build's runs wait 1.2 s
+after the tap. Three trials right after a
+relaunch, whose tap did not focus the web view's input (no focus event), were not counted: no
+app read their pastes and the new build pasted three times into nothing. Medians in the slow
+scenarios are not comparable between builds (different loads; r4 returned before the paste was
+confirmed in the secure and web cases, and r4's lost pastes returned early).
+
+On a responsive probe (no slowdown), builds alternated in blocks of 25 (n=50 per build and
+scenario, every call correct): median call time new minus r4, bootstrap 95% interval:
+
+| field | v2 (load 11.4-40.0) | final (load 2.6-6.6) |
+|---|---|---|
+| UIKit text field | -9.2 ms (-21.7..-0.6) | +0.5 ms (-10.0..+12.7) |
+| SwiftUI `SecureField` | -4.3 ms (-15.5..+3.8) | +0.7 ms (-7.3..+7.9) |
+| `WKWebView` input | +48.9 ms (+42.6..+59.0) | +87.3 ms (+81.1..+91.7) |
+| Settings' search field | -7.0 ms (-19.6..+4.5) | not run |
+
 ### Lost taps on just-presented UI (round 4, 2026-11-07)
 
 TapLab (a probe app) on its own iPhone 17 Pro simulator, iOS 26.5, lean. Each try is what an
@@ -1216,6 +1577,15 @@ with the same 38 requests and byte-identical `ui --json`: daemon 26.1 / 25.1 ms 
 25.3 / 24.5 ms after (two rounds), CLI 31.5 / 30.4 ms before and 30.8 / 30.8 ms after.
 
 ### End-to-end run
+
+Round 5's merge (2026-11-07, the three shared simulators): `scripts/e2e-ios.sh` (138 checks)
+passed 138/138 (load average 4.9 at the start, 71 at the end). In those boots the daemon set
+PosterBoard's keynote mode on all three. Run again after they were shut down, so that they
+booted with it: 137/138 (load 34-39); the one failure was the SE's tap on General landing on the
+"Apple Intelligence" row Settings inserts after the tree read (see "Several devices at once"),
+and each simulator then ran only the lock screen's poster extension (`MercuryPosterExtension`).
+The park check stopped 146 and 138 processes in 77 and 75 ms and was agent-ready 39 and 35 ms
+after the resume. No paste was repeated in either run.
 
 `scripts/e2e-ios.sh` (103 checks) passed on commit 60c8a22 (load average 17 at the start; the
 agemu commands took 104 s in all). Its iPad section reads the home screen (SpringBoard, the
@@ -1448,12 +1818,13 @@ go test ./internal/ios/...      # unit tests (no simulator needed)
 The helper is found next to the `agemud` daemon binary, or at `$AGEMU_IOS_HELPER`. Its source is
 `ios-helper/` (`swift build -c release`).
 
-Known e2e flake: `type` pastes, then reads the focused field right away and 150 ms later, and
-pastes once more if the field has not changed (a paste can be lost). Under heavy host load the
-app can take longer than that to show the paste, and the text then appears twice (`Wallpaper
-Wallpaper` in Settings' search field, load average 203, one check of the 2026-11-07 run; the
-daemon log says "the focused field did not change; pasting again"). The heuristic is unchanged
-since before round 4.
+The round-4 e2e's one flake, a double paste in Settings' search field at load average 203
+(`Wallpaper Wallpaper`), came from the fixed 150 ms paste window; a paste is now repeated only
+when the pasteboard daemon's log shows no app read it (see "Confirming a paste"). The daemon log
+says "pasting again: ..." with the reason when it repeats one. In the lane a step like the e2e's
+Settings search (tap the field, type, read the field) was run 200 times on v2 and 100 times on
+the final build on the SE simulator, all correct (see "Paste confirmation" under Benchmarks);
+round 5's merge then ran the full e2e (see "End-to-end run").
 
 ## Credits
 

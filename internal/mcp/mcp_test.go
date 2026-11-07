@@ -17,7 +17,7 @@ import (
 
 func TestToolList(t *testing.T) {
 	want := []string{
-		"devices", "profiles", "create", "boot", "shutdown", "reset", "set_profile", "screenshot",
+		"devices", "profiles", "create", "boot", "shutdown", "reset", "park", "resume", "set_profile", "screenshot",
 		"ui_tree", "find", "tap", "swipe", "type_text", "press_key", "install", "launch",
 		"terminate", "wait_for",
 		"open_url", "permission", "location", "clipboard", "appearance", "apps", "uninstall",

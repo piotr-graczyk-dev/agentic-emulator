@@ -168,7 +168,8 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 	if ref == "" {
 		var booted []string
 		for _, d := range devs {
-			if d.State == "booted" {
+			// A parked device is booted, stopped in place: the call resumes it (see wake).
+			if d.State == "booted" || d.State == api.StateParked {
 				booted = append(booted, d.ID)
 			}
 		}
@@ -245,13 +246,41 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
 	}
+	if err := s.wake(ctx, b, id, method); err != nil {
+		return nil, nil, err
+	}
 
 	res, err = s.onDevice(ctx, b, id, method, p)
 	switch method {
-	case "boot", "shutdown", "reset", "crashes": // they end the watch or report crashes themselves
+	case "boot", "shutdown", "reset", "crashes", "park": // they end the watch or report crashes themselves; a parked app reports nothing
 		return res, nil, err
 	}
 	return s.report(ctx, b, id, res, err)
+}
+
+// wake resumes a parked device (backend.Parker) before a call that needs it running: every call
+// on a device but park and resume themselves and the reads of what was captured (logs,
+// crashes). An agent's next call on a device parked while it was idle just works, the first one
+// taking the resume's time.
+func (s *Service) wake(ctx context.Context, b backend.Backend, id, method string) error {
+	pk, ok := b.(backend.Parker)
+	if !ok {
+		return nil
+	}
+	switch method {
+	case "park", "resume", "logs", "crashes":
+		return nil
+	}
+	if !pk.Parked(id) {
+		return nil
+	}
+	l := s.deviceLock(id)
+	l.Lock()
+	defer l.Unlock()
+	if _, err := pk.Resume(ctx, id); err != nil {
+		return fmt.Errorf("resuming the parked device before %s: %w", method, err)
+	}
+	return nil
 }
 
 // onDevice runs one method on a resolved device whose arguments were checked.
@@ -335,6 +364,19 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		return ok(b.Shutdown(ctx, id))
 	case "reset":
 		return ok(b.Reset(ctx, id))
+	case "park", "resume":
+		pk, isParker := b.(backend.Parker)
+		if !isParker {
+			return nil, api.NotImplemented(b.Platform(), method, "this backend cannot park devices")
+		}
+		if method == "park" {
+			return ok(pk.Park(ctx, id))
+		}
+		resumed, err := pk.Resume(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "resumed": resumed}, nil
 	case "set_profile":
 		var prof api.Profile
 		if p.Profile != "" {
