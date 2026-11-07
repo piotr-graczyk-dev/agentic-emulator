@@ -143,4 +143,98 @@ ok "Settings starts on its home screen (its old task is gone)"
 ag profile pixel-9 >/dev/null
 ag key home >/dev/null
 
+# Test capabilities (docs/CAPABILITIES.md), checked as the probe app sees them. The probe
+# (testapps/android) is built with the SDK build tools. Without them the run fails, unless
+# AGEMU_E2E_SKIP_CAPS=1 asks to skip this part (then it does not claim that all checks passed).
+PROBE=dev.agemu.probe
+if ! testapps/android/build.sh "$OUT/agemu-probe.apk" >"$OUT/probe-build.log" 2>&1; then
+  if [[ "${AGEMU_E2E_SKIP_CAPS:-0}" == 1 ]]; then
+    printf '\n== capabilities: SKIPPED (could not build the probe app, see %s)\n' "$OUT/probe-build.log"
+    printf '\n%d CHECKS PASSED, CAPABILITY CHECKS SKIPPED (artifacts in %s)\n' "$PASS" "$OUT"
+    exit 0
+  fi
+  fail "could not build the probe app for the capability checks (see $OUT/probe-build.log; AGEMU_E2E_SKIP_CAPS=1 skips them)"
+fi
+probe() { ag launch "$PROBE" >/dev/null; ag wait --contains "pid:" --timeout-ms 8000 >/dev/null || fail "probe did not start"; }
+ui_has() { ag wait --contains "$1" --timeout-ms "${2:-5000}" >/dev/null; }
+
+step "capabilities: install the probe app; apps lists it"
+ag install "$OUT/agemu-probe.apk" >/dev/null
+ag apps | grep -q "\"id\":\"$PROBE\",\"name\":\"Agemu Probe\",\"version\":\"1.2\"" || fail "apps: $(ag apps)"
+ok "apps lists $PROBE with its name and version"
+
+step "capabilities: open a deep link as a tapped link (BROWSABLE)"
+ag open "agemuprobe://orders/7" --wait-contains "url: agemuprobe://orders/7 (browsable)" >"$OUT/open.json" || fail "open: $(cat "$OUT/open.json")"
+grep -q "\"app\":\"$PROBE\"" "$OUT/open.json" || fail "open did not report the handler: $(cat "$OUT/open.json")"
+ok "open delivered the link to $PROBE"
+ag open "agemunb://x" >/dev/null 2>&1 && fail "an activity without CATEGORY_BROWSABLE opened from a link"
+ok "an activity without CATEGORY_BROWSABLE does not open (as from a real link)"
+
+step "capabilities: permissions (the app sees them; revoke kills it, as Settings does)"
+probe
+ag permission grant "$PROBE" camera >/dev/null
+ui_has "camera: granted" || fail "app does not see camera granted"
+pid=$(ag ui | grep -o '"pid: [0-9]*' | head -1)
+ag permission revoke "$PROBE" camera >/dev/null
+probe
+[[ "$(ag ui | grep -o '"pid: [0-9]*' | head -1)" != "$pid" ]] || fail "the app's process survived the revoke"
+ag tap --text "Ask camera" --wait-contains "ask camera: denied" >/dev/null || fail "after revoke the app could ask again"
+ok "grant seen; revoke killed the process and the app cannot ask again"
+ag permission reset "$PROBE" camera >/dev/null
+probe
+ag tap --text "Ask camera" --wait-contains "While using the app" >/dev/null || fail "after reset the system dialog did not show"
+ag key back >/dev/null
+ok "after reset the app's request shows the system dialog"
+set +e
+ag permission grant "$PROBE" motion >/dev/null 2>&1; rc1=$?
+ag permission grant "$PROBE" photos-add >/dev/null 2>&1; rc2=$?
+set -e
+[[ $rc1 == 1 && $rc2 == 3 ]] || fail "refusals: grant motion exit $rc1 (want 1), photos-add exit $rc2 (want 3)"
+ok "a permission the app does not request is refused (exit 1); photos-add is not implemented (exit 3)"
+
+step "capabilities: location, clipboard, appearance"
+ag permission grant "$PROBE" location >/dev/null
+probe
+ag location set 52.2297 21.0122 >/dev/null
+ui_has "location: 52.22970,21.01220" || fail "app does not see the location"
+ok "app's GPS listener sees 52.2297,21.0122"
+ag clipboard set "agemu e2e clip" >/dev/null
+[[ "$(ag clipboard)" == "agemu e2e clip" ]] || fail "clipboard get: $(ag clipboard)"
+ag tap --text Refresh >/dev/null
+ui_has 'clipboard: "agemu e2e clip"' || fail "app does not read the clip"
+ok "clipboard set/get, and the app reads the clip"
+ag appearance dark >/dev/null
+ui_has "appearance: dark" 2000 || fail "app is not dark right after appearance dark returned"
+ok "appearance dark: the app is recreated dark when the call returns"
+
+step "capabilities: reset restores light, the default location, an empty clipboard, no probe"
+timed ag reset >/dev/null
+[[ "$(ag appearance)" == '{"appearance":"light"}' ]] || fail "appearance after reset: $(ag appearance)"
+[[ "$(ag clipboard)" == "" ]] || fail "clipboard after reset: $(ag clipboard)"
+[[ "$(ag apps)" == "[]" ]] || fail "apps after reset: $(ag apps)"
+ag install "$OUT/agemu-probe.apk" >/dev/null
+ag permission grant "$PROBE" location >/dev/null
+probe
+ui_has "location: 39.23726,-123.15003" 8000 || fail "location after reset is not the emulator's default fix"
+ok "after reset: light, empty clipboard, no user apps, default GPS fix"
+
+step "capabilities: clear-data and uninstall"
+probe
+ui_has "launches: 1" || fail "fresh install did not start at 1 launch"
+ag permission grant "$PROBE" camera >/dev/null
+ag clear-data "$PROBE" >/dev/null
+probe
+ui_has "launches: 1" || fail "clear-data kept the app's data"
+ui_has "camera: denied" || fail "clear-data kept the app's permissions"
+ok "clear-data: data and permissions gone"
+ag uninstall "$PROBE" >/dev/null
+[[ "$(ag apps)" == "[]" ]] || fail "uninstall: $(ag apps)"
+ok "uninstall removed $PROBE"
+set +e
+ag push "$PROBE" '{"aps":{"alert":"x"}}' >/dev/null 2>&1; rc=$?
+set -e
+[[ $rc == 3 ]] || fail "push exit $rc, want 3 (not implemented on android)"
+ok "push answers not implemented (exit 3)"
+ag key home >/dev/null
+
 printf '\nALL %d CHECKS PASSED (artifacts in %s)\n' "$PASS" "$OUT"

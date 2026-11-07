@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
 )
 
@@ -45,7 +46,13 @@ func Dial() (*Client, error) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	return &Client{conn: conn, r: bufio.NewReaderSize(conn, 1<<20)}, nil
+	return New(conn), nil
+}
+
+// New returns a client on an open connection to a daemon (Dial uses it; tests pass one end of
+// a net.Pipe served by daemon.ServeConn).
+func New(conn net.Conn) *Client {
+	return &Client{conn: conn, r: bufio.NewReaderSize(conn, 1<<20)}
 }
 
 func logPath() string { return filepath.Join(daemon.Home(), "daemon.log") }
@@ -130,7 +137,23 @@ func (c *Client) CallRaw(method string, params any) (json.RawMessage, float64, e
 		return nil, 0, err
 	}
 	if resp.Error != "" {
-		return nil, resp.Ms, errors.New(resp.Error)
+		return nil, resp.Ms, &Error{Message: resp.Error, Code: resp.Code}
 	}
 	return resp.Result, resp.Ms, nil
+}
+
+// Error is an error the daemon answered. It matches api.ErrNotImplemented (errors.Is) when the
+// daemon marked it so (the capability has no implementation on the device's platform).
+type Error struct {
+	Message string
+	Code    string // daemon.CodeNotImplemented or ""
+}
+
+func (e *Error) Error() string { return e.Message }
+
+func (e *Error) Unwrap() error {
+	if e.Code == daemon.CodeNotImplemented {
+		return api.ErrNotImplemented
+	}
+	return nil
 }

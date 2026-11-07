@@ -10,7 +10,7 @@ import (
 )
 
 // simctl runs `xcrun simctl <args>` for operations where speed does not matter
-// (create, privacy/keychain reset, pasteboard).
+// (create, keychain reset). The pasteboard goes through the helper (capabilities.go).
 func simctl(ctx context.Context, args ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, "xcrun", append([]string{"simctl"}, args...)...).CombinedOutput()
 	if err != nil {
@@ -20,7 +20,7 @@ func simctl(ctx context.Context, args ...string) (string, error) {
 }
 
 // simctlPath is CoreSimulator's own simctl. Running it directly skips xcrun resolving the
-// developer directory, about 45 ms per call (pbcopy runs once per typed text).
+// developer directory, about 45 ms per call.
 const simctlPath = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl"
 
 func simctlCommand(ctx context.Context, args ...string) *exec.Cmd {
@@ -30,6 +30,8 @@ func simctlCommand(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "xcrun", append([]string{"simctl"}, args...)...)
 }
 
+// simctlStdin runs simctl with stdin; `type` falls back to `simctl pbcopy` with it when the
+// helper's pasteboard is not available (ios.go paste).
 func simctlStdin(ctx context.Context, stdin string, args ...string) error {
 	cmd := simctlCommand(ctx, args...)
 	cmd.Stdin = strings.NewReader(stdin)

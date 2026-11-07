@@ -11,8 +11,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,10 +49,26 @@ Device commands (-d <device> optional when exactly one device is booted):
   launch <app-id> [--relaunch] [-- <process args...>]   (args/relaunch: iOS)
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
 
-Actions (tap, swipe, type, key, launch) also wait for their effect in the same call:
+Test capabilities (docs/CAPABILITIES.md; reset restores appearance, location, clipboard, permissions):
+  open <url>                                open a URL / deep link as a tapped link would
+  permission grant|revoke <app-id> <name>...   names: camera microphone photos photos-add
+                                            location location-always contacts contacts-limited
+                                            calendar reminders notifications motion media-library
+                                            siri, or android.permission.*
+  permission reset <app-id> [<name>...]     ask again on next use (all permissions without names)
+  location set <lat> <lon> | location clear simulated GPS fix
+  clipboard [get] | clipboard set <text>    plain text (get prints it; --json for JSON)
+  appearance [light|dark]                   read, or switch light/dark mode
+  apps                                      installed user apps
+  uninstall <app-id>  clear-data <app-id>   clear-data: like a fresh install, app kept
+  push <app-id> <json|file.json|->          push notification (iOS)
+
+Actions (tap, swipe, type, key, launch, open, push) also wait for their effect in the same call:
   --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
   --ui prints the screen the action ends on (outline), so one call acts, waits and observes
   e.g. agemu tap --text "Log in" --wait-id home-screen --ui
+
+Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform.
 
 Servers:
   daemon                                    run the daemon in the foreground
@@ -82,6 +101,9 @@ func main() {
 	}
 	if err := runCommand(cmd, args); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, api.ErrNotImplemented) {
+			os.Exit(3) // a script can skip the step on this platform
+		}
 		os.Exit(1)
 	}
 }
@@ -155,117 +177,22 @@ func atoi(s string) (int, error) {
 
 func runCommand(cmd string, args []string) error {
 	c := parse(args)
-	p := daemon.Params{Device: c.flags["device"]}
-	if p.Device == "" {
-		p.Device = os.Getenv("AGEMU_DEVICE")
+	method, p, err := request(cmd, c, os.Stdin)
+	if err != nil {
+		return err
 	}
-	textOut := c.flags["json"] != "true" // ui/find print a text outline unless --json
-	switch cmd {
-	case "ping", "devices":
-	case "profiles":
-		p.Platform = api.Platform(c.flags["platform"])
-	case "create":
-		p.Platform = api.Platform(c.flags["platform"])
-		p.Name = c.flags["name"]
-		p.Profile = c.flags["profile"]
-	case "boot", "shutdown", "reset":
-		if len(c.pos) > 0 {
-			p.Device = c.pos[0]
-		}
-		p.Cold = c.flags["cold"] == "true"
-	case "profile":
-		cmd = "set_profile"
-		if len(c.pos) > 0 {
-			p.Profile = c.pos[0]
-		}
-		p.Width, p.Height, p.Density = c.int("width"), c.int("height"), c.int("density")
-	case "screenshot":
-		p.Path = c.flags["output"]
-		if p.Path != "" {
-			if abs, err := filepath.Abs(p.Path); err == nil {
-				p.Path = abs
-			}
-		}
-		p.Format = c.flags["format"]
-		p.Scale, _ = strconv.ParseFloat(c.flags["scale"], 64)
-	case "ui":
-	case "find", "wait":
-		p.Selector = c.selector()
-		p.TimeoutMs = c.int("timeout-ms")
-		p.Gone = c.flags["gone"] == "true"
-	case "tap":
-		if len(c.pos) >= 2 {
-			x, err1 := atoi(c.pos[0])
-			y, err2 := atoi(c.pos[1])
-			if err1 != nil || err2 != nil {
-				return fmt.Errorf("tap: bad coordinates")
-			}
-			p.X, p.Y = &x, &y
-		} else {
-			p.Selector = c.selector()
-		}
-	case "swipe":
-		if len(c.pos) < 4 {
-			return fmt.Errorf("swipe needs x1 y1 x2 y2")
-		}
-		var v [4]int
-		for i := range v {
-			n, err := atoi(c.pos[i])
-			if err != nil {
-				return fmt.Errorf("swipe: bad coordinate %q", c.pos[i])
-			}
-			v[i] = n
-		}
-		p.X, p.Y, p.X2, p.Y2 = &v[0], &v[1], v[2], v[3]
-		p.DurationMs = c.int("ms")
-	case "type":
-		p.Text = strings.Join(c.pos, " ")
-		p.Keys = c.flags["keys"] == "true"
-	case "key":
-		if len(c.pos) == 0 {
-			return fmt.Errorf("key needs a key name")
-		}
-		p.Key = c.pos[0]
-	case "install":
-		if len(c.pos) == 0 {
-			return fmt.Errorf("install needs a path")
-		}
-		abs, err := filepath.Abs(c.pos[0])
-		if err != nil {
-			return err
-		}
-		p.Path = abs
-	case "launch", "terminate":
-		if len(c.pos) == 0 {
-			return fmt.Errorf("%s needs an app id", cmd)
-		}
-		p.App = c.pos[0]
-		if cmd == "launch" {
-			p.Args = c.pos[1:] // agemu launch <app> -- <process arguments...>
-			p.Relaunch = c.flags["relaunch"] == "true"
-		}
-	default:
-		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
-	}
-
-	switch cmd {
-	case "tap", "swipe", "type", "key", "launch":
-		if ws := c.waitSelector(); ws != nil {
-			p.WaitFor, p.WaitGone, p.WaitTimeoutMs = ws, c.flags["wait-gone"] == "true", c.int("wait-timeout-ms")
-		}
-		p.ReturnUI = c.flags["ui"] == "true"
-	}
+	textOut := c.flags["json"] != "true" // ui/find/clipboard print text unless --json
 
 	cl, err := client.Dial()
 	if err != nil {
 		return err
 	}
 	defer cl.Close()
-	raw, _, err := cl.CallRaw(cmd, p)
+	raw, _, err := cl.CallRaw(method, p)
 	if err != nil {
 		return err
 	}
-	if cmd == "ui" && textOut {
+	if method == "ui" && textOut {
 		var t api.UITree
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return err
@@ -292,7 +219,7 @@ func runCommand(cmd string, args []string) error {
 			return nil
 		}
 	}
-	if (cmd == "find") && textOut {
+	if (method == "find") && textOut {
 		var els []*api.Element
 		if err := json.Unmarshal(raw, &els); err != nil {
 			return err
@@ -302,7 +229,214 @@ func runCommand(cmd string, args []string) error {
 		}
 		return nil
 	}
+	if method == "clipboard" && p.Action == "get" && textOut {
+		// The text itself, so a shell can use $(agemu clipboard).
+		var r struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return err
+		}
+		fmt.Println(r.Text)
+		return nil
+	}
 	os.Stdout.Write(raw)
 	os.Stdout.Write([]byte{'\n'})
 	return nil
+}
+
+// request turns a command line into a daemon method and its parameters. stdin is read for
+// `push <app> -`.
+func request(cmd string, c cli, stdin io.Reader) (string, daemon.Params, error) {
+	p := daemon.Params{Device: c.flags["device"]}
+	if p.Device == "" {
+		p.Device = os.Getenv("AGEMU_DEVICE")
+	}
+	method, err := params(cmd, c, stdin, &p)
+	return method, p, err
+}
+
+// params fills p for cmd and returns the daemon method.
+func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error) {
+	method := cmd
+	switch cmd {
+	case "ping", "devices":
+	case "profiles":
+		p.Platform = api.Platform(c.flags["platform"])
+	case "create":
+		p.Platform = api.Platform(c.flags["platform"])
+		p.Name = c.flags["name"]
+		p.Profile = c.flags["profile"]
+	case "boot", "shutdown", "reset":
+		if len(c.pos) > 0 {
+			p.Device = c.pos[0]
+		}
+		p.Cold = c.flags["cold"] == "true"
+	case "profile":
+		method = "set_profile"
+		if len(c.pos) > 0 {
+			p.Profile = c.pos[0]
+		}
+		p.Width, p.Height, p.Density = c.int("width"), c.int("height"), c.int("density")
+	case "screenshot":
+		p.Path = c.flags["output"]
+		if p.Path != "" {
+			if abs, err := filepath.Abs(p.Path); err == nil {
+				p.Path = abs
+			}
+		}
+		p.Format = c.flags["format"]
+		p.Scale, _ = strconv.ParseFloat(c.flags["scale"], 64)
+	case "ui":
+	case "find", "wait":
+		p.Selector = c.selector()
+		p.TimeoutMs = c.int("timeout-ms")
+		p.Gone = c.flags["gone"] == "true"
+	case "tap":
+		if len(c.pos) >= 2 {
+			x, err1 := atoi(c.pos[0])
+			y, err2 := atoi(c.pos[1])
+			if err1 != nil || err2 != nil {
+				return "", fmt.Errorf("tap: bad coordinates")
+			}
+			p.X, p.Y = &x, &y
+		} else {
+			p.Selector = c.selector()
+		}
+	case "swipe":
+		if len(c.pos) < 4 {
+			return "", fmt.Errorf("swipe needs x1 y1 x2 y2")
+		}
+		var v [4]int
+		for i := range v {
+			n, err := atoi(c.pos[i])
+			if err != nil {
+				return "", fmt.Errorf("swipe: bad coordinate %q", c.pos[i])
+			}
+			v[i] = n
+		}
+		p.X, p.Y, p.X2, p.Y2 = &v[0], &v[1], v[2], v[3]
+		p.DurationMs = c.int("ms")
+	case "type":
+		p.Text = strings.Join(c.pos, " ")
+		p.Keys = c.flags["keys"] == "true"
+	case "key":
+		if len(c.pos) == 0 {
+			return "", fmt.Errorf("key needs a key name")
+		}
+		p.Key = c.pos[0]
+	case "install":
+		if len(c.pos) == 0 {
+			return "", fmt.Errorf("install needs a path")
+		}
+		abs, err := filepath.Abs(c.pos[0])
+		if err != nil {
+			return "", err
+		}
+		p.Path = abs
+	case "launch", "terminate", "uninstall", "clear-data":
+		if len(c.pos) == 0 {
+			return "", fmt.Errorf("%s needs an app id", cmd)
+		}
+		p.App = c.pos[0]
+		if cmd == "launch" {
+			p.Args = c.pos[1:] // agemu launch <app> -- <process arguments...>
+			p.Relaunch = c.flags["relaunch"] == "true"
+		}
+		if cmd == "clear-data" {
+			method = "clear_app_data"
+		}
+
+	// Test capabilities: the daemon checks the values (internal/daemon/capabilities.go); the
+	// CLI only maps the command line onto its parameters.
+	case "open":
+		method = "open_url"
+		if len(c.pos) == 0 {
+			return "", fmt.Errorf("open needs a url")
+		}
+		p.URL = c.pos[0]
+	case "permission":
+		if len(c.pos) < 2 {
+			return "", fmt.Errorf("usage: permission grant|revoke|reset <app-id> [<name>...]")
+		}
+		p.Action, p.App, p.Permissions = c.pos[0], c.pos[1], c.pos[2:]
+	case "location":
+		pos := c.pos
+		if len(pos) > 0 && !isNumber(pos[0]) {
+			p.Action, pos = pos[0], pos[1:]
+		}
+		if len(pos) > 0 {
+			if len(pos) != 2 {
+				return "", fmt.Errorf("usage: location set <latitude> <longitude> | location clear")
+			}
+			lat, err1 := strconv.ParseFloat(pos[0], 64)
+			lon, err2 := strconv.ParseFloat(pos[1], 64)
+			if err1 != nil || err2 != nil || !finite(lat) || !finite(lon) {
+				return "", fmt.Errorf("location: bad coordinates %q %q", pos[0], pos[1])
+			}
+			p.Latitude, p.Longitude = &lat, &lon
+		}
+	case "clipboard":
+		switch {
+		case len(c.pos) == 0 || (c.pos[0] == "get" && len(c.pos) == 1):
+			p.Action = "get"
+		case c.pos[0] == "set":
+			p.Action, p.Text = "set", strings.Join(c.pos[1:], " ")
+		default:
+			return "", fmt.Errorf("usage: clipboard [get] | clipboard set <text>")
+		}
+	case "appearance":
+		pos := c.pos
+		if len(pos) > 0 && (pos[0] == "get" || pos[0] == "set") {
+			pos = pos[1:]
+		}
+		if len(pos) > 0 {
+			p.Mode = pos[0]
+		}
+	case "apps":
+	case "push":
+		if len(c.pos) < 2 {
+			return "", fmt.Errorf("usage: push <app-id> <payload JSON | file.json | - for stdin>")
+		}
+		p.App = c.pos[0]
+		payload, err := readPayload(c.pos[1], stdin)
+		if err != nil {
+			return "", err
+		}
+		p.Payload = payload
+	default:
+		return "", fmt.Errorf("unknown command %q (see agemu help)", cmd)
+	}
+
+	switch method {
+	case "tap", "swipe", "type", "key", "launch", "open_url", "push":
+		if ws := c.waitSelector(); ws != nil {
+			p.WaitFor, p.WaitGone, p.WaitTimeoutMs = ws, c.flags["wait-gone"] == "true", c.int("wait-timeout-ms")
+		}
+		p.ReturnUI = c.flags["ui"] == "true"
+	}
+	return method, nil
+}
+
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
+
+// readPayload reads a push payload given inline ({...}), as a file path, or as - for stdin.
+func readPayload(arg string, stdin io.Reader) (json.RawMessage, error) {
+	var data []byte
+	var err error
+	switch s := strings.TrimSpace(arg); {
+	case strings.HasPrefix(s, "{"):
+		data = []byte(s)
+	case s == "-":
+		data, err = io.ReadAll(stdin)
+	default:
+		data, err = os.ReadFile(s)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("push: reading the payload: %w", err)
+	}
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("push: the payload is not valid JSON")
+	}
+	return json.RawMessage(data), nil
 }

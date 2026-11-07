@@ -7,7 +7,10 @@
 // that exact point on either platform.
 package api
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 type Platform string
 
@@ -17,7 +20,113 @@ const (
 )
 
 // ErrNotImplemented is returned by backend operations that are not available.
+// Test with errors.Is: NotImplementedError matches it, also after a round trip through the
+// daemon socket (the response carries code "not_implemented").
 var ErrNotImplemented = errors.New("not implemented")
+
+// NotImplementedError says that a capability has no implementation on a platform, either not
+// yet or because the platform has no path to it that behaves like a real device. Reason says
+// which, for the agent reading the error.
+type NotImplementedError struct {
+	Platform Platform
+	What     string // a daemon method ("push") or a narrower thing ("permission \"siri\"")
+	Reason   string // optional
+}
+
+func (e *NotImplementedError) Error() string {
+	s := e.What + " is not implemented on " + string(e.Platform)
+	if e.Reason != "" {
+		s += ": " + e.Reason
+	}
+	return s
+}
+
+func (e *NotImplementedError) Unwrap() error { return ErrNotImplemented }
+
+// NotImplemented returns a *NotImplementedError. Backends return it for a part of a capability
+// they cannot do faithfully (one permission name, say); the daemon returns it for a capability
+// whose optional backend interface a backend does not implement.
+func NotImplemented(p Platform, what, reason string) error {
+	return &NotImplementedError{Platform: p, What: what, Reason: reason}
+}
+
+// Permission is a platform-neutral privacy permission name. Each backend maps it to its own
+// permissions (Android runtime permissions, iOS privacy services); docs/CAPABILITIES.md has
+// the table. A name containing a '.' is a raw platform permission, passed through as is
+// (android.permission.READ_SMS); backends without raw names answer NotImplemented.
+type Permission string
+
+const (
+	PermCamera          Permission = "camera"
+	PermMicrophone      Permission = "microphone"
+	PermPhotos          Permission = "photos"     // read the photo library (full access)
+	PermPhotosAdd       Permission = "photos-add" // add to the photo library only
+	PermLocation        Permission = "location"   // while the app is in use
+	PermLocationAlways  Permission = "location-always"
+	PermContacts        Permission = "contacts"
+	PermContactsLimited Permission = "contacts-limited"
+	PermCalendar        Permission = "calendar"
+	PermReminders       Permission = "reminders"
+	PermNotifications   Permission = "notifications"
+	PermMotion          Permission = "motion" // motion and fitness / activity recognition
+	PermMediaLibrary    Permission = "media-library"
+	PermSiri            Permission = "siri"
+)
+
+// Permissions lists every platform-neutral permission name.
+var Permissions = []Permission{
+	PermCamera, PermMicrophone, PermPhotos, PermPhotosAdd, PermLocation, PermLocationAlways,
+	PermContacts, PermContactsLimited, PermCalendar, PermReminders, PermNotifications,
+	PermMotion, PermMediaLibrary, PermSiri,
+}
+
+// Raw reports whether p is a raw platform permission name rather than a neutral one.
+func (p Permission) Raw() bool { return strings.Contains(string(p), ".") }
+
+// Known reports whether p is a neutral name or a raw platform name.
+func (p Permission) Known() bool {
+	if p.Raw() {
+		return !strings.ContainsAny(string(p), " \t\n,")
+	}
+	for _, k := range Permissions {
+		if p == k {
+			return true
+		}
+	}
+	return false
+}
+
+// PermissionAction is what to do with a permission:
+//   - grant: the app has access, as if the user allowed it (the system dialog never shows);
+//   - revoke: the app is denied, as if the user chose "Don't allow" and the app may not ask
+//     again (iOS: denied; Android: denied and user-fixed);
+//   - reset: back to "not determined", so the app asks again on next use.
+type PermissionAction string
+
+const (
+	PermissionGrant  PermissionAction = "grant"
+	PermissionRevoke PermissionAction = "revoke"
+	PermissionReset  PermissionAction = "reset"
+)
+
+// Appearance is the system light/dark mode.
+type Appearance string
+
+const (
+	AppearanceLight Appearance = "light" // the baseline; reset restores it
+	AppearanceDark  Appearance = "dark"
+)
+
+// App is one installed app.
+type App struct {
+	ID      string `json:"id"`                // package name / bundle id
+	Name    string `json:"name,omitempty"`    // display name, when the backend knows it
+	Version string `json:"version,omitempty"` // versionName / CFBundleShortVersionString, when known
+}
+
+// MaxPushPayload is the largest push payload in bytes (compact JSON), APNs' limit for a
+// regular (not VoIP) notification.
+const MaxPushPayload = 4096
 
 // Device is one virtual device managed by agemu.
 type Device struct {

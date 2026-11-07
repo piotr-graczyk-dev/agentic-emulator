@@ -1154,6 +1154,27 @@ static NSUInteger AGSampleGrid(IOSurfaceRef surface, uint32_t *cur, const uint32
   return @{@"mark" : @(self.frameCount), @"waitedMs" : @((CFAbsoluteTimeGetCurrent() - start) * 1000)};
 }
 
+- (NSDictionary *)waitForBigChangeWithin:(double)startMs quiet:(double)quietMs max:(double)maxMs
+{
+  NSError *err = nil;
+  if (![self framebufferWithError:&err]) {
+    return @{@"changed" : @NO, @"waitedMs" : @0, @"error" : err.localizedDescription ?: @"no framebuffer"};
+  }
+  [self startDisplayMonitor];
+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+  double quiet = quietMs / 1000, limit = maxMs / 1000, first = startMs / 1000;
+  while (self.lastBigChangeAt <= start) {
+    if (CFAbsoluteTimeGetCurrent() - start >= first) {
+      return @{@"changed" : @NO, @"waitedMs" : @((CFAbsoluteTimeGetCurrent() - start) * 1000)};
+    }
+    usleep(2000);
+  }
+  while (CFAbsoluteTimeGetCurrent() - self.lastBigChangeAt < quiet && CFAbsoluteTimeGetCurrent() - start < limit) {
+    usleep(2000);
+  }
+  return @{@"changed" : @YES, @"waitedMs" : @((CFAbsoluteTimeGetCurrent() - start) * 1000)};
+}
+
 - (NSUInteger)inputFrameMark
 {
   NSError *err = nil;

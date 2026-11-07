@@ -33,6 +33,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("ImageIO"),
                 .linkedFramework("CoreImage"),
+                .linkedLibrary("sqlite3"),
             ]
         ),
     ]

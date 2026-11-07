@@ -289,6 +289,39 @@ public final class Agent {
                 sb.append("true");
                 return;
             }
+            // Test capabilities (Caps.java, docs/CAPABILITIES.md).
+            case "openurl":
+                Caps.openURL(req.getString("url"), sb);
+                return;
+            case "permstate":
+                Caps.permState(req.getString("pkg"), req.optJSONArray("only"), sb);
+                return;
+            case "perms":
+                Caps.applyPerms(req, sb);
+                return;
+            case "clipget":
+                str(sb, Caps.clipText());
+                return;
+            case "clipset":
+                Caps.setClip(req.getString("text"));
+                sb.append("true");
+                return;
+            case "appearance":
+                if (req.optString("mode").isEmpty()) {
+                    sb.append("{\"appearance\":"); str(sb, Caps.appearance()); sb.append('}');
+                } else {
+                    Caps.setAppearance(req.getString("mode"), req.optLong("settleMs", 2000), req.optLong("graceMs", 300), sb);
+                }
+                return;
+            case "apps":
+                Caps.apps(sb);
+                return;
+            case "uninstall":
+                Caps.uninstall(req.getString("pkg"), sb);
+                return;
+            case "clear":
+                Caps.clearData(req.getString("pkg"), sb);
+                return;
             case "exit":
                 sb.append("true");
                 new Thread(new Runnable() {
@@ -550,20 +583,129 @@ public final class Agent {
         if (sm == null) throw new IllegalStateException("startActivityAndWait not found");
         // (caller, callingPackage, callingFeatureId, intent, resolvedType, resultTo, resultWho,
         //  requestCode, flags, profilerInfo, options, userId) - the same call `am start -W` makes.
-        Object wr = sm.invoke(atm, null, "com.android.shell", null, i, null, null, null, 0, 0, null, null, USER_CURRENT);
+        Object wr = startAndWait(atm, sm, cn.flattenToShortString(), null, "com.android.shell", null, i, null, null, null, 0, 0, null, null, USER_CURRENT);
         long t3 = SystemClock.uptimeMillis();
         int result = wr.getClass().getField("result").getInt(wr);
         long total = wr.getClass().getField("totalTime").getLong(wr);
         if (result < 0) throw new IllegalStateException("start failed, result " + result + " for " + cn.flattenToShortString());
-        synchronized (launchLock) {
-            pendingPkg = cn.getPackageName();
-            pendingPrevFg = prevFg;
-            pendingUntil = t3 + 3000;
-        }
+        setPendingLaunch(cn.getPackageName(), prevFg, t3);
         sb.append("{\"component\":"); str(sb, cn.flattenToShortString());
         sb.append(",\"result\":").append(result).append(",\"totalTime\":").append(total);
         sb.append(",\"resolveMs\":").append(t1 - t0).append(",\"fgMs\":").append(t2 - t1);
         sb.append(",\"startMs\":").append(t3 - t2).append('}');
+    }
+
+    /** Uptime of the last key sent without waiting for its effect ("key" with async). */
+    static volatile long lastAsyncKey;
+    /** How long a start waits after such a key, so the key's effect lands first. */
+    static final long KEY_SETTLE_MS = 300;
+    /** Upper bound of a startActivityAndWait (a cold start on a loaded host takes seconds). */
+    static final long START_WAIT_MS = 20000;
+    /**
+     * Starts that passed START_WAIT_MS and are still blocked in startActivityAndWait. Each one
+     * holds a thread here and a binder thread in system_server, so after MAX_STUCK_STARTS new
+     * starts are refused until one returns. `agemu reset` restores the agent and system_server
+     * from the baseline, which clears them.
+     */
+    static final java.util.concurrent.atomic.AtomicInteger stuckStarts = new java.util.concurrent.atomic.AtomicInteger();
+    static final int MAX_STUCK_STARTS = 3;
+
+    /**
+     * startActivityAndWait (args as for ActivityTaskManager's), safe against two hazards:
+     *   - a start right after an async key (home, back) races the key: when the key is handled
+     *     after the start, the new activity goes behind and never reports being displayed, and
+     *     startActivityAndWait does not return (seen 3 of 6 times with home sent 1 ms before; never
+     *     with 300 ms between). So the start waits until KEY_SETTLE_MS after such a key.
+     *   - any other start that never shows is bounded by START_WAIT_MS, with an error.
+     */
+    static Object startAndWait(final Object atm, final Method sm, String what, final Object... args) throws Exception {
+        if (stuckStarts.get() >= MAX_STUCK_STARTS) {
+            throw new IllegalStateException(stuckStarts.get() + " earlier starts never reported being displayed and still hold a"
+                    + " system thread; not starting " + what + " (agemu reset clears them)");
+        }
+        long since = SystemClock.uptimeMillis() - lastAsyncKey;
+        if (since >= 0 && since < KEY_SETTLE_MS) SystemClock.sleep(KEY_SETTLE_MS - since);
+        final Object[] box = new Object[2];
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        // Set by the waiter when it gives up: the thread then counts itself out when it returns.
+        final java.util.concurrent.atomic.AtomicBoolean abandoned = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                try { box[0] = sm.invoke(atm, args); } catch (Throwable e) { box[1] = e; }
+                synchronized (abandoned) {
+                    done.countDown();
+                    if (abandoned.get()) stuckStarts.decrementAndGet();
+                }
+            }
+        }, "agemu-start");
+        t.setDaemon(true);
+        t.start();
+        if (!done.await(START_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            synchronized (abandoned) {
+                if (done.getCount() > 0) {
+                    abandoned.set(true);
+                    stuckStarts.incrementAndGet();
+                }
+            }
+            if (abandoned.get()) {
+                throw new IllegalStateException("started " + what + ", but it did not report being displayed in "
+                        + START_WAIT_MS / 1000 + " s (in front: " + foreground() + ")");
+            }
+        }
+        if (box[1] instanceof java.lang.reflect.InvocationTargetException) throw (Exception) ((Throwable) box[1]).getCause();
+        if (box[1] instanceof Exception) throw (Exception) box[1];
+        if (box[1] != null) throw new RuntimeException((Throwable) box[1]);
+        return box[0];
+    }
+
+    /** Makes the next "tree" wait (up to 3 s after t) for pkg's window (see awaitPendingLaunch). */
+    static void setPendingLaunch(String pkg, String prevFg, long t) {
+        if (pkg == null || pkg.isEmpty()) return;
+        synchronized (launchLock) {
+            pendingPkg = pkg;
+            pendingPrevFg = prevFg;
+            pendingUntil = t + 3000;
+        }
+    }
+
+    /** Id of the focused application window (-1: none). */
+    static int fgWindowId() {
+        try {
+            for (AccessibilityWindowInfo w : ua.getWindows()) {
+                if (w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && (w.isActive() || w.isFocused())) return w.getId();
+            }
+        } catch (Throwable ignored) {}
+        return -1;
+    }
+
+    /**
+     * After a configuration change: waits until the focused application window is a new one with
+     * content (the activity was recreated and has laid out), up to timeoutMs. When no new window
+     * shows within graceMs, the app handled the change in its window (or has none in front).
+     * Returns "recreated", "in-place" or "timeout".
+     */
+    static String awaitWindowReplaced(int oldId, long graceMs, long timeoutMs) {
+        long t0 = SystemClock.uptimeMillis();
+        boolean gone = false;
+        while (true) {
+            long el = SystemClock.uptimeMillis() - t0;
+            try {
+                int cur = -1;
+                boolean content = false;
+                for (AccessibilityWindowInfo w : ua.getWindows()) {
+                    if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !(w.isActive() || w.isFocused())) continue;
+                    cur = w.getId();
+                    AccessibilityNodeInfo r = w.getRoot();
+                    content = r != null && r.getChildCount() > 0;
+                    break;
+                }
+                if (cur != oldId) gone = true;
+                if (gone && cur != -1 && content) return "recreated";
+            } catch (Throwable ignored) {}
+            if (!gone && el >= graceMs) return "in-place";
+            if (el >= timeoutMs) return "timeout";
+            SystemClock.sleep(5);
+        }
     }
 
     /**
@@ -646,6 +788,7 @@ public final class Agent {
         inject(down, INJECT_ASYNC);
         KeyEvent up = new KeyEvent(now, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
         inject(up, async ? INJECT_ASYNC : INJECT_WAIT_FOR_FINISH);
+        if (async) lastAsyncKey = SystemClock.uptimeMillis();
     }
 
     /**

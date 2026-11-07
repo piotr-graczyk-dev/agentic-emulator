@@ -89,9 +89,9 @@ func leanOn() bool {
 // launchctl runs per job; 36 s on a busy host), and the device works meanwhile. A device is
 // checked once per daemon and again after every cold boot; a request that arrives while the
 // device is being reconciled runs once that finishes. After a cold boot of a lean device the
-// wallpaper gallery is stopped too, on its own schedule (a newer boot restarts it). Failures are
-// logged and leave the device unchecked, so the next boot tries again: a device that is not lean
-// still works.
+// wallpaper gallery and what iOS starts in the background are stopped too, each on its own
+// schedule (a newer boot restarts them). Failures are logged and leave the device unchecked, so
+// the next boot tries again: a device that is not lean still works.
 func (b *Backend) leanDevice(d simDevice, cold bool) {
 	if !managed(d.Name) {
 		return
@@ -103,12 +103,16 @@ func (b *Backend) leanDevice(d simDevice, cold bool) {
 		return
 	}
 	if on && cold {
-		b.wallGen[d.UDID]++
-		gen := b.wallGen[d.UDID]
-		b.bgWG.Add(1)
+		b.bootGen[d.UDID]++
+		gen := b.bootGen[d.UDID]
+		b.bgWG.Add(2)
 		go func() {
 			defer b.bgWG.Done()
 			b.stopWallpaperGallery(d, gen)
+		}()
+		go func() {
+			defer b.bgWG.Done()
+			b.stopBackgroundApps(d, gen)
 		}()
 	}
 	if state, checked := b.lean[d.UDID]; checked && state == on && !cold {
@@ -249,10 +253,7 @@ func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 			return
 		case <-time.After(time.Until(ready.Add(at))):
 		}
-		b.mu.Lock()
-		current := b.wallGen[d.UDID] == gen
-		b.mu.Unlock()
-		if !current {
+		if !b.currentBoot(d.UDID, gen) {
 			return
 		}
 		// ww: the provider is in the extension's launch arguments, so the command lines must not
@@ -284,6 +285,13 @@ func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 	if len(stopped) > 0 {
 		log.Printf("ios lean %s: stopped %s; kept the posters in use: %s", d.Name, stoppedSummary(stopped), strings.Join(sortedKeys(keep), ", "))
 	}
+}
+
+// currentBoot reports whether gen is still the device's latest cold boot (see leanDevice).
+func (b *Backend) currentBoot(udid string, gen int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bootGen[udid] == gen
 }
 
 // galleryPasses are the fixed passes of stopWallpaperGallery, as times after the device is
@@ -342,16 +350,11 @@ func galleryToStop(exts []galleryExtension, keep map[string]bool) []galleryExten
 
 // stoppedSummary formats stopped providers as "13 wallpaper gallery extensions (a, b x2, ...)".
 func stoppedSummary(stopped map[string]int) string {
-	n := 0
-	var ps []string
-	for _, p := range sortedKeys(stopped) {
-		n += stopped[p]
-		if stopped[p] > 1 {
-			p += " x" + strconv.Itoa(stopped[p])
-		}
-		ps = append(ps, strings.TrimPrefix(p, "com.apple."))
+	short := map[string]int{}
+	for p, n := range stopped {
+		short[strings.TrimPrefix(p, "com.apple.")] += n
 	}
-	return fmt.Sprintf("%d wallpaper gallery extensions (%s)", n, strings.Join(ps, ", "))
+	return countedNames(short, "wallpaper gallery extensions")
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -385,6 +388,25 @@ type galleryExtension struct {
 // extension processes (posterExtension) that the simulator's launchd_sim started, and the
 // device's data directory (from launchd_sim's argument).
 func wallpaperExtensions(ps, udid string) (exts []galleryExtension, data string) {
+	procs, data := simChildren(ps, udid)
+	for _, p := range procs {
+		if posterExtension.MatchString(p.cmd) {
+			exts = append(exts, galleryExtension{p.pid, launchService(p.cmd)})
+		}
+	}
+	return exts, data
+}
+
+// simProc is a process that a simulator's launchd_sim started, with its command line.
+type simProc struct {
+	pid int
+	cmd string
+}
+
+// simChildren finds, in `ps -axwwo pid=,ppid=,command=` output, the processes that the
+// simulator's launchd_sim started, and the device's data directory (from launchd_sim's
+// argument).
+func simChildren(ps, udid string) (children []simProc, data string) {
 	type proc struct {
 		ppid int
 		cmd  string
@@ -417,11 +439,11 @@ func wallpaperExtensions(ps, udid string) (exts []galleryExtension, data string)
 		return nil, ""
 	}
 	for pid, p := range procs {
-		if p.ppid == root && posterExtension.MatchString(p.cmd) {
-			exts = append(exts, galleryExtension{pid, launchService(p.cmd)})
+		if p.ppid == root {
+			children = append(children, simProc{pid, p.cmd})
 		}
 	}
-	return exts, data
+	return children, data
 }
 
 var launchArguments = regexp.MustCompile(`-LaunchArguments ([A-Za-z0-9+/=_-]+)`)

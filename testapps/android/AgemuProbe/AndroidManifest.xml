@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AgemuProbe: shows what an app sees of the state agemu's test capabilities change
+     (docs/CAPABILITIES.md). Built by testapps/android/build.sh without Gradle. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.agemu.probe"
+    android:versionCode="3"
+    android:versionName="1.2">
+
+    <!-- Mapped by the neutral names: camera, microphone, location(-always), contacts,
+         calendar (READ only: a grant acts on what the app requests), notifications, photos.
+         Not requested on purpose: ACTIVITY_RECOGNITION (motion) and READ_MEDIA_AUDIO
+         (media-library), so a grant of those names is refused. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- an app-op permission (raw name) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- a normal permission (raw name; granted at install, cannot be changed) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application android:label="Agemu Probe" android:allowBackup="false">
+        <!-- Launcher and deep links that a link in another app may open (BROWSABLE). -->
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="agemuprobe" />
+            </intent-filter>
+        </activity>
+        <!-- VIEW without BROWSABLE: `am start -d` opens it, a link (and agemu open) must not. -->
+        <activity android:name=".NoBrowseActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="agemunb" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

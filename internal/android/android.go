@@ -68,6 +68,7 @@ type device struct {
 	lastInput atomic.Int64
 
 	lastLoad time.Time // when the last in-place snapshot load finished (see loadBaseline)
+	fix      gpsFix    // the emulator's default GPS fix (see recordDefaultFix)
 }
 
 // loadSpacing is the minimum time between the end of an in-place snapshot load and the start of
@@ -772,6 +773,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			d.lastLoad = time.Time{} // a new emulator process has no texture loader running
 			d.mu.Unlock()
 			e.enableShm(filepath.Join(logDir(), d.name+".fb"), a.intCfg("hw.lcd.width"), a.intCfg("hw.lcd.height"))
+			d.recordDefaultFix(ctx, e, r.PID)
 			return nil
 		}
 		if cmd.ProcessState != nil || !pidAlive(cmd.Process.Pid) {
@@ -1047,10 +1049,12 @@ func (d *device) enterStandby(ctx context.Context) error {
 		return d.shutdown(ctx)
 	}
 	t := time.Now()
+	d.sendDefaultGps(ctx, e)
 	if err := d.loadBaseline(ctx, e); err != nil {
 		logf("%s: loading %s for standby failed (%v); powering off", d.name, baselineSnapshot, err)
 		return d.shutdown(ctx)
 	}
+	d.restoreGps(ctx, e)
 	ag.Close()
 	if err := waitAgent(ctx, ag, 30*time.Second); err != nil {
 		logf("%s: agent after standby load: %v; powering off", d.name, err)
@@ -1142,10 +1146,15 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 	t0 := time.Now()
 	prev, _ := d.display(ctx, ag, 0)
 	t1 := time.Now()
+	// The snapshot restores the guest (night mode, clipboard, permissions, apps); the GPS fix is
+	// emulator-process state that it does not hold (docs/CAPABILITIES.md, reset contract). It is
+	// sent before the load, so the restored guest never gets the old one, and checked after.
+	d.sendDefaultGps(ctx, e)
 	if err := d.loadBaseline(ctx, e); err != nil {
 		return err
 	}
 	t2 := time.Now()
+	d.restoreGps(ctx, e)
 	ag.Close() // the connection died with the old VM state
 	d.mu.Lock()
 	d.dispAt = time.Time{}

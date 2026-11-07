@@ -230,7 +230,7 @@ func TestClosedBackendStartsNothing(t *testing.T) {
 	b.leanDevice(simDevice{UDID: "U", Name: NamePrefix + "x"}, true)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.leaning) != 0 || len(b.wallGen) != 0 {
-		t.Fatalf("background work started after Close: leaning %v, wallGen %v", b.leaning, b.wallGen)
+	if len(b.leaning) != 0 || len(b.bootGen) != 0 {
+		t.Fatalf("background work started after Close: leaning %v, bootGen %v", b.leaning, b.bootGen)
 	}
 }

@@ -42,31 +42,48 @@ func TestPasteWaitsForTheBaselineBeforePasting(t *testing.T) {
 		}
 		return f.read()
 	}
-	if err := pasteVerified(func() error { return nil }, f.paste("abc"), read, func() {}); err != nil {
+	confirmed, err := pasteVerified(func() error { return nil }, f.paste("abc"), read, func() {})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if f.pastes != 1 || f.value != "abc" {
-		t.Fatalf("pastes=%d value=%q, want one paste", f.pastes, f.value)
+	if f.pastes != 1 || f.value != "abc" || !confirmed {
+		t.Fatalf("pastes=%d value=%q confirmed=%v, want one confirmed paste", f.pastes, f.value, confirmed)
 	}
 }
 
 func TestPasteRetriesOnlyWhenTheFieldDidNotChange(t *testing.T) {
 	lost := &field{}
 	retried := false
-	if err := pasteVerified(func() error { return nil }, func() error { lost.pastes++; return nil }, lost.read, func() { retried = true }); err != nil {
+	confirmed, err := pasteVerified(func() error { return nil }, func() error { lost.pastes++; return nil }, lost.read, func() { retried = true })
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !retried || lost.pastes != 2 {
 		t.Fatalf("lost paste: retried=%v pastes=%d, want a second paste", retried, lost.pastes)
 	}
+	if confirmed {
+		t.Fatal("a second paste is not confirmed (the pasteboard must not be restored under it)")
+	}
 
 	// A field that formats its text: the paste arrived but the value is not the typed text.
 	formatted := &field{}
 	paste := func() error { formatted.pastes++; formatted.value = "+48 123 456 789"; return nil }
-	if err := pasteVerified(func() error { return nil }, paste, formatted.read, func() { t.Fatal("retried a transformed paste") }); err != nil {
+	confirmed, err = pasteVerified(func() error { return nil }, paste, formatted.read, func() { t.Fatal("retried a transformed paste") })
+	if err != nil {
 		t.Fatal(err)
 	}
-	if formatted.pastes != 1 {
-		t.Fatalf("formatted field pasted %d times", formatted.pastes)
+	if formatted.pastes != 1 || !confirmed {
+		t.Fatalf("formatted field pasted %d times, confirmed=%v", formatted.pastes, confirmed)
+	}
+}
+
+func TestPasteIntoUnreadableFieldIsNotConfirmed(t *testing.T) {
+	// A secure field (or no readable text field in focus): the paste is sent once and not
+	// confirmed, so the pasteboard keeps the typed text until the app has read it.
+	pastes := 0
+	confirmed, err := pasteVerified(func() error { return nil }, func() error { pastes++; return nil },
+		func() (string, bool) { return "", false }, func() { t.Fatal("retried an unreadable field") })
+	if err != nil || confirmed || pastes != 1 {
+		t.Fatalf("confirmed=%v err=%v pastes=%d, want one unconfirmed paste", confirmed, err, pastes)
 	}
 }

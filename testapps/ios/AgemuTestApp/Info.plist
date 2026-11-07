@@ -29,6 +29,45 @@
 		<integer>1</integer>
 		<integer>2</integer>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.agemu.testapp</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>agemutest</string>
+			</array>
+		</dict>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<!-- Usage descriptions for the privacy services agemu can grant. NSSiriUsageDescription is
+	     left out on purpose: `agemu permission grant ... siri` must be refused. -->
+	<key>NSCameraUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSContactsUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSMotionUsageDescription</key>
+	<string>agemu capability probe</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>agemu capability probe</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

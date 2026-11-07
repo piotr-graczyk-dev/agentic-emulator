@@ -13,6 +13,8 @@ import (
 	"runtime/debug"
 	"syscall"
 	"time"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 )
 
 // Request / Response are newline-delimited JSON over the daemon's unix socket.
@@ -26,8 +28,22 @@ type Response struct {
 	ID     int64           `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+	// Code classifies Error for programs: CodeNotImplemented, or empty.
+	Code string `json:"code,omitempty"`
 	// Ms is the server-side handling time, for benchmarks.
 	Ms float64 `json:"ms"`
+}
+
+// CodeNotImplemented marks an error that matches api.ErrNotImplemented: the capability has no
+// implementation on the device's platform, so retrying or changing the arguments cannot help.
+const CodeNotImplemented = "not_implemented"
+
+// errorCode returns the Response code for err.
+func errorCode(err error) string {
+	if errors.Is(err, api.ErrNotImplemented) {
+		return CodeNotImplemented
+	}
+	return ""
 }
 
 // Home returns the agemu state directory ($AGEMU_HOME or ~/.agemu).
@@ -95,6 +111,10 @@ func safeCall(ctx context.Context, svc *Service, req Request) (res any, err erro
 	return svc.Call(ctx, req.Method, req.Params)
 }
 
+// ServeConn serves requests on one connection until it closes (Serve does this for every
+// accepted connection; tests use it on a net.Pipe).
+func ServeConn(ctx context.Context, svc *Service, conn net.Conn) { handle(ctx, svc, conn) }
+
 func handle(ctx context.Context, svc *Service, conn net.Conn) {
 	defer conn.Close()
 	r := bufio.NewReaderSize(conn, 1<<20)
@@ -114,6 +134,7 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 			res, cerr := safeCall(ctx, svc, req)
 			if cerr != nil {
 				resp.Error = cerr.Error()
+				resp.Code = errorCode(cerr)
 			} else {
 				resp.Result, _ = json.Marshal(res)
 			}

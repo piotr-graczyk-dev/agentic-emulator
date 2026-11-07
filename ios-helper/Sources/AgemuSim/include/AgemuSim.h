@@ -96,6 +96,10 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 /// Waits for a frame newer than mark, then until there has been no big change for quietMs; at
 /// most maxMs in all. Returns @{@"mark": frame counter}.
 - (NSDictionary *)waitForFrameSince:(NSUInteger)mark quiet:(double)quietMs max:(double)maxMs;
+/// Waits up to startMs for a big change to begin (from now), then until there has been no big
+/// change for quietMs; at most maxMs in all. {changed, waitedMs}. For changes the system
+/// animates after a delay (the appearance crossfade starts 50-100 ms after the call).
+- (NSDictionary *)waitForBigChangeWithin:(double)startMs quiet:(double)quietMs max:(double)maxMs;
 /// Frame counter to take before sending input (NSUIntegerMax without a framebuffer).
 - (NSUInteger)inputFrameMark;
 /// After input: waits for the first frame newer than `mark`, then for `quietMs` without frames;
@@ -124,6 +128,32 @@ typedef NS_ENUM(uint32_t, AGEdge) {
 /// label when full is YES.
 - (nullable NSDictionary *)accessibilityFrontmostWithTimeout:(double)timeout full:(BOOL)full error:(NSError **)error;
 
+@end
+
+/// Test capabilities (AGCapabilities.m): CoreSimulator's own calls behind `simctl openurl,
+/// privacy, location, ui appearance, push, pbcopy/pbpaste`, made in process.
+@interface AGDevice (AGCapabilities)
+- (BOOL)openURL:(NSString *)url error:(NSError **)error;
+/// service is CoreSimulator's privacy service name: kTCCService* or __CoreLocationWhenInUse /
+/// __CoreLocationAlways (simctl maps its names to these).
+- (BOOL)setPrivacy:(NSString *)service bundleID:(NSString *)bundleID granted:(BOOL)granted error:(NSError **)error;
+/// bundleID nil resets the service for every app.
+- (BOOL)resetPrivacy:(NSString *)service bundleID:(nullable NSString *)bundleID error:(NSError **)error;
+- (BOOL)setLocationLatitude:(double)latitude longitude:(double)longitude error:(NSError **)error;
+- (BOOL)clearLocationWithError:(NSError **)error;
+/// UIUserInterfaceStyle: 1 light, 2 dark; 0 unknown.
+@property (nonatomic, readonly) NSInteger interfaceStyle;
+- (BOOL)setInterfaceStyle:(NSInteger)style error:(NSError **)error;
+- (BOOL)sendPush:(NSDictionary *)payload bundleID:(NSString *)bundleID error:(NSError **)error;
+/// -[SimDevice propertiesOfApplication:]: ApplicationType, Path, DataContainer, GroupContainers...
+- (nullable NSDictionary *)applicationProperties:(NSString *)bundleID error:(NSError **)error;
+/// The device pasteboard's text ("" when it holds none).
+- (nullable NSString *)pasteboardStringWithError:(NSError **)error;
+/// Replaces the device pasteboard with text ("" empties it); returns once the device has it.
+- (BOOL)setPasteboardString:(NSString *)text error:(NSError **)error;
+/// Every item of the device pasteboard as {type: data}, and back.
+- (nullable NSArray<NSDictionary<NSString *, NSData *> *> *)pasteboardItemsWithError:(NSError **)error;
+- (BOOL)setPasteboardItems:(NSArray<NSDictionary<NSString *, NSData *> *> *)items error:(NSError **)error;
 @end
 
 @interface AGSimulators : NSObject

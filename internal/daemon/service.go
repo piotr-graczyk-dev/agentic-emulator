@@ -64,6 +64,15 @@ type Params struct {
 	Selector  *api.Selector `json:"selector,omitempty"`
 	TimeoutMs int           `json:"timeoutMs,omitempty"`
 	Gone      bool          `json:"gone,omitempty"`
+
+	// test capabilities (capabilities.go, docs/CAPABILITIES.md); App and Text are shared
+	URL         string          `json:"url,omitempty"`         // open_url
+	Action      string          `json:"action,omitempty"`      // permission: grant|revoke|reset; location: set|clear; clipboard: get|set
+	Permissions []string        `json:"permissions,omitempty"` // permission: neutral or raw names
+	Latitude    *float64        `json:"latitude,omitempty"`    // location set
+	Longitude   *float64        `json:"longitude,omitempty"`   // location set
+	Mode        string          `json:"mode,omitempty"`        // appearance: light|dark; empty reads it
+	Payload     json.RawMessage `json:"payload,omitempty"`     // push: JSON object with "aps"
 }
 
 // Service is safe for concurrent use.
@@ -236,6 +245,11 @@ func (s *Service) Call(ctx context.Context, method string, raw json.RawMessage) 
 		return s.wait(ctx, b, id, p)
 	}
 
+	// Capability arguments are checked before the device lock: a bad call fails at once.
+	if err := checkCapability(method, &p); err != nil {
+		return nil, err
+	}
+
 	l := s.deviceLock(id)
 	l.Lock()
 	defer l.Unlock()
@@ -335,6 +349,9 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		return ok(b.Launch(ctx, id, p.App))
 	case "terminate":
 		return ok(b.Terminate(ctx, id, p.App))
+	}
+	if run, isCap := capabilities[method]; isCap {
+		return run(ctx, b, id, p)
 	}
 	return nil, fmt.Errorf("unknown method %q", method)
 }

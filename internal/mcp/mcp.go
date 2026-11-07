@@ -43,6 +43,9 @@ type tool struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	method      string
+	// selector: the text/contains/id/role/index arguments form a selector (find, tap, wait_for).
+	// In other tools "text" is plain text (type_text, clipboard).
+	selector bool
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -68,6 +71,10 @@ var waitProps = map[string]any{
 	"waitGone":      boolT("Wait for waitFor to disappear instead"),
 	"waitTimeoutMs": num("Timeout for waitFor, default 10000"),
 	"returnUi":      boolT("Also return the UI outline of the screen the action ends on (act, wait and observe in one call)"),
+}
+
+func enum(d string, values ...string) map[string]any {
+	return map[string]any{"type": "string", "enum": values, "description": d}
 }
 
 func withWait(props map[string]any) map[string]any {
@@ -102,8 +109,8 @@ var tools = []tool{
 	{Name: "set_profile", method: "set_profile", Description: "Switch the screen to a real-device profile (see profiles) or a custom Android size.", InputSchema: obj(map[string]any{"device": device, "profile": str("Profile name"), "width": num("Custom width px (Android)"), "height": num("Custom height px (Android)"), "density": num("Custom density dpi (Android)")})},
 	{Name: "screenshot", method: "screenshot", Description: "Capture the screen. Returns the image plus its file path. Coordinates on a scale=1 image are tap coordinates.", InputSchema: obj(map[string]any{"device": device, "scale": num("Downscale factor 0-1 for the returned image (default 0.5)"), "format": str("png or jpeg")})},
 	{Name: "ui_tree", method: "ui", Description: "Accessibility/UI hierarchy as a compact outline: [ref] role \"text\" id=... @(x,y wxh). Frames are screenshot pixels.", InputSchema: obj(map[string]any{"device": device, "json": boolT("Return full JSON instead of the outline")})},
-	{Name: "find", method: "find", Description: "Find elements by text/label/id/role.", InputSchema: obj(selectorProps(nil))},
-	{Name: "tap", method: "tap", Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")})))},
+	{Name: "find", method: "find", selector: true, Description: "Find elements by text/label/id/role.", InputSchema: obj(selectorProps(nil))},
+	{Name: "tap", method: "tap", selector: true, Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")})))},
 	{Name: "swipe", method: "swipe", Description: "Swipe from (x,y) to (x2,y2) in screenshot pixels.", InputSchema: obj(withWait(map[string]any{"device": device, "x": num("start x"), "y": num("start y"), "x2": num("end x"), "y2": num("end y"), "durationMs": num("duration, default 300")}), "x", "y", "x2", "y2")},
 	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
 	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name")}), "key")},
@@ -116,7 +123,52 @@ var tools = []tool{
 		"relaunch": boolT("Terminate a running instance first (iOS)"),
 	}), "app")},
 	{Name: "terminate", method: "terminate", Description: "Force-stop an app.", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
-	{Name: "wait_for", method: "wait", Description: "Wait until an element matching the selector appears (or disappears with gone=true).", InputSchema: obj(selectorProps(map[string]any{"gone": boolT("Wait for disappearance"), "timeoutMs": num("Timeout, default 10000")}))},
+	{Name: "wait_for", method: "wait", selector: true, Description: "Wait until an element matching the selector appears (or disappears with gone=true).", InputSchema: obj(selectorProps(map[string]any{"gone": boolT("Wait for disappearance"), "timeoutMs": num("Timeout, default 10000")}))},
+
+	// Test capabilities (docs/CAPABILITIES.md). A capability a platform lacks answers an error
+	// saying "... is not implemented on <platform>".
+	{Name: "open_url", method: "open_url", Description: "Open a URL or deep link as a link tapped in another app would (Android: VIEW intent with CATEGORY_BROWSABLE). App/universal links open the app only if their domain is verified. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(map[string]any{
+		"device": device,
+		"url":    str("URL with a scheme: https://..., myapp://path, exp+app://..."),
+	}), "url")},
+	{Name: "permission", method: "permission", Description: "Grant, revoke or reset an app's privacy permissions without the system dialog. revoke = denied without asking again; reset = ask again on next use. Android kills the app when one is revoked or reset. A grant the app could not get on a device (not in its manifest / no Info.plist usage description) is refused.", InputSchema: obj(map[string]any{
+		"device":      device,
+		"app":         str("Package name or bundle id"),
+		"action":      enum("What to do", "grant", "revoke", "reset"),
+		"permissions": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Names: " + permissionNames() + "; or a raw Android permission (android.permission.READ_SMS). Not every name exists on both platforms. Empty with reset: all of the app's permissions."},
+	}, "app", "action")},
+	{Name: "location", method: "location", Description: "Set the simulated GPS location, or clear it (back to the device's baseline).", InputSchema: obj(map[string]any{
+		"device":    device,
+		"action":    enum("set (default when coordinates are given) or clear", "set", "clear"),
+		"latitude":  num("Degrees, -90..90"),
+		"longitude": num("Degrees, -180..180"),
+	})},
+	{Name: "clipboard", method: "clipboard", Description: "Read the device clipboard (plain text), or set it.", InputSchema: obj(map[string]any{
+		"device": device,
+		"action": enum("get (default) or set (default when text is given)", "get", "set"),
+		"text":   str("Text to put on the clipboard (action set; empty clears it)"),
+	})},
+	{Name: "appearance", method: "appearance", Description: "Read the system appearance, or switch light/dark mode.", InputSchema: obj(map[string]any{
+		"device": device,
+		"mode":   enum("Omit to read the current appearance", "light", "dark"),
+	})},
+	{Name: "apps", method: "apps", Description: "List installed user apps (not the system image's).", InputSchema: obj(map[string]any{"device": device})},
+	{Name: "uninstall", method: "uninstall", Description: "Uninstall a user app with its data.", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
+	{Name: "clear_app_data", method: "clear_app_data", Description: "Clear one app's data so it starts like a fresh install (stopped, data and permissions gone; iOS keeps keychain items, as a reinstall does on a device).", InputSchema: obj(map[string]any{"device": device, "app": str("Package name or bundle id")}, "app")},
+	{Name: "push", method: "push", Description: "Send a push notification to an app (iOS; Android has no faithful path). It shows only if the app may post notifications. With waitFor it also waits for the banner or screen.", InputSchema: obj(withWait(map[string]any{
+		"device":  device,
+		"app":     str("Bundle id"),
+		"payload": map[string]any{"type": "object", "description": "APNs payload with an \"aps\" object, at most 4096 bytes, e.g. {\"aps\":{\"alert\":{\"title\":\"Hi\",\"body\":\"Hello\"}}}"},
+	}), "app", "payload")},
+}
+
+// permissionNames lists the platform-neutral permission names for tool descriptions.
+func permissionNames() string {
+	names := make([]string, len(api.Permissions))
+	for i, p := range api.Permissions {
+		names[i] = string(p)
+	}
+	return strings.Join(names, ", ")
 }
 
 // Serve runs the MCP server until in is closed.
@@ -176,7 +228,7 @@ func handle(req rpcReq, getClient func() (*client.Client, error)) (any, *rpcErr)
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agemu", "version": "0.1.0"},
-			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels.",
+			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -223,15 +275,13 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 	if err := json.Unmarshal(b, &p); err != nil {
 		return toolError(err)
 	}
-	var sel api.Selector
-	_ = json.Unmarshal(b, &sel)
-	if !sel.Empty() {
-		p.Selector = &sel
-		p.Text = "" // "text" was a selector field, not text to type
-	}
-	if name == "type_text" {
-		p.Selector = nil
-		_ = json.Unmarshal(args["text"], &p.Text)
+	if t.selector {
+		var sel api.Selector
+		_ = json.Unmarshal(b, &sel)
+		if !sel.Empty() {
+			p.Selector = &sel
+			p.Text = "" // "text" was a selector field, not text to type
+		}
 	}
 	wantJSON := false
 	if v, ok := args["json"]; ok {

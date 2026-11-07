@@ -172,6 +172,17 @@ var callTimeouts = map[string]time.Duration{
 	"notify":     15 * time.Second,
 	"settle":     10 * time.Second,
 	"nextframe":  3 * time.Second, // the helper waits at most the requested maxMs (<= 250 ms)
+	// Test capabilities (capabilities.go).
+	"openurl":       30 * time.Second,
+	"privacy":       30 * time.Second,
+	"privacygrants": 15 * time.Second,
+	"location":      15 * time.Second,
+	"pasteboard":    15 * time.Second, // the helper gives up after 3 s per pasteboard exchange
+	"appearance":    15 * time.Second,
+	"push":          15 * time.Second,
+	"appinfo":       15 * time.Second,
+	"userappinfo":   15 * time.Second,
+	"clone":         60 * time.Second, // an APFS clone takes milliseconds; a plain copy longer
 }
 
 // waitingFor says, for a timeout error, what a command was waiting for.
@@ -196,6 +207,10 @@ func waitingFor(cmd string, params map[string]any) string {
 		return "the device to become agent-ready"
 	case "running", "spawn":
 		return "a process inside the simulator (launchctl)"
+	case "pasteboard":
+		return "the simulator's pasteboard service"
+	case "openurl":
+		return "the simulator to open " + s("url")
 	}
 	return "CoreSimulator (" + cmd + ")"
 }

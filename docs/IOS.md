@@ -23,7 +23,7 @@ agemu CLI / MCP ──unix socket──► agemud daemon (Go, internal/ios)
 |---|---|---|
 | screenshot | `simctl io screenshot`: new process, connects to the device, renders, encodes | The helper keeps the main display's framebuffer **IOSurface** (and its change callbacks) for the life of the process. A screenshot copies the surface (~2 ms) and encodes the copy: PNG with agemu's parallel encoder (`AGPNG.c`: the image is cut into 12 bands that are filtered and deflated on separate cores at zlib level 1, then joined into one valid zlib stream, as pigz does), JPEG with Core Image's encoder (~7 ms for 1206×2622 vs ~10 ms with ImageIO; its distance to the lossless frame, mean abs. difference 0.30, matches simctl's own JPEG at 0.29; `AGEMU_IOS_JPEG=imageio` selects ImageIO). Core Image is warmed up when the helper starts. |
 | tap / swipe | no simctl command; Maestro starts a JVM and an XCUITest runner | Indigo HID touch messages sent through SimulatorKit's `SimDeviceLegacyHIDClient`, the same channel Simulator.app uses for mouse clicks. Pixels are converted to screen ratios. A swipe is a touch-down, one move per ~16 ms, and a touch-up. **A tap first waits until the screen has had no big change for 48 ms** (at most 1 s): UIKit ignores a tap that lands during a transition, and a tap on a list still coasting after a swipe only stops it. A background thread samples the framebuffer surface's seed every 8 ms and, on every new frame, a 48×104 grid of pixels: a change of more than 0.4% of the grid is *big* (scrolling, transitions); a blinking cursor, a spinner or a ticking countdown are not, so they no longer hold a tap for the full timeout. A tap returns once its first frame shows (at most 120 ms). **A tap by selector** settles once (at most 1.5 s), re-reads the tree until the element's frame repeats if the screen did not go still, and waits up to 3 s for a disabled element to become enabled. On a still screen the tap then keeps the helper's settle, which returns at once unless a transition started during the tree read. An element confirmed at rest by its repeating frame is tapped at once, since a second settle on a screen that keeps changing would only time out. `AGEMU_IOS_TAP_SETTLE=0` turns the helper's settle off. |
-| type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (`simctl pbcopy`, then Cmd-V): the app gets the whole text in one change, as with Android's set-text path. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is checked against the focused text field's text and repeated once if it did not arrive. Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
+| type | Maestro `inputText` | Inserts the text at the cursor of the focused field by **pasting** it (the helper's pasteboard connection, then Cmd-V; see "Test capabilities"): the app gets the whole text in one change, as with Android's set-text path. The pasteboard's previous content (every item and type) is saved before and put back after, so typing does not change what the app or `agemu clipboard` sees. A single character is one key event. `type --keys` sends one HID key event per character (US layout, paced: each acknowledged, then 10 ms). Both wait for a still screen first (no big change; at most 600 ms) and return once the app has drawn the change (at most 500 ms). A paste is checked against the focused text field's text and repeated once if it did not arrive. Key events were not reliable in React Native controlled inputs (Expo development build of a real app): characters were lost or doubled at every pace tried, and a lost character in an e-mail field signed in to a different account; the paste always arrived whole. |
 | key | — | `home` and `lock` are the hardware buttons; `enter`, `delete`, `tab`, `escape`, arrows are keyboard keys; `volumeup/volumedown` are consumer-page HID usages. iOS has no back key: `back` taps the navigation bar's back button (UIKit's `BackButton` identifier) when the screen has one, and otherwise does a **left-edge swipe**, flagged as an edge gesture, which triggers the navigation controller's interactive pop like a thumb does. On the loaded test host one edge swipe was not recognized, hence the tap first. |
 | UI tree | `maestro hierarchy` (JVM + XCUITest snapshot) | `AXPTranslator` from AccessibilityPlatformTranslation (the framework Simulator.app's accessibility support uses), with agemu as its token delegate: every translator request is forwarded to the device with `-[SimDevice sendAccessibilityRequestAsync:...]`. **All attributes of an element come in one request** (`accessibilityMultipleAttributes:`, translator request type 5, which runs `AXUIElementCopyMultipleAttributeValues` inside the simulator) instead of one request per attribute: 2 requests per element (the batch plus the translator's own remote-element check) instead of 11, with byte-identical output. The app's bundle id is one more request (AXP attribute 6), so the tree names the frontmost app without `launchctl`. On iPad the frontmost app the bridge reports is checked with a hit test on the screen (see "iPad: the app that owns the screen"). Every read has a deadline (20 s, or the caller's; 5 s per request) and fails with an error rather than return a partial tree. Off-screen elements are still read (and dropped in Go): pruning them by frame could drop an on-screen child of an off-screen container. |
 | launch / terminate / install | `simctl launch` etc. | The same CoreSimulator calls, made in-process by the helper. `launch` takes process arguments and `--relaunch` (`agemu launch <bundle> --relaunch -- --initialUrl http://127.0.0.1:8081` opens an Expo development client on its Metro), and the MCP tool also takes an environment. |
@@ -209,9 +209,23 @@ cleans the running device instead:
    built-in app list is fixed per runtime and cached (the CoreSimulator query takes 1-2 s);
    user apps are found by reading `Containers/Bundle/Application/*/*.app/Info.plist` in the
    device's data directory on the host,
-2. uninstalls every user-installed app, which deletes its data and app-group containers,
-3. resets privacy permissions (`simctl privacy reset all`), the keychain
-   (`simctl keychain reset`) and the pasteboard, in parallel with 1-2,
+2. uninstalls every user-installed app, which deletes its data and app-group containers and
+   its privacy grants (a reinstalled app reads "not determined" again),
+3. resets the keychain (`simctl keychain reset`, in parallel with 1-2), and puts back what the
+   test capabilities change, in parallel: light appearance, no simulated location, an empty
+   pasteboard, and every remaining privacy grant of a service agemu's permission names cover
+   (found in the device's `TCC.db` and locationd's `clients.plist`, reset one by one with
+   CoreSimulator's `resetPrivacyAccessForService`; rows whose client is an executable path, not
+   a bundle, are skipped). `simctl privacy reset all` without a bundle id, which reset used
+   before, changed nothing on iOS 26.5 (the experimenter checked it with the probe app and in
+   `TCC.db`; no log of that check was kept); resetting every service of every app would also
+   drop the baseline's own system grants (33 rows: CloudKit and iCloud Drive access of system
+   services). Reset does not tell a baseline row from a later one in a covered service: a new
+   iPhone 17 Pro (iOS 26.5) had none, so nothing of the baseline is lost there; other device
+   types and runtimes were not checked. Checked on that new device: grants to built-in apps
+   (contacts for Maps, calendar and microphone for Health, a camera revoke for Health: 4 rows)
+   were reset and the baseline's `kTCCServiceLiverpool` rows kept; Maps' location authorization
+   was reset too,
 4. presses home, waits until accessibility reports SpringBoard (`com.apple.springboard`) as the
    frontmost app (on iPad too, found by the hit test above), then until the screen has been
    still for 300 ms. The screen moves for ~1.3 s
@@ -221,12 +235,13 @@ cleans the running device instead:
    10 of 10 reset-then-launch rounds brought Settings to the front.
 
 The daemon log has each phase, e.g. `ios reset <udid>: 1736 ms (app lists 1, terminate 25 apps
-31, uninstall [] 0, simctl privacy/keychain/pbcopy done at 158, home 1578)`.
+31, uninstall [] 0, appearance/location/pasteboard/privacy 40, simctl keychain done at 158, home
+1578)`.
 
 It does **not** reset what `simctl erase` would: data stored by built-in apps (Settings search
-history, Safari, Contacts, Photos...), system settings an agent changed (language, appearance,
-location...), and media added with `simctl addmedia`. Use `agemu shutdown` +
-`xcrun simctl erase <udid>` for a full wipe.
+history, Safari, Contacts, Photos...), other system settings an agent changed (language...),
+notification permissions given to built-in apps in their system alert, and media added with
+`simctl addmedia`. Use `agemu shutdown` + `xcrun simctl erase <udid>` for a full wipe.
 
 ### Bounded calls
 
@@ -237,6 +252,133 @@ gave up after 60.0 s waiting for CoreSimulator to launch com.apple.Preferences; 
 overloaded or stuck (the request may still complete in the background)`. `wait` bounds each UI
 read by its own deadline (at least 1 s) and reports the last read error on timeout. Only a cold
 boot may take up to 10 minutes (a first boot migrates data).
+
+## Test capabilities
+
+The capabilities of [CAPABILITIES.md](CAPABILITIES.md) (`open`, `permission`, `location`,
+`clipboard`, `appearance`, `apps`, `uninstall`, `clear-data`, `push`) are CoreSimulator's own
+calls, the ones `simctl` makes, issued by the long-lived helper (`ios-helper/Sources/AgemuSim/
+AGCapabilities.m`, `Capabilities.swift`; Go side `internal/ios/capabilities.go`). simctl is a new
+process that loads CoreSimulator and finds the device for every call (~105-175 ms here); the
+helper has both loaded.
+
+| Capability | CoreSimulator call | simctl equivalent |
+|---|---|---|
+| open | `-[SimDevice openURL:error:]` | `simctl openurl` |
+| permission | `setPrivacyAccessForService:bundleID:granted:error:`, `resetPrivacyAccessForService:bundleID:error:` with the service names simctl maps to (`kTCCServiceCamera`, `kTCCServiceAddressBook`, ..., `__CoreLocationWhenInUse`, `__CoreLocationAlways`, `kTCCServiceAll`) | `simctl privacy` |
+| location | `setLocationWithLatitude:andLongitude:error:`, `clearSimulatedLocationWithError:` | `simctl location set/clear` |
+| clipboard | SimPasteboardPlus: a `SimPasteboardInterface` connected to the device's `com.apple.CoreSimulator.SimPasteboardInterface` service mirrors the device pasteboard into a private `NSPasteboard` of the helper (`pull` / `push`); kept per device and boot. `-[SimDevice pasteboard]` is nil on Xcode 26. | `simctl pbcopy/pbpaste` (the same interface) |
+| appearance | `setUIInterfaceStyle:` (1 light, 2 dark), `currentUIInterfaceStyle` | `simctl ui appearance` |
+| apps | Info.plists of `Containers/Bundle/Application/*/*.app` in the data directory | `simctl listapps` |
+| uninstall, app checks | `uninstallApplication:`, `propertiesOfApplication:` (path, containers, type) | `simctl uninstall`, `simctl appinfo` |
+| clear-data | clone the installed bundle (APFS `clonefile`), uninstall, install the clone | `simctl uninstall` + `simctl install` |
+| push | `sendPushNotificationForBundleID:jsonPayload:` (an `NSDictionary`) | `simctl push` |
+
+**Latency** (iPhone 17 Pro simulator, iOS 26.5, lean; medians of 12 calls per arm, interleaved
+ABC/CBA per round; load average 14-27, and 20-101 during clear-data; the raw runs are kept with
+the experiment, outside the repository):
+
+| Operation | simctl | agemu CLI | daemon (MCP) |
+|---|---|---|---|
+| open a URL | 120 ms | 11.9 ms (10x) | 6.7 ms (18x) |
+| grant/revoke camera | 130 ms | 10.0 ms (13x) | 4.7 ms (28x) |
+| grant/revoke location | 116 ms | 6.1 ms (19x) | 1.5 ms (78x) |
+| set location | 109 ms | 5.3 ms (21x) | 0.8 ms (142x) |
+| clear location | 107 ms | 5.1 ms (21x) | 0.5 ms (218x) |
+| set clipboard | 133 ms | 5.8 ms (23x) | 0.8 ms (159x) |
+| read clipboard | 161 ms | 13.8 ms (12x) | 11.7 ms (14x) |
+| read appearance | 175 ms | 10.8 ms (16x) | 1.0 ms (174x) |
+| list user apps (agemu reads user apps' Info.plists on the host; simctl lists every app through CoreSimulator) | 173 ms | 6.5 ms (27x) | 0.7 ms (248x) |
+| push | 133 ms | 21.4 ms (6x) | 15.8 ms (8x) |
+| uninstall | 194 ms | 80 ms (2.4x) | 83 ms (2.3x) |
+| clear-data (vs uninstall + install) | 538 ms | 269 ms (2.0x) | 258 ms (2.1x) |
+| set appearance, until a screenshot shows it | 670 ms | 699 ms (1.0x) | 694 ms (1.0x) |
+| set appearance, the call itself | 130 ms | - | 684 ms (5.3x slower) |
+| set appearance, until the app's trait shows in the UI tree | 257 ms | - | 736 ms (2.9x slower) |
+
+Uninstall and clear-data are bounded by installd (70-90 ms to uninstall, 150 ms to install the
+probe app), so agemu saves only simctl's process starts. A 143 MB bundle was measured only with
+an earlier in-place wipe (287 ms) and a plain uninstall + install (288 ms), not with the final
+clone and reinstall. Setting the appearance waits for iOS's own crossfade (next list): a
+screenshot right after the call shows the new appearance, but an agent that reads `ui` instead
+gets it about 3x later than after `simctl ui appearance`, whose screenshot would still show the
+old one.
+
+**Checked as an app sees it**, with the probe app (`testapps/ios`, its Capabilities screen),
+and what differs from simctl or a device. The final run passed 110 of 110 checks; two checks
+that failed in earlier runs (content-available delivery, and a running app losing its fix after
+`location clear`) had been turned into notes, and Siri was never read back:
+
+- **open**: the app's `onOpenURL` gets the URL, with the app in front and from a cold start;
+  `https://` opens Safari; an unhandled scheme is an error (`LSApplicationWorkspaceErrorDomain
+  115`). iOS can ask "Open in <app>?" first, as for a link in Safari: no prompt in the 36
+  benchmark opens or the first verification runs, one when a probe tool issued two opens of the
+  same URL 140 ms apart, and one for a single open of a just-installed app in front on a new
+  simulator (the r3-merge smoke; it was tapped). agemu does not answer it, so follow `open`
+  with a `wait` or tap Open. The handling app is not reported.
+- **permission**: grant, revoke and reset of camera, microphone, photos-add, location,
+  location-always, contacts, calendar, reminders, motion and media-library read back as
+  authorized / denied / not determined in the app. Revoking either location name denies
+  location; granting `location` after `location-always` steps down to while-in-use; a reset
+  without names (`kTCCServiceAll` for the bundle) also resets location. Not implemented, with
+  the reason in the error:
+  - `photos` grant: the Simulator writes a TCC record (`auth_version` 1) that Photos ignores on
+    iOS 26.5: the app still reads not determined (`simctl privacy grant photos` too). The
+    system dialog writes version 2. Revoke and reset work.
+  - `contacts-limited`: the Simulator's service of that name is basic contact info; the app
+    reads full authorization, not iOS 18's limited access.
+  - `notifications`: no privacy service. The system alert shows in `agemu ui` (SpringBoard)
+    and is answered with a tap.
+  - raw Android names.
+  - `siri` is mapped (`kTCCServiceSiri`) but could not be read back: `INPreferences` aborts in
+    an app without the Siri entitlement.
+  A grant is refused when the app's Info.plist lacks the usage description
+  (`location-always` needs both location keys); the probe has no `NSSiriUsageDescription`, and
+  `permission grant ... siri` is refused. The app may be terminated, as by simctl.
+- **location**: an app updating its location gets each set within the wait (two points, 2 of
+  2). After `clear`, an app that starts updating gets `kCLErrorLocationUnknown`; an app that was
+  already updating usually keeps its last fix (5 of 6 clears, the same with `simctl location
+  clear`).
+- **clipboard**: the app's `UIPasteboard` reads what `clipboard set` wrote, after iOS's own
+  "Allow Paste" prompt, as on a device; `clipboard` reads what the app copied. `type` pastes
+  through the pasteboard and no longer starts simctl: a whole `agemu type <word>` took 118 ms
+  (CLI median, n=12), against 111 ms for the old path's `simctl pbcopy` step alone,
+  interleaved. It saves the pasteboard (every item and type) first and puts it back once the
+  focused field shows the paste. When that cannot be confirmed (a secure field, a web view or
+  custom input that does not read back as text, or a paste that had to be sent twice), the typed
+  text stays on the pasteboard, as before: the app may not have read it yet, and a restore that
+  won that race would make it paste the old content. The restore was checked with one plain-text
+  string, read back by agemu. The restored items come from the host, so an app that copied text
+  itself may get iOS's "Allow Paste" prompt when it reads it back programmatically, and the
+  pasteboard's `changeCount` moves; neither was checked. The helper's pasteboard uses a private
+  CoreSimulator class (`SimPasteboardInterface`); if it is missing, `type` falls back to
+  `simctl pbcopy` and leaves the text on the pasteboard. The helper's pasteboard is private, so
+  the Mac clipboard never reaches the device; Simulator.app, if someone opens it, syncs the Mac
+  pasteboard to the devices it shows.
+- **appearance**: the app's trait collection changes at once. iOS then crossfades the whole
+  screen for ~500 ms, starting 50-100 ms after the call (screenshots every 25 ms; once about
+  650 ms), so a screenshot right after `simctl ui appearance` shows the old appearance (6 of 6).
+  `agemu appearance` returns once a big screen change has begun (it waits up to 1 s for it) and
+  ended (120 ms still, at most 1.5 s in all): a screenshot right after showed the new appearance
+  8 of 8 times. When no change shows within the 1 s (an app in front that keeps its own
+  appearance), the call returns then and the daemon logs it.
+- **push**: with the app in front, its notification delegate (`willPresent`) gets every push
+  (36 of 36 in the benchmark), with or without notification permission. With the app in the
+  background, the banner appears ~10.5 s later on this lean simulator: SpringBoard waits for a
+  notification-intelligence inference that times out (log: `Waiting for inference`, then a
+  failure after 10.5 s), the same with `simctl push`. Lean mode turns off
+  `intelligenceplatformd` and other Apple Intelligence jobs, which may be why; this was not
+  checked on a full simulator. The banner
+  is not in agemu's UI tree (SpringBoard's banner window): tap it by position; the app's
+  `didReceive` then gets it. `content-available` pushes were not delivered (simctl the same;
+  the probe has no `aps-environment` entitlement).
+- **clear-data**: the probe's defaults, Documents and Caches files, app-group file and app-group
+  defaults are gone; its keychain item stays; camera and notification permissions read not
+  determined. Wiping the containers in place (with `defaults delete` so cfprefsd drops its
+  cache, and a privacy reset) took as long (~290 ms) but kept the notification permission, so
+  clear-data reinstalls. Deleting the files alone left app-group defaults readable.
+- **apps / uninstall**: name and version come from the Info.plist; built-in apps are refused
+  (`... is a built-in (system) app`), as is an app that is not installed.
 
 ## Lean simulators
 
@@ -291,6 +433,69 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    on: with PosterBoard disabled, the lock screen was not drawn (the UI tree reported the lock
    screen while the screenshot showed the home screen). `pluginkit -e ignore` on a gallery provider
    did not keep PosterBoard from starting it.
+3. **Background work started after boot is stopped once it is idle** (`internal/ios/background.go`).
+   In the first minutes after a cold boot iOS starts some apps, extensions and services for one-off
+   work and then keeps them idle; a phone's jetsam reclaims such processes when it needs memory,
+   the simulator only when the Mac runs short of memory. agemu stops these (sizes and times
+   measured on the iPhone 17 Pro, in 12 boots, times after agent-ready):
+   - the Calendar app, 83 MB: `calaccessd` opens it in the background after changes to the
+     calendar database, which it makes after a boot (possibly rebuilding the Birthdays calendar;
+     that cause is not verified), at +19..71 s, and it stayed. It did so in all 12 boots of the measurement below (in an earlier
+     set, 2 of 4 boots had not by 3 minutes); in 2 later boots of the same device, after the
+     checks below had used Calendar, and on a new iPad mini, it exited again 4-6 s after it was
+     opened;
+   - the App Intents extensions of Calendar, Safari and Messages, 47 MB: `linkd` starts them at
+     +17..67 s;
+   - device management (MDM and declarative management): a one-off on-reboot task of the
+     `remotemanagementd` launchd job starts the daemon (7 MB, which stays: it did not exit on
+     SIGTERM) and 10 subscriber XPC services (106 MB), which launchd starts on demand, at
+     +131..197 s. Only these 10 are matched by name; the framework's other 3 subscribers
+     (`MDMAppSubscriber`, `PowerSubscriber`, `SoftwareUpdateSubscriber`) were never seen and are
+     left alone.
+
+   agemu looks every 30 s from 1 to 5 minutes after the device is ready and stops each of these at
+   the pass after the one that first found it, so it has run for at least 30 s: SIGTERM, and for
+   Calendar a CoreSimulator terminate. A Calendar that a pass found in front (opened by the user or
+   a test), or that was running at a pass where the frontmost app could not be told, is never
+   stopped, also after it goes to the background; without that rule, a Calendar opened at +20 s
+   and sent home at +62..64 s was terminated at the +90 s pass and lost an unsaved new event on
+   return (3 of 3 boots). A Calendar session that is not in front at any pass is still stopped:
+   one opened and left before the first pass (up to 60 s after agent-ready, when agents start
+   working), or between two passes (under 30 s), including a Calendar that `calaccessd` had
+   started and the user then brought to the front (same process). The frontmost app is read up
+   to about 3 s before the terminate, and on iPad a Calendar in Split View that is not reported
+   as frontmost is not protected. The daemon log lists what each pass stopped. Calendar, the
+   extensions and the subscribers were not seen to start again up to +300 s, when the watcher
+   stopped (it can miss a start; the footprint at +300 s showed only `remotemanagementd` left in
+   every boot where it was taken). Others were tried and are not
+   stopped because iOS starts them again: `WidgetRenderer_Default` (SpringBoard relaunched it at
+   once), the Spotlight UI (67 MB; SpringBoard starts it again whenever the home screen shows, for
+   example after unlock) and the speech synthesis extensions (38 MB; `axassetsd` retries its voice
+   database load, which fails on a lean simulator, and started one of them again 2 minutes after it
+   was stopped).
+
+   Checked inside the 5-minute window, in 7 boots (2 without the stop, 3 with the version that
+   had no rule for a Calendar in front, 2 with the final one): a configuration profile with a root
+   certificate (as a proxy's CA profile has), downloaded in Safari and installed in Settings at
+   +65..83 s, installed in all 7. A second one was installed later in 6 of them (in the 7th it was
+   not downloaded: Safari, launched right after `agemu key home`, was sent to the background about
+   1 s later by SpringBoard's emulated home press, a known race of the home key). In 2 boots its
+   final Install was tapped 0.9 s before the pass that stopped the subscribers, and the install
+   finished. All 13 of these installs were in the device's profile store afterwards. No
+   subscriber was running during the early installs (they start at +131..202 s), and in the
+   final version's boots none started during the late install: installing a profile through
+   Settings does not use the stopped subscribers. So this shows that profile installs do not
+   need them, not that stopping them in the middle of their own work is harmless. A Calendar
+   opened at +20 s with an unsaved new event, sent home at +62..64 s and opened
+   again at +125 s still had the event without the stop (2 of 2) and with the final version
+   (2 of 2). An App Intents action could not be run: on a lean simulator the Shortcuts app shows
+   no actions at all (its daemon, `siriactionsd`, is one of the lean jobs), and the stop runs only
+   on lean simulators. Checked after the window in an earlier round, with a binary that also
+   stopped the 3 unseen subscribers and had no rule for a Calendar in front: the stopped processes
+   stayed stopped through a 10-minute session with three lock and unlock cycles; Spotlight search
+   found Calendar, tapping its icon opened the day view (a cold launch now), `AVSpeechSynthesizer`
+   spoke, an app saved and read back an EventKit event (after which `calaccessd` opened Calendar in
+   the background again), and `calshow:` opened Calendar on the event.
 
 **What a lean simulator does not do.** These need `AGEMU_IOS_LEAN=0`; the jobs are back from the
 next boot:
@@ -303,7 +508,9 @@ next boot:
 - settings sync to a paired Apple Watch, Continuity with other devices and CarPlay;
 - Screen Time usage tracking, Ask to Buy, Shared with You, Memoji, Find My, Personal Voice,
   Image Playground and Genmoji;
-- Maps turn-by-turn navigation, Safari password monitoring and iCloud bookmark sync.
+- Maps turn-by-turn navigation, Safari password monitoring and iCloud bookmark sync;
+- Shortcuts: the app opens but lists no actions (`siriactionsd` is off), so App Intents actions
+  cannot be run from it.
 
 HealthKit (`healthd`), CoreSpotlight indexing, the share sheet, Wallet and Apple Pay (`passd`),
 notifications and push, Game Center, StoreKit, CloudKit, Watch pairing and WatchConnectivity
@@ -351,8 +558,8 @@ and 1 failed: right after boot the app showed an empty screen for 30 s.
 **The current lean setting** (49 jobs and the lock-screen-aware gallery stop) against the
 previous one (32 jobs and the old gallery stop), on one `iphone-17-pro`, 4 pairs of cold boots in
 ABBA order (2026-11-06, 22:28-22:53; host load 19-96 at the start of a run; medians, range in
-brackets; `.lab/meter.py` summed over the device's processes, its CPU counting processes that
-exit inside the window). The new arm ran a binary that listed 55 jobs, in the equivalent state
+brackets; the phys_footprint summed over the device's processes by the experiments' meter
+script, which is not in the repository, its CPU counting processes that exit inside the window). The new arm ran a binary that listed 55 jobs, in the equivalent state
 described above; the final 49-job binary was measured only in single first boots:
 
 | | previous lean: 32 jobs, old gallery stop (n=4) | lean: 49 jobs, gallery stop (n=4) |
@@ -371,6 +578,55 @@ work into the second minute, 81% of a core there). Stopped gallery extensions co
 setting stops 13-19 per boot, and they ran for a while first (6-37 s of CPU of exited processes in
 the minute, against 7-14 s). These runs also stopped `PhotosPosterProvider`, which is kept now
 (one more extension of 35-75 MB may stay running).
+
+**Stopping the background work** (item 3) against the same lean setting without it, on one new
+`iphone-17-pro` simulator, 6 pairs of cold boots in ABBA order, each with a freshly started daemon
+(2026-11-07, 02:25-03:29; host load 10-100 at the start of a boot, median 14-49 during it; 11.4-16.9
+GB of swap in use; host memory pressure "warn" 82% of the time, never "critical"; medians, range
+in brackets; the same meter):
+
+| | without (n=6) | with the stop (n=6) |
+|---|---|---|
+| memory 2 min after agent-ready | 1.96 GB [1.96-1.98] | 1.83 GB [1.83-1.86] |
+| memory 4 min after agent-ready | 2.09 GB [2.09-2.12] | **1.85 GB** [1.85-1.90] |
+| memory 5 min after agent-ready | 2.09 GB [2.09-2.12] | **1.86 GB** [1.85-1.89] |
+| processes 4 min after agent-ready | 135 | 121 |
+| simulator CPU in the first minute after agent-ready | 60 s [47-68] | 58 s [44-69] |
+| cold boot until agent-ready | 12.0 s [11.0-18.9] | 12.9 s [10.5-14.5] |
+| boots in which `calaccessd` opened Calendar | 6 | 6 |
+| boots with launchd_sim idle exits | 0 | 0 |
+
+Every boot with the stop was at least 190 MB below every boot without it at 4 minutes; per pair
+-237 MB [-255 to -195]. The processes it stops held 243 MB at 5 minutes in the boots without it
+(Calendar 83, extensions 47, subscribers 106, `remotemanagementd` 7, which stays). Calendar was
+opened and stayed open in all 12 boots, so the measured 0.24 GB applies when that happens. A boot
+without it was not measured; from those sizes the stop saves about 150 MB when Calendar is not
+open (an estimate). In 3 of 4 later boots (2 on the reused iPhone and the new iPad mini), iOS
+opened Calendar and it exited by itself 4-6 s later, so on reused devices, as agemu is normally
+used, the saving may be closer to the estimated 0.15 GB.
+
+On a new iPhone SE and a new iPad mini (one cold boot each after their first boot, final version,
+no comparison boot): the passes stopped the 3 extensions at +90 s and the 10 subscribers at +180 s,
+and on the SE also Calendar at +90 s (on the iPad mini it had exited by itself); nothing came back,
+there were no idle exits, and the device took 1.85 GB (SE) and 1.84 GB (iPad mini) 4 minutes after
+agent-ready.
+
+Idle exits. In an earlier round, 3 of 4 boots with an earlier version of the stop (it also
+SIGTERMed `remotemanagementd` and matched all 13 subscribers) had launchd_sim exit 6-44 idle
+daemons (`JETSAM_REASON_MEMORY_IDLE_EXIT`), against 0 of 8 boots without its device-management
+part (6 of them with no stop at all). launchd_sim does that for services that allow it
+(`EnablePressuredExit`) when it decides memory is short; the daemons start again on demand. This
+time, 0 of 14 boots with the stop had idle exits (the table, the checks above and the final
+version's own boots), and 1 of 8 boots without the background stop (but with the wallpaper
+gallery stop) had them: 12 daemons at +72..99 s, about 4 s after Safari's WebKit processes
+started for a profile download, while host memory pressure stayed at "warn" (sampled every
+second). Changes of the host's pressure level between "normal" and "warn" (26 in the 12 boots of
+the table) did not set one off. What does is not known. Cascades happen without the stop, and
+there is no sign that the current stop causes them; 0 of 14 against 1 of 8 cannot show whether
+it changes how often they happen, and the earlier variant (which also stopped
+`remotemanagementd`) is not cleared. The idle-exit counts come from `log show`; the 2 s
+process-count series shows no other drop of 5 or more processes within 30 s outside the stop
+passes, which supports the zeros.
 
 Turning off 18 more jobs (Game Center, weather, Mail, Exchange accounts, sleep
 schedule, family, Managed Settings, Watch pairing, ...) brought it to 1.57 GB but broke the

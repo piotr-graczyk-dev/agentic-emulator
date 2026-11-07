@@ -28,19 +28,23 @@ type ResetReport struct {
 // takes about a second. It:
 //
 //  1. terminates every app (system and user),
-//  2. uninstalls every user-installed app, which deletes its data and app-group containers,
-//  3. resets privacy permissions (TCC) and the keychain, and clears the pasteboard,
+//  2. uninstalls every user-installed app, which deletes its data, app-group containers and
+//     privacy grants,
+//  3. resets the keychain, and puts back what the test capabilities change
+//     (resetCapabilities): light appearance, no simulated location, an empty pasteboard, and no
+//     privacy grant for any app,
 //  4. presses home and waits until SpringBoard is frontmost.
 //
 // Not reset (unlike `simctl erase`): data of built-in apps (Settings search history, Safari,
-// Contacts, Photos...), system settings an agent changed (language, appearance...), and media
-// added with `simctl addmedia`. See docs/IOS.md.
+// Contacts, Photos...), other system settings an agent changed (language...), notification
+// permissions answered in the system alert, and media added with `simctl addmedia`. See
+// docs/IOS.md.
 func (b *Backend) Reset(ctx context.Context, id string) error {
 	_, err := b.reset(ctx, id)
 	return err
 }
 
-// simctlResetTimeout bounds each simctl call of a reset (privacy, keychain, pasteboard).
+// simctlResetTimeout bounds the simctl call of a reset (keychain).
 const simctlResetTimeout = 60 * time.Second
 
 func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
@@ -57,38 +61,17 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	}
 	udid := d.UDID
 
-	// simctl calls are slow to start (~100 ms each, seconds on a loaded Mac); run them
-	// alongside the app cleanup.
+	// simctl is slow to start (~100 ms, seconds on a loaded Mac): reset the keychain alongside
+	// the app cleanup. (`simctl privacy reset all` without a bundle id, used before, changes
+	// nothing on iOS 26.5; resetCapabilities resets each grant instead.)
 	sctx, cancel := context.WithTimeout(ctx, simctlResetTimeout)
 	defer cancel()
 	var wg sync.WaitGroup
 	var simctlErr error
-	var errMu sync.Mutex
-	fail := func(err error) {
-		errMu.Lock()
-		if simctlErr == nil {
-			simctlErr = err
-		}
-		errMu.Unlock()
-	}
-	for _, args := range [][]string{
-		{"privacy", udid, "reset", "all"},
-		{"keychain", udid, "reset"},
-	} {
-		wg.Add(1)
-		go func(args []string) {
-			defer wg.Done()
-			if _, err := simctl(sctx, args...); err != nil {
-				fail(err)
-			}
-		}(args)
-	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := simctlStdin(sctx, "", "pbcopy", udid); err != nil {
-			fail(err)
-		}
+		_, simctlErr = simctl(sctx, "keychain", udid, "reset")
 	}()
 
 	system, err := b.systemApps(ctx, d)
@@ -138,17 +121,23 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	b.mu.Unlock()
 	tUninstall := time.Since(start)
 
+	// After the uninstalls, so their apps' grants are gone with them.
+	capErr := b.resetCapabilities(ctx, udid)
+	tCap := time.Since(start)
 	wg.Wait()
 	tSimctl := time.Since(start)
 	if simctlErr != nil {
 		return rep, fmt.Errorf("reset: %w", simctlErr)
 	}
+	if capErr != nil {
+		return rep, fmt.Errorf("reset: %w", capErr)
+	}
 	if err := b.goHome(ctx, udid); err != nil {
 		return rep, fmt.Errorf("reset: %w", err)
 	}
 	rep.Ms = ms(time.Since(start))
-	log.Printf("ios reset %s: %.0f ms (app lists %.0f, terminate %d apps %.0f, uninstall %v %.0f, simctl privacy/keychain/pbcopy done at %.0f, home %.0f)",
-		udid, rep.Ms, ms(tList), len(all), ms(tTerminate-tList), rep.Uninstalled, ms(tUninstall-tTerminate), ms(tSimctl), ms(time.Since(start)-tSimctl))
+	log.Printf("ios reset %s: %.0f ms (app lists %.0f, terminate %d apps %.0f, uninstall %v %.0f, appearance/location/pasteboard/privacy %.0f, simctl keychain done at %.0f, home %.0f)",
+		udid, rep.Ms, ms(tList), len(all), ms(tTerminate-tList), rep.Uninstalled, ms(tUninstall-tTerminate), ms(tCap-tUninstall), ms(tSimctl), ms(time.Since(start)-tSimctl))
 	return rep, nil
 }
 

@@ -70,7 +70,9 @@ Environment variables (read by the daemon):
 | type | `adb shell input text` | The agent inserts the text at the cursor of the focused editable node with `AccessibilityNodeInfo.ACTION_SET_TEXT` (what UiAutomator and Appium `setText` do). Returns once the app's UI thread has applied it, so its TextWatchers and listeners have run. `\n` / `\t` become Enter / Tab keys. `type --keys` (MCP `keys: true`) sends one key event per character through the IME, like `input text`. With no focused editable node, `type` also falls back to keys. |
 | key | `adb shell input keyevent` | The agent injects the key through `IInputManager.injectInputEvent` (the call `input` makes) in async mode: it returns once InputManager has queued the down and up events, like a tap. Follow with `wait` or `ui` to see the effect. |
 | UI tree | `uiautomator dump` + reading the XML | The agent walks `AccessibilityNodeInfo` of every on-screen window, top-most first, over its warm UiAutomation connection, and returns compact JSON. The Go side maps it to `api.Element`. After a `launch`, the first tree read waits (up to 3 s) until the accessibility layer reports the launched app's window. |
-| launch | `am start -W` | The agent calls `IActivityTaskManager.startActivityAndWait`, the call `am start -W` makes, and returns when it does (the activity has drawn). The wait for the app's accessibility window moved to the next tree read. |
+| launch | `am start -W` | The agent calls `IActivityTaskManager.startActivityAndWait`, the call `am start -W` makes, and returns when it does (the activity has drawn). The wait for the app's accessibility window moved to the next tree read. A launch less than 300 ms after a `key` waits until then (see Caveats), and the wait is bounded at 20 s. |
+| open, permission, clipboard, appearance, apps, uninstall, clear-data | `am start -d`, `pm grant/revoke`, `cmd uimode`, `pm list/uninstall/clear` | The agent makes the system service call behind the standard command, as the shell. See Test capabilities. |
+| location | `adb emu geo fix` | Emulator gRPC `SetGps`, the same GNSS fix `geo fix` sets. |
 
 ### Screenshots
 
@@ -640,6 +642,122 @@ boot and reset rows of this run did not complete; the cold boot hung.
    baseline 361.2 ms (p95 528.5, n=10) | agemu cli 1188.1 ms (p95 1532.6, n=10) | daemon 874.5 ms (p95 1252.0, n=10) | speedup cli 0.3x daemon 0.4x
 ```
 
+### Test capabilities (2026-11-07)
+
+The capabilities of [CAPABILITIES.md](CAPABILITIES.md) (`internal/android/capabilities.go`,
+`android-agent/src/agemu/Caps.java`). Each one makes the system call that the user action or
+the standard command makes, from a process that is already running: the on-device agent (the
+shell uid, so the same permissions as `adb shell`) or the emulator's gRPC. The standard tools
+pay for a host `adb` process, a guest shell and a `cmd` process per call.
+
+| Capability | Standard command | agemu |
+|---|---|---|
+| open | `am start -W -a VIEW -c BROWSABLE -d <url>` | Agent: `Intent(ACTION_VIEW, uri)` + `CATEGORY_BROWSABLE` + `FLAG_ACTIVITY_NEW_TASK`, no package or component, `startActivityAndWait` with the shell as caller. Returns the package of the activity that took it (`WaitResult.who`); the next tree read waits for its window, as after `launch`. No handler: "no app handles <url> as a link". |
+| permission | `pm grant/revoke`, `pm set-permission-flags`, `appops set` | The agent reads the app's requested permissions with their protection, grant state and flags (`IPermissionManager.getAllPermissionStates`, one call; platform permission protections cached); the host plans the change (`planPermissions`, unit-tested) and the agent applies it: `UiAutomation.grantRuntimePermission` / `revokeRuntimePermission`, then `updatePermissionFlags`, or `IAppOpsService.setMode` for app-op permissions. The host checks the state the agent returns. |
+| location | `adb emu geo fix` | gRPC `SetGps` on the emulator, which feeds the guest's GNSS HAL (the same fix `geo fix` sets). `clear` sets the emulator's default fix: agemu reads it with `GetGps` when it starts the emulator, before anything can set one, and keeps it next to the device's log for that emulator process. Emulator 37 reports 39.237256, -123.150032 (constants in its binary), which is also the fallback for an emulator agemu did not start. |
+| clipboard | none (`cmd clipboard` has no shell command on this image) | Agent: `IClipboard.setPrimaryClip` / `getPrimaryClip` / `clearPrimaryClip` as `com.android.shell` (the shell may read the clipboard in the background). |
+| appearance | `cmd uimode night yes/no` | Agent: `IUiModeManager.setNightMode`, waits until the global configuration has the night bit, then until the focused app has redrawn: an activity that declares `uiMode` in `configChanges` redraws in place; any other is recreated, and agemu waits for its new window with content (at most 2 s). Read: the global configuration's night bit. |
+| apps | `pm list packages -3` | Agent: `getInstalledPackages`, non-system ones, label read from the APK's resources in the device's current configuration (its locale, as the launcher shows it), `versionName`. Each APK's label is read once per update and locale and then cached in the agent, because loading an APK's resources costs time per app. |
+| uninstall | `adb uninstall` | Agent: `IPackageManager.deletePackageAsUser(DELETE_ALL_USERS)`, waiting for its observer. A system app is refused. |
+| clear-data | `pm clear` | Agent: `IActivityManager.clearApplicationUserData`, waiting for its observer: what `pm clear` and Settings' "Clear storage" call. |
+
+The probe app `testapps/android/AgemuProbe` (built by `testapps/android/build.sh`, no Gradle)
+shows on screen what an app sees: the URL that opened it and whether the intent was
+BROWSABLE, each permission's grant and rationale state, a "Ask camera" button, its GPS
+listener's fix, the clipboard, the night mode, a launch counter in its own data, its pid and
+whether it may draw overlays. `scripts/e2e-android.sh` checks every capability against it (13
+checks, after the existing 20).
+
+Measured on agemu-lab (API 37.1, host GPU), interleaved (baseline, CLI, daemon, then the
+reverse), n=12 per arm, medians with ranges. The host also ran another session's Gradle,
+Metro and simulators: load average 22-110 during these runs. The two rows that set the
+appearance come from a repeat run of the same build at load 22-30; the first run of that
+build, at load 35-110, gave daemon speedups of 2.5x and 1.5x. An earlier build (v1) measured
+the app-visible appearance row at 0.6x (baseline 153.7 against daemon 246.1 ms) and clear-data
+at 1.5x with the same method. The daemon arm is a persistent socket client (no process start),
+as `agemu mcp` uses it; the standard tool's figure includes its `adb` process.
+
+| Operation | Standard tool | Standard tool ms | agemu CLI ms | agemu daemon ms | daemon speedup |
+|---|---|---|---|---|---|
+| open a deep link, app in front | `am start -W -d` | 34.7 (28.1-146.1) | 9.3 (7.6-46.7) | 3.7 (2.4-22.9) | 9.4x |
+| open a deep link, app stopped | `am start -W -d` | 221.8 (156.8-623.6) | 216.4 (123.9-605.2) | 260.9 (118.2-675.5) | 0.9x |
+| grant camera | `pm grant` | 35.5 (28.6-108.0) | 10.6 (8.5-51.8) | 4.2 (2.5-9.6) | 8.5x |
+| revoke camera | `pm revoke` | 30.4 (25.0-65.1) | 13.8 (8.3-30.3) | 4.1 (2.5-31.3) | 7.5x |
+| reset camera | `pm revoke; pm clear-permission-flags` | 31.8 (29.2-47.6) | 8.6 (7.6-16.2) | 2.6 (2.4-5.7) | 12.3x |
+| set location (the call; the app sees the fix no sooner, see below) | `adb emu geo fix` | 16.3 (13.9-27.6) | 8.3 (5.5-28.8) | 0.6 (0.2-2.1) | 29x |
+| set clipboard | none; `adb shell true` | 27.2 (18.8-35.8) | 8.6 (6.5-27.2) | 2.4 (0.8-8.3) | (11x the adb floor) |
+| read clipboard | none; `adb shell true` | 24.4 (20.6-55.1) | 9.9 (7.0-25.4) | 1.8 (0.9-14.8) | (14x the adb floor) |
+| dark/light, home screen | `cmd uimode night` | 67.4 (36.7-489.5) | 49.2 (26.2-202.3) | 27.2 (16.7-77.6) | 2.5x |
+| dark/light until the app in front shows it (not established, see below) | `cmd uimode night` + agemu's wait | 280.6 (130.0-1263.1) | 200.9 (134.5-693.4) | 168.4 (101.8-360.4) | 1.7x |
+| read the appearance | `cmd uimode night` | 22.8 (21.2-26.6) | 6.0 (5.2-9.0) | 0.8 (0.7-7.5) | 28x |
+| list user apps (one user app installed; before the label cache) | `pm list packages -3` (ids only) | 28.0 (24.8-54.4) | 14.0 (10.8-30.4) | 8.5 (5.6-17.4) | 3.3x |
+| clear data (app in front) | `pm clear` | 79.3 (48.8-273.5) | 44.0 (30.2-118.3) | 35.6 (24.2-102.7) | 2.2x |
+| uninstall | `adb uninstall` | 119.1 (62.1-147.9) | 53.0 (37.0-115.5) | 61.7 (27.1-95.2) | 1.9x |
+
+- **Where 3x is not reached.** Timed inside the guest (including starting `cmd`, and about 3 ms
+  of timer overhead), `cmd uimode night` takes 22.9 ms (16.5-64.3), `cmd package clear` 13.5 ms
+  (12.1-43.6, app idle for 0.5 s), `cmd package uninstall` 77.9 ms (31.9-110.5), n=10 each; a
+  cold start of the probe is the 118-675 ms of the cold-open row. agemu removes the host and
+  shell processes (20-30 ms). For uninstall and a cold open the guest's own work is shown to
+  dominate. For clear-data it is not: the floor was measured with the app idle, while the table
+  cleared an app that had just been launched (35.6 ms), so the floor for that case is unknown.
+  For the appearance on the home screen, the agent's trace shows the night-mode change applied
+  in 11-16 ms plus 1-3 ms of settling, below the 27.2 ms median; the rest may be agemu's own
+  accessibility and configuration polling.
+- **The appearance call does more than `cmd uimode`.** It returns once the app in front has
+  redrawn. Right after it returns, the probe's UI tree showed the new mode 10 of 10 times; right
+  after `cmd uimode night` returned, 1 of 10 times. That is the solid result. How much sooner
+  the app shows the change is not established: the baseline arm's "shown" time is measured by
+  agemu's own wait loop (50 ms polls, or a frame wait of up to 250 ms), its samples are bimodal
+  (130-210 and 260-1263 ms), and the v1 build measured 0.6x with the same method.
+- **Location reaches the app at the GNSS's pace.** The probe's GPS listener saw a new fix
+  111.7 ms (71.0-4128) after `geo fix` started, 109.5 ms (71.0-129.1) without one first `geo fix`
+  that took 4.1 s, and 113.9 ms (58.4-125.9) after agemu's call started (n=10 each,
+  interleaved). As the app sees it, location is 1.0x: only the call returns sooner (agemu
+  0.5 ms against 14.8 ms for `geo fix` in that run), and it does not wait for the app to get the
+  fix.
+- **open with the app running in the background** (a warm start) was not measured; the
+  table has the app in front (`singleTop`, delivered to the top activity at once) and stopped.
+- **Permission planning moved two agent round trips to one read and one write.** A first version
+  read every permission's info and flags one by one and returned the whole state: 10-12 ms
+  (2.1-2.9x). Reading all states in one call, caching platform protections and returning only
+  the changed permissions brought it to 2.6-4.2 ms.
+- **Clipboard: the agent, not gRPC.** The emulator's gRPC `SetClipboard` works headless (the
+  guest had the text at the first read, 10 of 10), but an empty text leaves a clip holding ""
+  (the probe showed `clipboard: ""`), not an empty clipboard as on a fresh device;
+  `clearPrimaryClip` does. Reading through the agent returns what the guest holds, not the
+  emulator's copy of it.
+
+Fidelity, as the probe app showed it:
+- A link opens only activities whose intent filter has `BROWSABLE`: `agemu open agemunb://x`
+  fails while `am start -d agemunb://x` opens the probe's non-browsable activity. https URLs go
+  to Chrome, which shows its first-run screen on a fresh device. The caller is the shell.
+- grant: the app sees the permission granted, flag `USER_SET`. revoke: the app's process is
+  killed (pid changed or gone), flags `USER_SET|USER_FIXED`, and its `requestPermissions` returns
+  denied without a dialog. reset: no user flags, and the next request shows the system dialog
+  ("While using the app / Only this time / Don't allow"). `location` after `location-always`
+  takes background location away. App-op permissions: `SYSTEM_ALERT_WINDOW` grant makes
+  `Settings.canDrawOverlays` true, revoke false (`appops` shows allow / deny / default).
+- The clipboard toast "Agemu Probe pasted from your clipboard" shows when the app reads a clip
+  agemu set, as when another app copied it.
+- Dark mode recreates the probe's activity (its launch counter goes up), as on a device. An
+  activity that declares `uiMode` in `configChanges` (common in React Native, Flutter and
+  Compose apps) redraws in place: agemu then returns without waiting for that redraw (a
+  `screenshot` right after still waits for the next frame). Only the probe, which is
+  recreated, was checked.
+- clear-data: the process stops, the launch counter starts again at 1, permissions are reset.
+- Survives reset: nothing found. The GPS fix did survive a snapshot load (it is emulator state);
+  reset and standby now send the default fix before the load (so the restored guest never gets
+  the old one) and check it after.
+- `grant location-always,location` leaves background location not granted (the later name
+  wins), and background location is always granted after the foreground pair.
+- Not checked: fused location (Play services; only `LocationManager` GPS was), approximate
+  location, a chooser with two handlers, App Links, hard-restricted permissions. The clip's
+  label (`agemu`) and source (`com.android.shell`) are visible to apps.
+- The Mac clipboard did not reach the guest (checked by writing to the Mac's clipboard and
+  reading the guest's). The other direction (guest to Mac) is reported checked, but no log of it
+  was kept; the emulator does keep a copy of the guest's clip.
+
 ## Caveats
 
 - **2 GB guest RAM needs `-lowram`.** Emulator 37.1 raises guest RAM to 4096 MB for every API > 36 image.
@@ -657,6 +775,8 @@ boot and reset rows of this run did not complete; the cold boot hung.
   - While the agent runs, `uiautomator dump` and UiAutomation-based instrumentation tests (UiDevice, Espresso with UiAutomator) cannot connect.
   - Stop the agent with `adb -s <serial> shell 'kill $(pidof agemu-agent)'`. agemu restarts it on its next call.
 - **Stylus handwriting is off in the baseline.** The emulator's virtio touchscreen advertises a stylus (`BTN_STYLUS`, source `TOUCHSCREEN | STYLUS`). Gboard therefore treats taps on text fields as stylus input and shows its floating handwriting toolbar over the app instead of the keyboard (seen in this session's screenshots), or a one-time "Try out your stylus" sheet. agemu runs `settings put secure stylus_handwriting_enabled 0` once before it saves the baseline, a user setting: with it, Gboard shows the normal QWERTY keyboard, as on a phone used with a finger.
+- **A launch or open right after a key waits for the key.** `key` returns once the key is queued. A `launch` or `open` that starts an activity before the system has handled that key (home 1 ms before, from one MCP connection) lost the race in 3 of 6 tries: the key sent the new activity behind, it never reported being displayed, and `startActivityAndWait` (also `am start -W`) did not return; agemu answered after its 60 s agent timeout. With 300 ms between them it never happened (0 of 8). The agent now starts an activity no sooner than 300 ms after its last key (12 of 12 such starts returned), and bounds the wait at 20 s with an error that names the app in front. This adds up to 300 ms to a `key` followed at once by `launch` or `open`. A start that passed the 20 s bound keeps a thread in the agent and a binder thread in system_server until it returns; after 3 such starts the agent refuses new ones with an error until one returns or `reset` restores the baseline.
+- **The agent's socket has no authentication.** The on-device agent listens on an abstract unix socket as the shell user (only agemu's TCP path through the emulator console carries a token). A process that can connect to it could use the capability commands: grant permissions and app-ops, read the clipboard, uninstall or clear apps. `tap` and `key` already gave equivalent control. Whether an app under test can connect to a shell-domain socket depends on SELinux policy, which was not checked.
 - **Tap, swipe and key return when the input is queued.** `agemu tap` returns once the emulator has queued the touch; `agemu key` once InputManager has queued the key. `adb shell input tap/keyevent` waits until the app has handled the event. Agents should follow them with `wait` or `ui` (milliseconds) or `screenshot` (which waits for the input's frame). `type` returns after the app's UI thread has applied the text; `launch` after the activity has drawn, like `am start -W`.
 - **Back-to-back text changes are bound by the app.** `ACTION_SET_TEXT` and the cursor read run on the app's UI thread. Idle, a `type` takes 5–10 ms in the agent; issued while the app is still redrawing the previous change (software rendering on a loaded host), it waits 16–130 ms for the UI thread.
 - **Standby keeps guest RAM allocated.** A device in standby uses no CPU, but the paused emulator keeps its guest RAM (about 2 GB) on the host. Run `shutdown` twice, or set `AGEMU_ANDROID_STANDBY=0`, to free it.

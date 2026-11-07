@@ -167,9 +167,27 @@ agemu reset                                            # back to the clean basel
 agemu profiles                                         # all real-device profiles
 ```
 
+Test capabilities ([docs/CAPABILITIES.md](docs/CAPABILITIES.md)):
+
+```sh
+agemu open myapp://orders/7 --wait-id order-7          # a deep link, as a tapped link opens it
+agemu permission grant com.example.app camera location # also revoke, and reset [<name>...]
+agemu location set 52.2297 21.0122                     # simulated GPS fix; location clear
+agemu clipboard set "code 1234"                        # clipboard prints it back
+agemu appearance dark                                  # appearance alone reads light|dark
+agemu apps                                             # user-installed apps: id, name, version
+agemu clear-data com.example.app                       # like a fresh install, app kept
+agemu uninstall com.example.app
+agemu push com.example.app '{"aps":{"alert":"Hi"}}'    # iOS only; payload inline, a file or -
+```
+
+A capability a platform cannot do faithfully answers "not implemented" (exit status 3) instead
+of faking it: push on Android, and on iOS the photos grant, `contacts-limited`, notifications
+and raw Android permission names.
+
 With exactly one booted device, `-d <device>` can be left out.
 
-Actions (`tap`, `swipe`, `type`, `key`, `launch`) take `--wait-text/--wait-id/--wait-contains/--wait-role`
+Actions (`tap`, `swipe`, `type`, `key`, `launch`, `open`, `push`) take `--wait-text/--wait-id/--wait-contains/--wait-role`
 (plus `--wait-gone`, `--wait-timeout-ms`) to wait for their effect in the same call, and `--ui` to
 also return the screen they end on. One call per agent step instead of two or three.
 
@@ -181,7 +199,32 @@ claude mcp add agemu -- /path/to/bin/agemu mcp
 
 The tools are `devices`, `profiles`, `create`, `boot`, `shutdown`, `reset`, `set_profile`,
 `screenshot` (returns the image), `ui_tree`, `find`, `tap`, `swipe`, `type_text`, `press_key`,
-`install`, `launch`, `terminate` and `wait_for`. All MCP sessions share the one daemon.
+`install`, `launch`, `terminate` and `wait_for`, and for the test capabilities `open_url`,
+`permission`, `location`, `clipboard`, `appearance`, `apps`, `uninstall`, `clear_app_data` and
+`push` (27 in all). All MCP sessions share the one daemon.
+
+### Test capabilities
+
+Each is the system call the standard tool makes, sent from agemu's long-lived on-device agent
+(Android) or helper (iOS) instead of a new process per call. Daemon (MCP) medians against the
+standard tool, n=12 per arm, interleaved, on a loaded host; details and caveats in
+[docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+
+| Operation | Android: agemu / `adb` | iOS: agemu / `xcrun simctl` |
+|---|---|---|
+| open a deep link | 3.7 / 34.7 ms (9.4x), app in front; 261 / 222 ms (0.9x), app stopped | 6.7 / 120 ms (18x) |
+| grant, revoke, reset a permission | 2.6-4.2 / 30.4-35.5 ms (7.5-12.3x) | 1.5-4.7 / 116-130 ms (28-78x) |
+| set a location (the call) | 0.6 / 16.3 ms; the app sees the fix no sooner (1.0x) | 0.5-0.8 / 107-109 ms |
+| clipboard set, get | set 2.4 ms, get 1.8 ms (no standard tool) | set 0.8 / 133 ms (159x), get 11.7 / 161 ms (14x) |
+| read the appearance | 0.8 / 22.8 ms (28x) | 1.0 / 175 ms (174x) |
+| set the appearance | 27.2 / 67.4 ms (2.5x) on the home screen | 694 / 670 ms until a screenshot shows it (1.0x); the call waits for the ~0.5 s crossfade |
+| list user apps | 8.5 / 28.0 ms (3.3x; one user app installed) | 0.7 / 173 ms (another mechanism: Info.plists on the host) |
+| uninstall | 61.7 / 119.1 ms (1.9x) | 83 / 194 ms (2.3x) |
+| clear app data | 35.6 / 79.3 ms (2.2x) | 258 / 538 ms (2.1x; delete and reinstall from a clone) |
+| push | not implemented (no faithful path) | 15.8 / 133 ms (8x) |
+
+`reset` restores what these change: light appearance, the baseline location, an empty
+clipboard, no permission grants, no user apps.
 
 ### Profiles
 
@@ -196,7 +239,12 @@ The tools are `devices`, `profiles`, `create`, `boot`, `shutdown`, `reset`, `set
   analysis, asset downloads, Continuity, ...) in its simulators, and stops the wallpaper
   gallery (all but the lock screen's wallpaper) after boot: 1.97 GB 2 minutes after
   agent-ready, against 2.42 GB with the previous lean setting of 32 jobs (medians of 4 boots
-  each). `AGEMU_IOS_LEAN=0` keeps the full system.
+  each). In the first 5 minutes after boot it also stops what iOS starts in the background
+  and then keeps idle (the Calendar app, App Intents extensions, device management services):
+  0.24 GB less 4 minutes after boot when iOS had opened Calendar and it stayed open (6 pairs of
+  boots, all of them so); otherwise about 0.15 GB (estimated from the processes' sizes). A
+  Calendar that is in front at one of the passes is never stopped. `AGEMU_IOS_LEAN=0` keeps the
+  full system.
 - Android: `-gpu host` by default, and 14 Google apps are turned off in the baseline (Play
   services and the Play Store stay). `AGEMU_ANDROID_LEAN=0` keeps them;
   `AGEMU_ANDROID_GPU=auto` goes back to software rendering.
@@ -224,7 +272,7 @@ never booted, shut down or driven, so agemu can run next to your own devices and
 
 | What | How to run it |
 |---|---|
-| End-to-end, Android | `scripts/e2e-android.sh` (20 checks; CLI only) |
+| End-to-end, Android | `scripts/e2e-android.sh` (33 checks, 13 of them the test capabilities on a probe app; CLI only) |
 | End-to-end, iOS | `scripts/e2e-ios.sh` (109 checks; CLI only; includes a third-party SwiftUI app and iPad) |
 | Benchmarks | `bin/agemu-bench --platform android\|ios --device <id> --agemu bin/agemu` |
 | Unit tests | `make test` |
@@ -244,8 +292,9 @@ profiles with checked dimensions, tapping by selector in non-default profiles, a
     purpose.
 - **Android profiles other than the AVD's native one are resampled** from the framebuffer.
   Create the AVD with `--profile <name>` to make that profile pixel-exact.
-- **iOS has no snapshots.** Reset is a soft reset: it terminates and uninstalls user apps and
-  resets privacy, keychain and pasteboard. Built-in apps' data is not reset.
+- **iOS has no snapshots.** Reset is a soft reset: it terminates and uninstalls user apps,
+  resets privacy grants and the keychain, empties the pasteboard, sets light mode and clears the
+  simulated location. Built-in apps' data is not reset.
 - **iPad Split View / Slide Over is untested.** `ui` reads the app at the screen centre.
 - **Simulator is not a device.** The iOS Simulator runs apps natively on the Mac; GPU,
   sensors and performance differ from an iPhone.
