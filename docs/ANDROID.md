@@ -288,6 +288,14 @@ Every row runs on the same `agemu-pixel` emulator:
 Boot and reset use N=3. The cold-boot baseline uses the same emulator flags as agemu, minus
 the snapshot. Medians; p95 and n in parentheses.
 
+The README cites `bench/final/android.md`, a separate run on 2026-11-06 with the same `-gpu auto`
+default: its agent step (1506 ms) and cold launch (602 ms) are the "before" column of "Host GPU
+and lean devices". It predates the host GPU default, the compressed baseline (Caveats, Disk) and
+the waits of "Agent-loop reliability": a tap by coordinates does not wait, a tap by selector on a
+screen still for 1.5 s costs +0.1 ms, and a screenshot right after an input can wait up to 500 ms
+longer for the input's effect. It also predates round 5's reader thread for window reads, which
+adds 0.6-1.0 ms to a tree read on a still screen ("The first tree read after a crash").
+
 ### Results (2026-11-06, default configuration: `-gpu auto`, software rendering)
 
 The table combines four runs of the same binaries on the same host (Apple M2 Pro, macOS
@@ -1368,6 +1376,13 @@ the emulator was gone (`elapsedRealtime` gap 2.6-3.7 s for 29-31 s of wall time)
 `elapsedRealtime` alarm fired on time by the guest's clock and 30 s late by the wall clock (the
 one seen firing). It
 writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu parks instead.
+
+### End-to-end run
+
+Round 5's merge (2026-11-07, agemu-lab, compressed baseline, load average 2.9-5.9):
+`scripts/e2e-android.sh` (44 checks) passed 44/44 on its third run. The first two stopped on races
+in the script's crash checks, which were then fixed: the crash notice came with the `open` call,
+and a "keeps stopping" dialog covered the lab screen after the second crash.
 
 ## Caveats
 

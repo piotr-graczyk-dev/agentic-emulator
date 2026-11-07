@@ -1399,6 +1399,14 @@ load average 47-78 during this run, swap nearly full), so every number is noisy;
 compares the two tools under the same conditions. Rows with n=2 (cold boot, profile switch,
 reset) are the slower of two runs.
 
+The final run below and `bench/final/ios.md` (both early on 2026-11-06) measured the first
+version's tap and type: a tap returned once its touch was sent, and `type hello` sent HID key
+events. Later that day a tap began to wait until its first frame shows (at most 120 ms) and `type`
+to paste and wait until the app has drawn the text (see "How each operation works"); those rows
+were not run again against Maestro. Measured since: a whole `agemu type <word>` 118 ms (CLI
+median, see "Test capabilities"), and a tap by selector on a label that draws nothing 159-160 ms,
+most of it that 120 ms wait (see "Lost taps on just-presented UI").
+
 ### Paste confirmation (round 5, 2026-11-07)
 
 `agemu type <6 random letters>` through the CLI on agemu-iphone-se-3 (iOS 26.5), each call right
@@ -1650,6 +1658,9 @@ the element of the screen it leads to is there, so all tools do the same work.
   failed attempt's time counts.
 - Apple M2 Pro. Other work ran on the host (load average 5.9-19.3). No recording during the
   timed runs.
+- These runs, and the earlier series below, used agemu as of the agent-loop work merged on
+  2026-11-06 (pull request #3), before the lean simulators and the later waits for just-presented
+  UI, the home button and paste confirmation (sections above); they were not repeated since.
 
 | | agemu compound | agemu | Argent | agent-device |
 |---|---|---|---|---|
@@ -1697,8 +1708,10 @@ was 1.14× faster than Argent and 2.10× faster than agent-device (1.27× and 3.
   for every tool.
 - **The rest is mostly the app's.** After launch, agemu's acting steps are bounded by the app's
   transitions: a tap returns when the first changed frame shows, and the wait ends on the first
-  UI-tree read that has the next screen. Argent is closest. It is faster on two steps:
+  UI-tree read that has the next screen. Argent is closest. It is faster than the compound variant
+  on three steps (than plain agemu on the first and the last):
   - entering the e-mail (`fill` 790 ms vs a verified paste, 960 ms);
+  - search -> results (1996 against 2169 ms; plain agemu 1944 ms);
   - opening the sign-out dialog. Argent's scroll has no momentum. agemu's swipe flings, and
     its selector tap waits for the list's bounce to end before it reads where the button is.
 - **Fewer calls.** The compound variant saves 13 of 39 calls, and some wall time. Every call is
