@@ -39,6 +39,7 @@ type simDevice struct {
 	Width          int     `json:"width"`
 	Height         int     `json:"height"`
 	Scale          float64 `json:"scale"`
+	DataPath       string  `json:"dataPath"` // the device's data directory on the host
 }
 
 const (
@@ -62,6 +63,9 @@ type Backend struct {
 	// device's cold boots for the wallpaper passes (see lean.go).
 	lean, leaning, leanAgain map[string]bool
 	wallGen                  map[string]int
+	// anim maps udid -> the animation coefficient last applied to that device (see
+	// animations.go; 0 is normal speed).
+	anim map[string]float64
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -74,7 +78,8 @@ type Backend struct {
 // seconds on a loaded one). AGEMU_IOS_PRESTART=0 starts it on first use instead.
 func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
-		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, wallGen: map[string]int{}}
+		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, wallGen: map[string]int{},
+		anim: map[string]float64{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -511,6 +516,7 @@ func (b *Backend) bootReadyOnce(ctx context.Context, udid string, afterBootCall 
 		}
 	}
 	b.leanDevice(dev, cold)
+	b.animateDevice(ctx, dev, cold)
 	return dev, nil
 }
 
@@ -954,6 +960,8 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	if err != nil {
 		return err
 	}
+	// A device this daemon has not booted gets AGEMU_IOS_ANIMATIONS before its first launch.
+	b.animateDevice(ctx, d, false)
 	var r struct {
 		Pid int `json:"pid"`
 	}

@@ -244,6 +244,9 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		d.agentOK = true
 		d.mu.Unlock()
 	}
+	// Every operation goes through here before it sends input: reopen a frame stream stopped
+	// after idle now, so the frames of that input are seen.
+	e.stream.touch()
 	return e, a, nil
 }
 
@@ -537,9 +540,27 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 	} else {
 		args = append(args, "-no-snapshot-load")
 	}
-	// Extra emulator flags, e.g. "-show-kernel" or "-feature OnDemandSnapshotLoad".
+	// Extra emulator flags, e.g. "-show-kernel". Not "-feature ...": the emulator deletes a
+	// snapshot saved with another feature set, and with OnDemandSnapshotLoad both loads tried on
+	// this emulator deadlocked (docs/ANDROID.md, "Reset and boot breakdown").
 	args = append(args, strings.Fields(os.Getenv("AGEMU_ANDROID_EMULATOR_FLAGS"))...)
 	return args
+}
+
+// snapshotCompressEnv maps AGEMU_ANDROID_SNAPSHOT_COMPRESS to the emulator's
+// ANDROID_SNAPSHOT_COMPRESS, which it reads when it saves a snapshot (loads read either format).
+// "1": LZ4-compressed RAM, ram.bin about 41% of the raw size, at about 3 CPU-seconds more per
+// load. "0": always raw. Unset (or any other value) leaves the emulator's own choice, which is
+// not always raw: emulator 37.1 can turn compression on by itself when the host has little free
+// RAM or the snapshot is on an HDD ("Enabling RAM compression: only %u MB of free RAM").
+// See docs/ANDROID.md, Caveats (Disk).
+func snapshotCompressEnv(v string) []string {
+	switch v {
+	case "0", "1":
+		// Appended after the daemon's environment: exec uses the last value of a duplicate key.
+		return []string{"ANDROID_SNAPSHOT_COMPRESS=" + v}
+	}
+	return nil
 }
 
 // inPlaceBootLoad: a new emulator process starts without loading a snapshot and the baseline
@@ -718,10 +739,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	args := emulatorArgs(d.name, p, a, loadBaseline)
 	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
-	cmd.Env = os.Environ()
-	if env("AGEMU_ANDROID_SNAPSHOT_COMPRESS", "") == "1" {
-		cmd.Env = append(cmd.Env, "ANDROID_SNAPSHOT_COMPRESS=1")
-	}
+	cmd.Env = append(os.Environ(), snapshotCompressEnv(os.Getenv("AGEMU_ANDROID_SNAPSHOT_COMPRESS"))...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
 	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
 	if err := cmd.Start(); err != nil {

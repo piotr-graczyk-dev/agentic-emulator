@@ -361,10 +361,17 @@ func TestDeviceStreamContent(t *testing.T) {
 // the frame on screen: it is compared with a direct framebuffer read taken right after it.
 // A difference only counts as stale when the screen was not changing (a second direct read
 // 300 ms later equals the first).
+//
+// With AGEMU_TEST_IDLE_STOP=1, every input is sent after the frame stream has stopped after idle
+// (AGEMU_ANDROID_STREAM_IDLE_S, 1 s unless set; static screens included), so the input reopens it.
 func TestDeviceScreenshotFresh(t *testing.T) {
 	avd := env("AGEMU_TEST_AVD", "agemu-pixel")
 	if _, ok := findRunning(avd); !ok {
 		t.Skipf("%s not running", avd)
+	}
+	idleStop := env("AGEMU_TEST_IDLE_STOP", "0") == "1"
+	if idleStop {
+		t.Setenv("AGEMU_ANDROID_STREAM_IDLE_S", env("AGEMU_ANDROID_STREAM_IDLE_S", "1"))
 	}
 	ctx := context.Background()
 	b := New()
@@ -374,6 +381,25 @@ func TestDeviceScreenshotFresh(t *testing.T) {
 	e, _, err := d.conn(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	waitIdleStop := func() {}
+	if idleStop {
+		e.stream.mu.Lock()
+		e.stream.quiet = 0
+		e.stream.mu.Unlock()
+		waitIdleStop = func() {
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				e.stream.mu.Lock()
+				open := e.stream.sub != nil
+				e.stream.mu.Unlock()
+				if !open {
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			t.Fatal("the frame stream did not stop after idle")
+		}
 	}
 	direct := func() frame {
 		f, err := e.screenshot(ctx)
@@ -411,6 +437,7 @@ func TestDeviceScreenshotFresh(t *testing.T) {
 			t.Fatalf("no %q", text)
 		}
 		x, y := hit.Frame.Center()
+		waitIdleStop()
 		if err := b.Tap(ctx, id, x, y); err != nil {
 			t.Fatal(err)
 		}
@@ -426,6 +453,7 @@ func TestDeviceScreenshotFresh(t *testing.T) {
 			tapText("Network & internet")
 			waitFor("Internet")
 		} else {
+			waitIdleStop()
 			if err := b.Key(ctx, id, "back"); err != nil {
 				t.Fatal(err)
 			}

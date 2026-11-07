@@ -52,7 +52,9 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
 | `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline snapshot. |
 | `AGEMU_ANDROID_STREAM` | `1` | `0`: no frame stream; every screenshot reads the framebuffer (`getScreenshot`). |
+| `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Close the frame stream after this many seconds without a call to the device, if the screen is still posting frames then (at least one per 3 s over the last 10 s); the next call reopens it. `0`: keep it open. See Screenshots. |
 | `AGEMU_ANDROID_AGENT_TCP` | `1` | `0`: reach the agent through adb only (no console port redirection). |
+| `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | (unset) | `1`: the emulator saves the baseline's RAM LZ4-compressed (`ram.bin` about 41% of the raw size). `0`: always raw. Unset leaves the choice to the emulator, which can turn compression on by itself when the host has little free RAM. Applies when a baseline is taken; both formats load. See Caveats (Disk). |
 | `AGEMU_ANDROID_BOOT_LOAD` | `inplace` | `startup`: restore the baseline with `-snapshot` at emulator start. This corrupts guest memory on emulator 37.1 (see Guest restarts). |
 | `AGEMU_ANDROID_EMULATOR_FLAGS` | (none) | Extra emulator flags, e.g. `-show-kernel` to log the guest kernel console. Never pass `-feature`: the emulator deletes snapshots whose feature set differs. |
 | `AGEMU_ANDROID_TRACE` | `0` | `1`: log whether each screenshot came from the frame stream. |
@@ -63,7 +65,7 @@ Environment variables (read by the daemon):
 |---|---|---|
 | boot | cold boot | `shutdown` parks the device in **standby**: the baseline snapshot is restored in place and the VM is paused. `boot` resumes it. When the device is powered off, `boot` starts the emulator with `-no-snapshot-load` and restores the baseline **in place** (gRPC `LoadSnapshot`) as soon as gRPC answers, then waits for the restored agent over TCP. |
 | reset | cold boot | gRPC `LoadSnapshot(agemu-baseline)` in the running emulator. The agent restored with the snapshot answers over TCP 30–110 ms later; agemu does not wait for adb. The active screen profile is re-applied. |
-| screenshot | `adb exec-out screencap -p` | The latest frame from a long-lived `streamScreenshot` subscription (MMAP transport), already in host memory: crop, resample, encode. Falls back to `getScreenshot` while the screen keeps changing. See Screenshots. |
+| screenshot | `adb exec-out screencap -p` | The latest frame from a `streamScreenshot` subscription (MMAP transport), already in host memory: crop, resample, encode. Falls back to `getScreenshot` while the screen keeps changing. The subscription is closed after 30 s without calls if the screen is still posting frames then, and reopened by the next call. See Screenshots. |
 | tap / swipe | `adb shell input tap/swipe` | gRPC `sendTouch` on the emulator's virtio multitouch screen, the same device a finger would use. Returns once the touch is queued. |
 | type | `adb shell input text` | The agent inserts the text at the cursor of the focused editable node with `AccessibilityNodeInfo.ACTION_SET_TEXT` (what UiAutomator and Appium `setText` do). Returns once the app's UI thread has applied it, so its TextWatchers and listeners have run. `\n` / `\t` become Enter / Tab keys. `type --keys` (MCP `keys: true`) sends one key event per character through the IME, like `input text`. With no focused editable node, `type` also falls back to keys. |
 | key | `adb shell input keyevent` | The agent injects the key through `IInputManager.injectInputEvent` (the call `input` makes) in async mode: it returns once InputManager has queued the down and up events, like a tap. Follow with `wait` or `ui` to see the effect. |
@@ -89,6 +91,33 @@ milliseconds; a `getScreenshot` call costs 25–40 ms on this host.
   with no input of ours (an animation), it reads the framebuffer directly instead.
 - **Snapshot loads** (reset, standby, resume) drop the copy: the display is restored without
   a new frame being posted.
+- **Idle stop.** The stream costs nothing while the screen is static, but every frame the
+  guest posts costs a readback in the emulator (gfxstream's post worker) and a copy and
+  compare in agemud, whether or not anyone takes a screenshot. An app that keeps animating (a
+  spinner, a running stopwatch) therefore keeps the host busy. agemu closes the subscription
+  when there was no call to the device for `AGEMU_ANDROID_STREAM_IDLE_S` (30 s) and the guest
+  is still posting frames: at least one per 3 s over the last 10 s (or the last half of the
+  idle time, when that is shorter). The frames of a transition right after the last call do not
+  count, so a screen that has been static since keeps its subscription and its copy; it is
+  checked again every 10 s. Every call reopens a closed subscription before it sends input.
+  - **A new subscription's first message** (emulator 37.1, measured with
+    `TestDeviceStreamReopenGap`). The emulator listens for frames from the call on, and
+    captures the first frame as soon as the guest posts one (that message has seq 1), or after
+    waiting about 125 ms for one (seq 0). That is why a first message takes 130-150 ms on a
+    static screen (median 139-142 ms; 0.2-0.9 s at load 70), and less when frames are posted.
+    The 125 ms matches the frame wait (`kTimeToWaitForFrame`) in the open-source
+    `EmulatorService.cpp`; 37.1's own source was not checked. A frame posted after the call is
+    in the first message's pixels or notified after it: in 150 new subscriptions (a static
+    screen, a blinking cursor, a running stopwatch), 68 with a frame posted before their first
+    message, the first frame never missed one. 9 first frames differed from the screen read
+    right after them, and the newer frame was notified each time.
+  - A seq-0 first frame counts as generated when the subscription was opened, before the input
+    that reopened it, so it never passes for that input's effect. A seq-1 first frame is a
+    posted frame and counts like any other.
+  - The first screenshot without an input after a stop reads the framebuffer, which is current;
+    the reopened subscription serves the next ones.
+  - A screenshot right after an input that reopened the stream waits for the first message (at
+    most 1 s), and then for the input's frame as usual.
 - **Emulator quirk.** With width and height 0 (unscaled) in the stream request, emulator
   37.1 acknowledges every frame but never writes pixels into the mapping. agemu passes the
   framebuffer size.
@@ -267,7 +296,10 @@ agemu's reset is now at parity with it (2.08 vs 2.26 s), without waiting for adb
 Explored and rejected:
 
 - **On-demand RAM loading** (`-feature OnDemandSnapshotLoad`, off by default with the comment "issues with MemoryWatch"). The emulator first deleted the baseline because its feature set differed ("The emulator has the feature: 20, which is missing in the snapshot"). Then, with a baseline saved under the feature, the next in-place load hung for 9 minutes with no guest kernel output; the emulator had to be killed.
-- **File-backed quickboot RAM** (`QuickbootFileBacked`, which maps `snapshots/default_boot/ram.img`). It needs a `default_boot` snapshot saved on exit. Headless, the emulator refused to save one ("you have configured it not to save on exit" / "Snapshots have been disabled by the user, save request is ignored"), also with a per-AVD `quickbootChoice.ini` (`saveOnExit = true`). The remaining switch is the emulator's global settings, shared with the other session's `Pixel_9_Pro`, so it was not changed. Even working, it maps the RAM file shared, so every boot would need a fresh APFS clone of a pristine copy, and in-place resets would not benefit. Time-boxed and stopped.
+  - Re-tested on emulator 37.1.11 (2026-11-06, an APFS clone of the AVD, baseline saved under the feature): a reset and a powered-off boot both hung until agemu's 2-minute limit.
+  - Cause, from `sample` of the hung emulator: on macOS the feature write-protects guest RAM and fills pages from a Mach exception handler. The background loader (`RamLoader::backgroundPageLoad` -> `MemoryAccessWatch::fillPage`) faults in its own `memmove` into a page it is filling. The exception handler (`MacDoAccessCallback` -> `RamLoader::fillPageData`) then spins in `cthread_yield` waiting for that same page. Neither thread can proceed, and the vCPUs wait on them.
+  - It cannot be fixed from outside the emulator. A working lazy load could matter: under host memory pressure, macOS had compressed or swapped out 1.7-2.0 GB of the 2 GB guest RAM of a running device, so most of it had not been touched recently.
+- **File-backed quickboot RAM** (`QuickbootFileBacked`, which maps `snapshots/default_boot/ram.img`). It needs a `default_boot` snapshot saved on exit. Headless, the emulator refused to save one ("you have configured it not to save on exit" / "Snapshots have been disabled by the user, save request is ignored"), also with a per-AVD `quickbootChoice.ini` (`saveOnExit = true`). The remaining switch is the emulator's global settings, shared with the other session's `Pixel_9_Pro`, so it was not changed. Even working, it maps the RAM file shared, so every boot would need a fresh APFS clone of a pristine copy, and in-place resets would not benefit. Time-boxed and stopped. The feature is on by default in emulator 37.1.11, but it only applies to `default_boot`, which is restored at emulator startup, and that path corrupts guest RAM here (see Guest restarts).
 - **Agent dialing out to 10.0.2.2.** A guest-initiated connection would be dead after every restore and need reconnect logic. The console redirection does the same job with a listening socket that the snapshot preserves.
 
 ### Against the 10x target
@@ -440,6 +472,139 @@ window, audio, the boot animation, and no `-lowram` (emulator 37 then gives an A
 | emulator memory | **7.5 GB** | 4.3 GB cold boot, 5.4 GB after baseline loads |
 | idle CPU | **86% of a core** | 19% cold boot, 24% after baseline loads |
 
+Memory in these tables is macOS's `phys_footprint`; in a later run under heavy host swap (12-14 GB
+in use) the emulator's `phys_footprint` exceeded the sum of its memory regions (`footprint`,
+`vmmap`) by 1.3-2.1 GB, for a reason not known.
+
+The idle CPU rows above are single sessions on a busy host. The interleaved 30 s windows on the
+launcher home in the next section ranged from 5.8% to 93.4% of a core, as the guest's own
+background work comes and goes.
+
+### Frame stream idle stop (2026-11-06, night)
+
+agemu's frame stream (see Screenshots) makes the emulator read back every frame the guest
+posts, and agemud copy it, whether or not anyone takes a screenshot. With the idle stop
+(`AGEMU_ANDROID_STREAM_IDLE_S`, default 30 s) the subscription is closed after 30 s without a
+call if the screen is still posting frames then: at least one per 3 s over the last 10 s.
+
+The measurements below ran with a first version of that rule, which averaged the frames posted
+since the last call over the whole idle time. A transition of a dozen frames right after a tap,
+followed by a static screen, then also closed the stream (reproduced in a unit test). The rule
+now looks only at the recent frame rate (`TestFrameStreamIdleStopSparesBurstThenStatic`,
+`TestFrameStreamIdleStopWhileFramesKeepComing`). On the two screens measured, which post frames
+all the time, both versions close the stream at the first check, 30 s after the last call.
+
+**Method.** `agemu-pixel` (host GPU, lean baseline), emulator 37.1.11. For each 30 s window the
+daemon was restarted with the arm's binary (HEAD f4286db, or HEAD plus this change), took one
+screenshot and then got no calls for 35 s. CPU is the emulator (qemu and netsimd) plus agemud,
+from `proc_pid_rusage`. Windows were counterbalanced (ABBA). The app's frame rate and jank are
+from `dumpsys gfxinfo <pkg>`, reset before and read after each window. The host was shared
+(1-minute load 6-388). Values are medians (range).
+
+**Clock app, running stopwatch** (about 37 frames/s). 7 windows per arm (ABBAABBAAB, then
+BAAB):
+
+| | stream open (before) | idle stop |
+|---|---|---|
+| emulator + agemud (% of a core) | 57.5 (51.3-66.5) | **39.9 (37.5-42.7): -30.6%** |
+| emulator | 53.4 (47.7-62.1) | 39.9 (37.5-42.7) |
+| agemud | 4.0 (3.6-4.4) | 0.0 |
+| the app's frame rate (gfxinfo) | 37.3 fps (12.4-37.5) | 36.9 fps (34.4-37.4) |
+| the app's janky frames | 58.2% (57.0-73.2) | 58.1% (57.6-59.0) |
+| emulator memory | 4951 MB | 4948 MB |
+
+- The cut is 30.6%, with a 95% bootstrap interval of about 24-38% (n=7 per arm), so "at least
+  30%" is a point estimate, not established.
+- Every idle-stop window was below every stream-open window, also in the low-load windows alone.
+- In two stream-open windows the app ran slower (12.4 and 29.4 fps, at load 65 and 87). The
+  stream-open median without them is the same, 57.5.
+- The first 10 windows alone: 60.7 against 40.6 (-33%).
+- So the open stream cost about 0.48% of a core for each frame per second the guest posts
+  (17.6 points at 37 frames/s).
+- The app's frame rate and jank were measured 35-65 s after the last call, not at the moment an
+  input reopens the stream.
+
+**Launcher home** (its analog clock widget posts about 1 frame/s). 5 windows per arm (ABBA,
+then ABBAAB: one window was lost when the host's disk filled up, and the order was resumed):
+
+| | stream open (before) | idle stop |
+|---|---|---|
+| emulator + agemud (% of a core) | 15.0 (5.8-93.4) | 11.4 (9.4-65.7) |
+| agemud | 0.2 (0.1-1.2) | 0.0 (0.0-0.1) |
+| the launcher's frame rate | 1.0 fps (1.0-1.3) | 1.0 fps (0.0-1.1; no frame in 2 windows) |
+
+The effect here is unresolved: the windows overlap completely, and the guest's own bursts (up
+to 93% of a core in one window) are much larger than the stream's cost. In 2 of the idle-stop
+windows the launcher posted no frame at all, so they do not measure the 1 frame/s condition. At
+about 0.48% per frame per second, the stream would cost about half a point on this screen; the
+2-3 points estimated in an earlier comparison were not confirmed. On a screen that is static at
+the check (Settings) the stream stays open, so nothing changes there.
+
+**Fidelity.** The guest is not touched: same AVD, flags and snapshot. The app's frame rate and
+jank did not change (tables above).
+- Screenshots after an input that reopened the stream: `TestDeviceScreenshotFresh` with
+  `AGEMU_TEST_IDLE_STOP=1` (1 s idle; every tap or back key is sent after the stream stopped):
+  20 of 20 streamed frames byte-identical to a direct framebuffer read, 0 stale. Stream wait
+  53-434 ms, against 261-385 ms with the stream kept open.
+- `TestDeviceStreamReopenFresh` takes the screenshot right after the input: either the input
+  reopens the stream, or a screenshot reopens it and the input follows 0-250 ms later, while
+  the subscription waits for its first message. It ran as two pairs of 32 rounds, each pair
+  with the idle stop and with the stream kept open:
+  - Second pair (with generation-time logging): with the idle stop, 25 showed the new screen or
+    a frame of the transition, 7 were pixel-identical to the screen before the input, and 0
+    were older than the input; the 7 were frames the guest posted 31-190 ms after the input
+    that did not show its effect yet. With the stream kept open: 22 and 10, also 0 older.
+  - First pair (no generation-time logging): 5 pixel-identical frames with the idle stop, 10
+    with the stream kept open. These cannot be classified as stale or as an early frame of the
+    transition.
+  - Pooled: 12 of 64 pre-input-looking frames with the idle stop, 20 of 64 with the stream kept
+    open. Pixel-identical early frames are how agemu's screenshot treats an input's first
+    frame, with or without the idle stop.
+  - In these runs the control kept the stream open by touching it before each input; with a
+    1 s idle time a long round could still have closed it, which would shrink the difference
+    measured below, not create it. The test's control now sets `AGEMU_ANDROID_STREAM_IDLE_S=0`.
+- Emulator assumption (`TestDeviceStreamReopenGap`, see Screenshots): 150 new subscriptions on
+  a static screen, a blinking cursor and the running stopwatch; 68 had a frame posted before
+  their first message; no frame was missed. (On the 37 fps stopwatch a later frame always comes,
+  so most of the evidence is the 100 cursor subscriptions.)
+- 1000 stops and reopens (`TestDeviceStreamSoak`, 200 ms idle, on static Settings): emulator
+  threads 78 -> 77, footprint 3036 -> 3047 MB (`footprint`; 3036-3054 MB at the checkpoints
+  every 100 cycles), first message median 136 ms, max 495 ms.
+
+**The first call after a stop.** CLI wall time with `AGEMU_ANDROID_STREAM_IDLE_S=2` and 4 s
+without calls before each sample, interleaved ABBAABBA (the daemon trace shows which path served
+each screenshot):
+- Launcher home (the stream stops): the first screenshot took 44.5 ms (24.7-232.7) against
+  35.6 ms (19.3-87.9) with the stream open, n=12 each, load 69-117. That is +9 ms (median). It
+  reads the framebuffer. So does a second screenshot right after it, because the reopened
+  subscription's first message has not arrived yet.
+- Static Settings (the stream stays open): 17.0 ms (14.1-59.7) against 20.6 ms (15.4-84.8),
+  n=6 each, served from the stream in both.
+- **An input that reopens the stream, then a screenshot at once is slower** (in-process, both
+  pairs of `TestDeviceStreamReopenFresh` above): median 498 ms against 261 ms with the stream
+  kept open, mean 417 against 318 ms, n=64 each (37-718 and 61-717 ms). The pairs differed: 615
+  against 248 ms in the first, 311 against 307 ms in the second. Over 500 ms: 32 of 64 against
+  13 of 64. After a reopen the screenshot more often waited for the transition to settle, and
+  it returned fewer pre-input-looking frames (12 against 20 of 64): latency traded for
+  freshness, not a loss of correctness. With the current rule this path runs only after the
+  screen was still posting frames 30 s after the last call.
+- On a screen that keeps animating, both read the framebuffer: the copy is never current while
+  frames keep coming (by design; not measured here).
+
+Two choices keep the first call cheap. A seq-1 first message counts as a posted frame, so an
+input's first frame can arrive in it. In an earlier version every first message counted as
+generated before the input, so a tap's screenshot waited for a second frame (tap then
+screenshot: 295-894 ms, against 110-550 ms with the stream open, n=4). And a screen that is
+static at the check keeps its subscription, so its first screenshot after idle is served from
+the copy as before.
+
+`scripts/e2e-android.sh` passed 20/20 with `AGEMU_ANDROID_STREAM_IDLE_S=1` (first version of
+the rule). With the current rule (2026-11-07, `agemu-lab`, compressed baseline) it passed 20/20
+with the default and with `AGEMU_ANDROID_STREAM_IDLE_S=1`. One more pair of
+`TestDeviceStreamReopenFresh` runs, 16 rounds each, back to back at load about 13 (a smoke test,
+not interleaved): median 319 ms (72-841) with the idle stop against 416 ms (79-765) with
+`AGEMU_ANDROID_STREAM_IDLE_S=0`, 4 pre-input-looking frames in each, 0 stale.
+
 ### Earlier supplementary run: `AGEMU_ANDROID_GPU=host` (previous version, 2026-11-05)
 
 These are the cheap operations the previous version measured (22:11–22:16, load 40–230, from a fresh reset) with the host GPU (gfxstream). They are faster, mostly because
@@ -495,7 +660,14 @@ boot and reset rows of this run did not complete; the cold boot hung.
 - **Tap, swipe and key return when the input is queued.** `agemu tap` returns once the emulator has queued the touch; `agemu key` once InputManager has queued the key. `adb shell input tap/keyevent` waits until the app has handled the event. Agents should follow them with `wait` or `ui` (milliseconds) or `screenshot` (which waits for the input's frame). `type` returns after the app's UI thread has applied the text; `launch` after the activity has drawn, like `am start -W`.
 - **Back-to-back text changes are bound by the app.** `ACTION_SET_TEXT` and the cursor read run on the app's UI thread. Idle, a `type` takes 5–10 ms in the agent; issued while the app is still redrawing the previous change (software rendering on a loaded host), it waits 16–130 ms for the UI thread.
 - **Standby keeps guest RAM allocated.** A device in standby uses no CPU, but the paused emulator keeps its guest RAM (about 2 GB) on the host. Run `shutdown` twice, or set `AGEMU_ANDROID_STANDBY=0`, to free it.
-- **Disk.** One baseline snapshot is about 2 GB (`ram.bin` is the full guest RAM). The AVD's userdata qcow2 grows to about 3 GB. `ANDROID_SNAPSHOT_COMPRESS=1` (via `AGEMU_ANDROID_SNAPSHOT_COMPRESS=1`) cuts the snapshot to about 40 % at a similar load time.
+- **Disk.** One baseline snapshot is about 2 GB (`ram.bin` is the full guest RAM). The AVD's userdata qcow2 grows to about 3 GB. `AGEMU_ANDROID_SNAPSHOT_COMPRESS=1` (the emulator's `ANDROID_SNAPSHOT_COMPRESS=1`) saves `ram.bin` LZ4-compressed, and `0` forces raw. Unset, the emulator decides: emulator 37.1 can turn compression on by itself ("Enabling RAM compression: only %u MB of free RAM", "snapshot is on HDD"). Measured on 2026-11-06, while other sessions were writing to the same disk (load average 4-11, 6.5-7.9 GB of swap in use):
+  - **Disk:** `ram.bin` 0.83-0.86 GB instead of 2.04 GB (58-59% less).
+  - **Reset: depends on the host's disk.** Both snapshots were loaded alternately in one emulator, 14 loads each: 1.77 s compressed against 2.25 s raw (medians; every compressed load was faster than every raw load). But in the one raw round with a fast disk (its baseline save took 3.1 s, against 7.8 s in the other raw round), raw resets took 1.16-1.78 s (median 1.36 s), faster than any compressed load measured (1.61 s at best). On a quiet disk the gain can vanish or reverse.
+  - **Powered-off boot:** 5.64-6.04 s compressed against 5.00-5.61 s raw (4 boots each), but the compressed boots ran at about twice the host load of the raw ones, so the size of the penalty is not established.
+  - **Cost:** about 3 CPU-seconds more per load. The emulator used 5.6 instead of 2.7 CPU-seconds per load (medians), because LZ4 decompresses on a thread pool (about 3 cores for 1.7 s).
+  - **Memory:** unchanged (emulator footprint after resets, 10 per format). Both formats restore every guest page.
+  - **Guest:** coarse checks found no difference: uptime and boot count continued, the crash buffer stayed empty, the kernel console was clean on 4 compressed loads, and one Settings, typing and screenshot pass behaved the same. Guest RAM was not compared byte for byte.
+  - It stays opt-in, for a host that is short of disk.
 - **Rotation is not handled.** Profiles are portrait; a landscape app or device rotation is not mapped.
 - **Emulator features are part of a snapshot.** Starting the emulator with a `-feature` set that differs from the snapshot's makes it print "different emulator features" and **delete** the snapshot, then cold boot. Do not pass `-feature` flags through `AGEMU_ANDROID_EMULATOR_FLAGS`.
 - **The measurements ran on a shared, often saturated host.** The M2 Pro with 16 GB shared the machine with another emulator, iOS simulators, a browser and other sessions; load averages ranged from 3 to 450 and swap was nearly full during this round. Absolute numbers are noisy (see the p95 columns and the run times listed with the table); both sides of each row ran back to back under the same conditions.

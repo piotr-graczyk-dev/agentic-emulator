@@ -11,10 +11,15 @@ package ios
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +56,24 @@ var leanJobs = []string{
 	"com.apple.intelligenceplatformd", "com.apple.modelcatalogd",
 	// Watch faces, Screen Time, iCloud Mail, the music library.
 	"com.apple.nanotimekitcompaniond", "com.apple.ScreenTimeAgent", "com.apple.icloudmailagent", "com.apple.itunescloudd",
+	// Settings sync to a paired Apple Watch. Pairing itself (nanoregistryd) and WatchConnectivity
+	// (wcd) keep running. The other watch sync jobs (NPKCompanionAgent, bulletindistributord,
+	// addressbooksyncd, eventkitsyncd, appconduitd, companionappd) are not here: nanoregistrylaunchd
+	// turns them back on and starts them at every boot.
+	"com.apple.nanoprefsyncd.2",
+	// Continuity with the user's other devices (Handoff discovery, iPhone Mirroring widgets) and CarPlay.
+	"com.apple.rapportd", "com.apple.replicatord", "com.apple.carkitd",
+	// Screen Time usage tracking and Ask to Buy.
+	"com.apple.UsageTrackingAgent", "com.apple.askpermissiond",
+	// Shared with You, Memoji, Find My, Personal Voice. (Not FinanceKit's financed: without it
+	// passd, Wallet and Apple Pay, crashed every 20 s.)
+	"com.apple.sociallayerd", "com.apple.avatarsd", "com.apple.findmy.findmylocated", "com.apple.voicebankingd",
+	// Maps turn-by-turn navigation (MapKit search and directions use geod, which keeps running).
+	"com.apple.navd",
+	// Safari password monitoring and iCloud bookmark sync; Siri suggestion feedback.
+	"com.apple.Safari.passwordbreachd", "com.apple.SafariBookmarksSyncAgent", "com.apple.parsec-fbf",
+	// Image Playground and Genmoji, HomeKit events, diagnostic extensions for sysdiagnose.
+	"com.apple.generativeexperiencesd", "com.apple.homeeventsd", "com.apple.diagnosticextensionsd",
 }
 
 func leanOn() bool {
@@ -62,12 +85,13 @@ func leanOn() bool {
 }
 
 // leanDevice brings a booted agemu simulator to the lean setting (or, with AGEMU_IOS_LEAN=0,
-// back to the full one) in the background: the first time on a device it takes ~10 s (64
-// launchctl runs), and the device works meanwhile. A device is checked once per daemon and
-// again after every cold boot; a request that arrives while the device is being reconciled runs
-// once that finishes. After a cold boot of a lean device the wallpaper gallery is stopped too,
-// on its own schedule (a newer boot restarts it). Failures are logged and leave the device
-// unchecked, so the next boot tries again: a device that is not lean still works.
+// back to the full one) in the background: the first time on a device it takes 10-20 s (two
+// launchctl runs per job; 36 s on a busy host), and the device works meanwhile. A device is
+// checked once per daemon and again after every cold boot; a request that arrives while the
+// device is being reconciled runs once that finishes. After a cold boot of a lean device the
+// wallpaper gallery is stopped too, on its own schedule (a newer boot restarts it). Failures are
+// logged and leave the device unchecked, so the next boot tries again: a device that is not lean
+// still works.
 func (b *Backend) leanDevice(d simDevice, cold bool) {
 	if !managed(d.Name) {
 		return
@@ -188,11 +212,7 @@ func leanMismatches(disabled map[string]bool, on bool) []string {
 
 // launchctl runs the simulator's own launchctl in the device.
 func (b *Backend) launchctl(ctx context.Context, udid string, args ...string) (string, error) {
-	var r struct {
-		Stdout string `json:"stdout"`
-	}
-	err := b.call(ctx, "spawn", map[string]any{"udid": udid, "path": "bin/launchctl", "args": args, "timeoutMs": 10000}, &r)
-	return r.Stdout, err
+	return b.spawn(ctx, udid, "bin/launchctl", args...)
 }
 
 var disabledLine = regexp.MustCompile(`"([^"]+)"\s*=>\s*disabled`)
@@ -206,19 +226,28 @@ func disabledJobs(out string) map[string]bool {
 	return m
 }
 
-// stopWallpaperGallery stops PosterBoard's wallpaper extensions after a cold boot. PosterBoard
-// starts one per wallpaper in its gallery (6-16 processes of 35-75 MB, each rendering for 1-3
-// s of CPU) and keeps them. iOS relaunches the one the lock screen shows when it is needed (the
-// lock screen drew normally right after); the others stay stopped. They usually start within
-// 3 s of the device being ready, in some boots later, hence passes 3, 8, 20 and 45 s after the
-// device is ready. A newer cold boot of the device (gen) or the backend closing ends it.
+// stopWallpaperGallery stops PosterBoard's wallpaper gallery after a cold boot. PosterBoard
+// starts one extension per wallpaper provider in its gallery (9-15 processes of 35-75 MB, each
+// rendering for 1-3 s of CPU; on the first boot of a new device up to 21) and keeps them; they
+// serve the wallpaper gallery, which an app under test does not open. The providers of the
+// posters in use keep running: the lock screen's (in iOS 26.5 the default is
+// com.apple.MercuryPoster) and any contact poster's. PosterBoard's data store says which they
+// are (see postersInUse). Nothing is stopped until the store has been read, and only the
+// gallery's own extensions are (see galleryToStop).
+// After the first 45 s stopped gallery extensions stayed stopped, also through lock and unlock,
+// and the lock screen drew its wallpaper, clock and notifications. The passes run on the schedule
+// of nextGalleryPass. A newer cold boot of the device (gen) or the backend closing ends it.
 func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
-	n := 0
-	for _, wait := range []time.Duration{3 * time.Second, 5 * time.Second, 12 * time.Second, 25 * time.Second} {
+	ready := time.Now()
+	stopped := map[string]int{}
+	var keep map[string]bool
+	var keepErr error
+	at, more := nextGalleryPass(0, false, false)
+	for more {
 		select {
 		case <-b.bg.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(time.Until(ready.Add(at))):
 		}
 		b.mu.Lock()
 		current := b.wallGen[d.UDID] == gen
@@ -226,27 +255,136 @@ func (b *Backend) stopWallpaperGallery(d simDevice, gen int) {
 		if !current {
 			return
 		}
-		out, err := exec.Command("ps", "-axo", "pid=,ppid=,command=").Output()
+		// ww: the provider is in the extension's launch arguments, so the command lines must not
+		// be cut (ps cuts them to the terminal's width when it has one).
+		out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
 		if err != nil {
 			log.Printf("ios lean %s: ps: %v", d.Name, err)
 			return
 		}
-		for _, pid := range wallpaperExtensions(string(out), d.UDID) {
-			if syscall.Kill(pid, syscall.SIGTERM) == nil {
+		exts, data := wallpaperExtensions(string(out), d.UDID)
+		if keep == nil && len(exts) > 0 {
+			// Read once per boot. The first boot of a new device writes the lock screen's poster
+			// about 25 s after the device is ready (later on a busy host), so until then a later
+			// pass tries again.
+			keep, keepErr = postersInUse(b.bg, data)
+		}
+		n := 0
+		for _, e := range galleryToStop(exts, keep) {
+			if syscall.Kill(e.pid, syscall.SIGTERM) == nil {
+				stopped[e.provider]++
 				n++
 			}
 		}
+		at, more = nextGalleryPass(at, keep != nil, n > 0)
 	}
-	if n > 0 {
-		log.Printf("ios lean %s: stopped %d wallpaper gallery extensions", d.Name, n)
+	if keep == nil && keepErr != nil {
+		log.Printf("ios lean %s: wallpaper gallery left running: %v", d.Name, keepErr)
+	}
+	if len(stopped) > 0 {
+		log.Printf("ios lean %s: stopped %s; kept the posters in use: %s", d.Name, stoppedSummary(stopped), strings.Join(sortedKeys(keep), ", "))
 	}
 }
 
-var posterExtension = regexp.MustCompile(`/ExtensionKit/Extensions/[^/]*Poster[^/]*\.appex/`)
+// galleryPasses are the fixed passes of stopWallpaperGallery, as times after the device is
+// ready: the gallery usually starts within 3 s, in some boots later.
+var galleryPasses = []time.Duration{3 * time.Second, 8 * time.Second, 20 * time.Second, 45 * time.Second}
 
-// wallpaperExtensions finds, in `ps -axo pid=,ppid=,command=` output, the wallpaper extension
-// processes that the simulator's launchd_sim started.
-func wallpaperExtensions(ps, udid string) []int {
+const (
+	galleryRetryEvery = 15 * time.Second
+	galleryRetryUntil = 5 * time.Minute
+)
+
+// nextGalleryPass returns when the pass after the one at last runs (as a time after the device is
+// ready), or false when the stop is done. After the fixed passes it goes on every 15 s, up to 5
+// min after ready, while the lock screen's providers are not known yet (the first boot of a new
+// device) or the last pass stopped an extension (the gallery was still starting).
+func nextGalleryPass(last time.Duration, known, stoppedSome bool) (time.Duration, bool) {
+	for _, p := range galleryPasses {
+		if p > last {
+			return p, true
+		}
+	}
+	if (known && !stoppedSome) || last+galleryRetryEvery > galleryRetryUntil {
+		return 0, false
+	}
+	return last + galleryRetryEvery, true
+}
+
+// notGallery are poster providers that live next to the gallery's but serve something an app can
+// show: contact posters (CNContactViewController, the call screen) and Messages' conversation
+// backgrounds. They are never stopped. The Photos provider is also a gallery wallpaper, but it
+// renders photo contact posters too. (Only MonogramPosterExtension was seen running; the others
+// are kept by design.)
+var notGallery = map[string]bool{
+	"com.apple.ContactsUI.MonogramPosterExtension":           true,
+	"com.apple.AvatarUI.AvatarPosterExtension":               true,
+	"com.apple.PhotosUIPrivate.PhotosPosterProvider":         true,
+	"com.apple.transcriptBackgroundPoster.DynamicExtension":  true,
+	"com.apple.transcriptBackgroundPoster.GradientExtension": true,
+}
+
+// galleryToStop picks the gallery extensions to stop: those whose provider is known, is not
+// one of the posters in use (keep) and is not in notGallery. With keep nil (the data store has not
+// been read) it picks none.
+func galleryToStop(exts []galleryExtension, keep map[string]bool) []galleryExtension {
+	if keep == nil {
+		return nil
+	}
+	var stop []galleryExtension
+	for _, e := range exts {
+		if e.provider != "" && !keep[e.provider] && !notGallery[e.provider] {
+			stop = append(stop, e)
+		}
+	}
+	return stop
+}
+
+// stoppedSummary formats stopped providers as "13 wallpaper gallery extensions (a, b x2, ...)".
+func stoppedSummary(stopped map[string]int) string {
+	n := 0
+	var ps []string
+	for _, p := range sortedKeys(stopped) {
+		n += stopped[p]
+		if stopped[p] > 1 {
+			p += " x" + strconv.Itoa(stopped[p])
+		}
+		ps = append(ps, strings.TrimPrefix(p, "com.apple."))
+	}
+	return fmt.Sprintf("%d wallpaper gallery extensions (%s)", n, strings.Join(ps, ", "))
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// posterExtension matches the executable of a wallpaper gallery extension: inside the simulator
+// runtime's root, in the places the gallery's providers live in iOS 26.5:
+// /System/Library/ExtensionKit/Extensions, poster apps (/Applications/EmojiPoster.app/Extensions,
+// /System/Library/CoreServices/AegirProxyApp.app/Extensions) and AmbientUI.framework/PlugIns
+// (StandBy). An app's own extensions (in the device's data directory) and posters inside other
+// frameworks (ContactsUI's MonogramPosterExtension) do not match.
+var posterExtension = regexp.MustCompile(`^/(?:[^/]+/)*[^/]+\.simruntime/Contents/Resources/RuntimeRoot/` +
+	`(?:Applications/[^/]+\.app/Extensions|System/Library/CoreServices/[^/]+\.app/Extensions|` +
+	`System/Library/ExtensionKit/Extensions|System/Library/PrivateFrameworks/AmbientUI\.framework/PlugIns)/` +
+	`[^/]*Poster[^/]*\.appex/`)
+
+// galleryExtension is a running wallpaper extension and the provider (its bundle identifier)
+// it serves.
+type galleryExtension struct {
+	pid      int
+	provider string
+}
+
+// wallpaperExtensions finds, in `ps -axwwo pid=,ppid=,command=` output, the wallpaper gallery
+// extension processes (posterExtension) that the simulator's launchd_sim started, and the
+// device's data directory (from launchd_sim's argument).
+func wallpaperExtensions(ps, udid string) (exts []galleryExtension, data string) {
 	type proc struct {
 		ppid int
 		cmd  string
@@ -265,19 +403,94 @@ func wallpaperExtensions(ps, udid string) []int {
 		}
 		cmd := strings.Join(f[2:], " ")
 		procs[pid] = proc{ppid, cmd}
-		// launchd_sim's argv[0] is "launchd_sim"; its argument is the device's bootstrap plist.
+		// launchd_sim's argv[0] is "launchd_sim"; its argument is the device's bootstrap plist,
+		// <device>/data/var/run/launchd_bootstrap.plist.
 		if (f[2] == "launchd_sim" || strings.HasSuffix(f[2], "/launchd_sim")) && strings.Contains(cmd, udid) {
 			root = pid
+			arg := strings.TrimSpace(strings.TrimPrefix(cmd, f[2]))
+			if i := strings.Index(arg, "/"+udid+"/data/"); i >= 0 {
+				data = arg[:i+len("/"+udid+"/data")]
+			}
 		}
 	}
 	if root == 0 {
-		return nil
+		return nil, ""
 	}
-	var pids []int
 	for pid, p := range procs {
 		if p.ppid == root && posterExtension.MatchString(p.cmd) {
-			pids = append(pids, pid)
+			exts = append(exts, galleryExtension{pid, launchService(p.cmd)})
 		}
 	}
-	return pids
+	return exts, data
+}
+
+var launchArguments = regexp.MustCompile(`-LaunchArguments ([A-Za-z0-9+/=_-]+)`)
+
+// launchService reads the extension's bundle identifier from its command line: ExtensionKit
+// passes `-LaunchArguments <base64 JSON>` with a "serviceName". It returns "" when there is none.
+func launchService(cmd string) string {
+	m := launchArguments.FindStringSubmatch(cmd)
+	if m == nil {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(m[1])
+	if err != nil {
+		if raw, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(m[1], "=")); err != nil {
+			return ""
+		}
+	}
+	var args struct {
+		ServiceName string `json:"serviceName"`
+	}
+	if json.Unmarshal(raw, &args) != nil {
+		return ""
+	}
+	return args.ServiceName
+}
+
+// sqlite3 is the host's SQLite shell, which postersInUse runs read-only on the device's poster
+// store (a fixed path, not whichever sqlite3 comes first in the daemon's PATH).
+const sqlite3 = "/usr/bin/sqlite3"
+
+// postersInUse reads PosterBoard's data store in the device's data directory and returns the
+// providers of the posters in use: the lock screen's, and those of contact posters (the incoming
+// call role; none was in the stores checked, so that part is kept by design). The store is a
+// SQLite database in a directory numbered by its schema version (61 on iOS 26.5); the newest one
+// is read with the host's sqlite3 in read-only mode (no ~/.sqliterc). Any failure is an error,
+// and then nothing is stopped.
+func postersInUse(ctx context.Context, data string) (map[string]bool, error) {
+	if data == "" {
+		return nil, fmt.Errorf("the device's data directory is not known")
+	}
+	dbs, _ := filepath.Glob(filepath.Join(data, "Library/Application Support/PRBPosterExtensionDataStore/*/PBFPosterExtensionDataStoreSQLiteDatabase.sqlite3"))
+	if len(dbs) == 0 {
+		return nil, fmt.Errorf("no PosterBoard data store in %s", data)
+	}
+	version := func(db string) int {
+		v, _ := strconv.Atoi(filepath.Base(filepath.Dir(db)))
+		return v
+	}
+	sort.Slice(dbs, func(i, j int) bool { return version(dbs[i]) > version(dbs[j]) })
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, sqlite3, "-readonly", "-batch", "-init", os.DevNull, "-list", "-noheader", "-separator", "|", dbs[0],
+		"SELECT DISTINCT m.roleId, p.providerId FROM poster p JOIN posterRoleMembership m ON m.posterUUID = p.UUID "+
+			"WHERE m.roleId IN ('PRPosterRoleLockScreen', 'PRPosterRoleIncomingCall')").Output()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %v", dbs[0], err)
+	}
+	keep := map[string]bool{}
+	lockScreen := false
+	for _, l := range strings.Split(string(out), "\n") {
+		role, provider, ok := strings.Cut(strings.TrimSpace(l), "|")
+		if !ok || provider == "" {
+			continue
+		}
+		keep[provider] = true
+		lockScreen = lockScreen || role == "PRPosterRoleLockScreen"
+	}
+	if !lockScreen {
+		return nil, fmt.Errorf("no lock screen poster in %s yet", dbs[0])
+	}
+	return keep, nil
 }

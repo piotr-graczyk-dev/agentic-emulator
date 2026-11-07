@@ -82,7 +82,7 @@ func (e *emuClient) enableShm(path string, w, h int) {
 		logf("frame stream shm %s: %v", path+".stream", err)
 		return
 	}
-	e.stream = startFrameStream(e.ctl, ss, path, w, h)
+	e.stream = startFrameStream(e.ctl, ss, path, w, h, streamIdle())
 }
 
 func (e *emuClient) status(ctx context.Context) (*emupb.EmulatorStatus, error) {

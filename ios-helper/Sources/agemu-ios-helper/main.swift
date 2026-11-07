@@ -84,6 +84,7 @@ func describe(_ d: AGDevice) -> [String: Any] {
         "width": Int(px.width),
         "height": Int(px.height),
         "scale": d.screenScale,
+        "dataPath": d.dataPath,
     ]
 }
 

@@ -106,7 +106,7 @@ does not use. All figures were measured on one Apple M2 Pro (16 GB).
 **iOS.** These are the summed processes of one simulator; see
 [docs/IOS.md](docs/IOS.md#lean-simulators).
 
-| per simulator | all services (Simulator default) | agemu, lean |
+| per simulator | all services (Simulator default) | agemu, lean (the previous 32 jobs) |
 |---|---|---|
 | memory, no app / React Native dev app open | 4.0 GB / 4.8 GB | **2.5 GB / 3.9 GB** |
 | idle CPU, no app | 20% of a core | **1.5%** |
@@ -192,14 +192,26 @@ The tools are `devices`, `profiles`, `create`, `boot`, `shutdown`, `reset`, `set
 
 ### Lighter devices
 
-- iOS: agemu turns off 32 launchd jobs an app under test does not use (widgets, Siri, photo
-  analysis, asset downloads, ...) in its simulators, and stops the wallpaper gallery after boot.
-  `AGEMU_IOS_LEAN=0` keeps the full system.
+- iOS: agemu turns off 49 launchd jobs an app under test does not use (widgets, Siri, photo
+  analysis, asset downloads, Continuity, ...) in its simulators, and stops the wallpaper
+  gallery (all but the lock screen's wallpaper) after boot: 1.97 GB 2 minutes after
+  agent-ready, against 2.42 GB with the previous lean setting of 32 jobs (medians of 4 boots
+  each). `AGEMU_IOS_LEAN=0` keeps the full system.
 - Android: `-gpu host` by default, and 14 Google apps are turned off in the baseline (Play
   services and the Play Store stay). `AGEMU_ANDROID_LEAN=0` keeps them;
   `AGEMU_ANDROID_GPU=auto` goes back to software rendering.
 - Android: `AGEMU_ANDROID_ANIMATIONS=0` turns system animations off, so screen changes finish
   at once. It is off by default.
+- Android: after 30 s without calls agemu stops its frame stream if the screen is still
+  changing, and the next call restarts it (`AGEMU_ANDROID_STREAM_IDLE_S`; see
+  [docs/ANDROID.md](docs/ANDROID.md#frame-stream-idle-stop-2026-11-06-night)).
+- iOS: `AGEMU_IOS_ANIMATIONS=0` shortens UIKit and SwiftUI animations (push, back, tab switch,
+  alert, `UIView` and SwiftUI animations; durations and delays x0.05). agemu applies it after
+  each boot it makes and before the first launch; apps launched after that use it, SpringBoard
+  from the next boot. From a tap to the end of the transition, summed over a test app's screens:
+  4.8x less time (SwiftUI) and 7.4x (UIKit); a 15-call agent flow took 6.9 s instead of 13.3 s
+  (medians of 5 runs each). Sheets keep their speed and timers do not change. It is off by
+  default; see [docs/IOS.md](docs/IOS.md#fast-animations-opt-in).
 
 These are daemon settings: set them where `agemu` first starts the daemon.
 

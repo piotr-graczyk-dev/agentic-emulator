@@ -251,20 +251,46 @@ A booted iOS 26.5 simulator runs the whole iOS userland. Measured headless on
 agemu's own helper and daemon take 21 MB and 0.1% of a core. Most of the rest serves features an
 app under test does not use, so agemu turns them off in its own simulators (`agemu-*`):
 
-1. **32 launchd jobs are off** (`internal/ios/lean.go`, grouped by feature). agemu runs
+1. **49 launchd jobs are off** (`internal/ios/lean.go`, grouped by feature). agemu runs
    `launchctl disable` inside the device, so the override persists and later boots start without
    the jobs, and `launchctl bootout` for the ones running at that moment. It runs in the background
-   after boot. The first time on a device it takes about 10 s (the helper runs launchctl in the
-   device, 8 at a time), and agemu reads the overrides back before it counts the device as lean.
+   after boot. The first time on a device it takes about 10-20 s, 36 s on a host at load 90 (the
+   helper runs launchctl in the device, 8 at a time), and agemu reads the overrides back before it
+   counts the device as lean.
    Later boots check it with one call. `simctl boot --disabledJob` would be the documented way, but on
-   CoreSimulator 1051 it had no effect: 25 of the 32 jobs still ran.
+   CoreSimulator 1051 it had no effect: 25 of the first 32 jobs still ran. Six Apple Watch sync
+   jobs (`NPKCompanionAgent`, `bulletindistributord`, `addressbooksyncd`, `eventkitsyncd`,
+   `appconduitd`, `companionappd`) are not in the list: `nanoregistrylaunchd` turned them back on
+   and started them at every boot (76 MB together), also seconds after agemu had turned them off.
 2. **The wallpaper gallery is stopped after a cold boot.** PosterBoard starts one extension per
-   wallpaper in its gallery (6-16 processes of 35-75 MB) within seconds of boot. agemu stops
-   them 3, 8, 20 and 45 s after the device is ready, and iOS relaunches the one the lock screen needs: after
-   a stop, the lock screen drew its wallpaper, clock and notifications. PosterBoard itself stays
-   on. With PosterBoard disabled, the lock screen was not drawn: the UI tree reported the lock
-   screen while the screenshot showed the home screen. PosterBoard starts some gallery
-   extensions again later for a while, and iOS ends them again.
+   wallpaper provider in its gallery (9-15 processes of 35-75 MB) within seconds of boot and keeps
+   them. They live in several places in the runtime (`/System/Library/ExtensionKit/Extensions`,
+   poster apps such as `/Applications/EmojiPoster.app/Extensions` and
+   `/System/Library/CoreServices/AegirProxyApp.app/Extensions`, `AmbientUI.framework/PlugIns`).
+   agemu stops them 3, 8, 20 and 45 s after the device is ready, and then every 15 s (up to 5 min)
+   while a pass still found one, except the providers of the posters in use, which it reads
+   from PosterBoard's data store in the device: the lock screen's (`com.apple.MercuryPoster` on
+   the iOS 26.5 iPhone 17 Pro, iPhone SE and iPad mini simulators checked) and those of contact
+   posters (the incoming-call role; the stores checked had none). agemu reads the store with the
+   host's `/usr/bin/sqlite3` in read-only mode; if that fails, or the store has no lock screen
+   poster yet, nothing is stopped. It stops only extensions in those places: not an app's own
+   extensions, not Messages' backgrounds, and not the contact poster providers.
+   `MonogramPosterExtension` was seen running (the contact poster editor stayed up through the
+   passes); `AvatarPosterExtension` and `PhotosPosterProvider` are kept by design, the latter
+   although it is also a gallery wallpaper, because it renders photo contact posters too. The
+   daemon log names the providers it stopped. In the first 45 s PosterBoard starts some stopped
+   providers again, so a boot takes 13-27 stops;
+   after that they stayed stopped, also through two lock and unlock cycles in 8 minutes, and the
+   lock screen drew its wallpaper, clock and the app's notification. On the first boot of a new
+   iPhone 17 Pro PosterBoard wrote the lock screen's poster to its store 26 s after the device was
+   ready, while the gallery was starting (up to 21 extensions); on new iPhone SE and iPad mini
+   devices (67-98 s to agent-ready) it was there before. Until the store has it nothing is
+   stopped, and the passes go on until it does. Stopping the lock screen's own provider (what
+   agemu did before, when it matched only `ExtensionKit/Extensions`) made iOS relaunch it and
+   PosterBoard start part of the gallery again. PosterBoard itself stays
+   on: with PosterBoard disabled, the lock screen was not drawn (the UI tree reported the lock
+   screen while the screenshot showed the home screen). `pluginkit -e ignore` on a gallery provider
+   did not keep PosterBoard from starting it.
 
 **What a lean simulator does not do.** These need `AGEMU_IOS_LEAN=0`; the jobs are back from the
 next boot:
@@ -273,15 +299,39 @@ next boot:
 - on-demand system assets (downloadable fonts, dictation and linguistic models). On a first boot
   `mobileassetd` would also stage about 1 GB into the device;
 - News, HomeKit, Screen Time, significant locations and Apple Intelligence models;
-- photo analysis (memories, people), iCloud Mail and the music library.
+- photo analysis (memories, people), iCloud Mail and the music library;
+- settings sync to a paired Apple Watch, Continuity with other devices and CarPlay;
+- Screen Time usage tracking, Ask to Buy, Shared with You, Memoji, Find My, Personal Voice,
+  Image Playground and Genmoji;
+- Maps turn-by-turn navigation, Safari password monitoring and iCloud bookmark sync.
 
-HealthKit (`healthd`), CoreSpotlight indexing, the share sheet, Wallet, notifications and push
-stay on.
+HealthKit (`healthd`), CoreSpotlight indexing, the share sheet, Wallet and Apple Pay (`passd`),
+notifications and push, Game Center, StoreKit, CloudKit, Watch pairing and WatchConnectivity
+(`nanoregistryd`, `wcd`), MapKit (`geod`) and Sign in with Apple stay on: their jobs are not in
+the list. Game Center, CloudKit, Sign in with Apple and the share sheet were not exercised on this
+setting.
 
-**Measured.** The same simulator, booted 3 times each way, interleaved, with the zuapp flow (see
-"A real app" below) run right after boot and once more, then the app left open:
+Checked with a probe app, on the lean device only (no check was repeated on the previous lean
+setting or with all jobs, so a difference against them is not ruled out). The probe ran on an
+iPhone 17 Pro with a binary that listed 55 jobs; the device turned 6 of them (the Watch sync jobs
+above) back on at every boot, so the state matched the 49 jobs. With the gallery stop: a
+local notification with permission granted shows as a banner in the foreground (through the app's
+`willPresent`); in the background it is delivered (`getDeliveredNotifications`) and SpringBoard's
+UI tree showed its banner in 1 of 2 tries; it is listed on the lock screen. Contacts and EventKit
+(calendar and reminders) read back what the app wrote; `MKLocalSearch` and `MKDirections` return
+results; `PKPaymentAuthorizationController` presents the Apple Pay sheet with the simulated card;
+a StoreKit purchase opens the Apple Account sign-in and fails with "cancelled" when it is
+cancelled (`Product.products` returns none for unknown identifiers); `WCSession` activates (not
+paired); the software keyboard and the emoji keyboard type into a field; the contact poster editor
+(Contacts, Contact Photo & Poster) draws. `PKAddPassesViewController` was not checked (it needs a
+signed pass), nor the share sheet, a photo contact poster opened in the first minute after boot,
+remote notifications or Live Activities.
 
-| | all jobs (`AGEMU_IOS_LEAN=0`) | lean |
+**Measured with the previous lean setting** (32 jobs and the old gallery stop). The same
+simulator, booted 3 times each way, interleaved, with the zuapp flow (see "A real app" below) run
+right after boot and once more, then the app left open:
+
+| | all jobs (`AGEMU_IOS_LEAN=0`) | previous lean (32 jobs) |
 |---|---|---|
 | memory, the app open | 4.82 GB | **3.90 GB** |
 | processes | 219 | 169 |
@@ -291,12 +341,176 @@ stay on.
 | the flow | 25.7 s | 25.9 s (the app's pace) |
 
 Without an app, in single runs: 4.0 GB and 20% of a core idle with all jobs; 2.5 GB and 1.5%
-lean. The first minute after a lean boot took 26-116% of a core, depending on how many
-wallpaper extensions that boot started.
+with the previous lean setting. The first minute after such a boot took 26-116% of a core,
+depending on how many wallpaper extensions that boot started.
 
-All 11 runs of the zuapp flow on lean simulators passed; 1 of them needed a retry (a tap with
-no effect, see "Taps that did nothing"). With all jobs, 9 of 10 passed and 1 failed: right after
-boot the app showed an empty screen for 30 s.
+All 11 runs of the zuapp flow on simulators with the previous lean setting passed; 1 of them
+needed a retry (a tap with no effect, see "Taps that did nothing"). With all jobs, 9 of 10 passed
+and 1 failed: right after boot the app showed an empty screen for 30 s.
+
+**The current lean setting** (49 jobs and the lock-screen-aware gallery stop) against the
+previous one (32 jobs and the old gallery stop), on one `iphone-17-pro`, 4 pairs of cold boots in
+ABBA order (2026-11-06, 22:28-22:53; host load 19-96 at the start of a run; medians, range in
+brackets; `.lab/meter.py` summed over the device's processes, its CPU counting processes that
+exit inside the window). The new arm ran a binary that listed 55 jobs, in the equivalent state
+described above; the final 49-job binary was measured only in single first boots:
+
+| | previous lean: 32 jobs, old gallery stop (n=4) | lean: 49 jobs, gallery stop (n=4) |
+|---|---|---|
+| memory 2 min after agent-ready | 2.42 GB [2.36-2.48] | **1.97 GB** [1.88-1.99] (-19%) |
+| memory, AgemuTestApp open (the launch added 1-2 processes) | 2.41 GB (n=1) | **2.00 GB** [1.94-2.05] (n=2) |
+| memory, AgemuTestApp open (the launch added 5-13 processes) | 2.61 GB [2.50-2.67] (n=3) | **2.14 GB** [2.13-2.15] (n=2) |
+| processes 2 min after agent-ready | 148 | 122 |
+| simulator CPU in the first minute after agent-ready | 91 s [34-95] | 63 s [46-98] |
+| cold boot until agent-ready | 13.0 s [9.8-74.3] | 11.6 s [8.8-14.4] |
+
+Every run of the new setting was at least 360 MB below every run of the previous one. A
+first-minute CPU saving was not shown: in 2 of the 4 pairs the new setting took more (98 s against
+95 s; 57 s against 34 s, where the 34 s run is a boot that took 74 s at host load 50 and moved its
+work into the second minute, 81% of a core there). Stopped gallery extensions count in it: the new
+setting stops 13-19 per boot, and they ran for a while first (6-37 s of CPU of exited processes in
+the minute, against 7-14 s). These runs also stopped `PhotosPosterProvider`, which is kept now
+(one more extension of 35-75 MB may stay running).
+
+Turning off 18 more jobs (Game Center, weather, Mail, Exchange accounts, sleep
+schedule, family, Managed Settings, Watch pairing, ...) brought it to 1.57 GB but broke the
+device: SpringBoard, healthd and mobiletimerd spun at 4.7 cores, the boot took 2 minutes and
+apps did not launch. FinanceKit's `financed` off made passd (Wallet) crash every 20 s.
+
+## Fast animations (opt-in)
+
+iOS has no user setting that turns animations off. UIKit, however, multiplies the duration of
+its animations by `UIAnimationDragCoefficient()`: Simulator.app's Debug > Slow Animations makes
+it return 10 (through the `com.apple.UIKit.SimulatorSlowMotionAnimationState` notification
+state). Read from the iOS 26.5 UIKitCore disassembly, the function also returns UIKit's internal
+preference of the same name when that is above 0. UIKit reads its internal preferences (from the
+`com.apple.UIKit` defaults domain) only on internal builds or with the `UIKit/UIPreferences`
+feature flag on, which is why setting the default alone did nothing.
+
+`AGEMU_IOS_ANIMATIONS` takes the values of `AGEMU_ANDROID_ANIMATIONS`: unset, `1`, `on`, `true`
+or `yes` is normal speed; `0` (also `0.0`), `off`, `false` or `no` (and `fast`) makes animations
+as short as iOS allows, a coefficient of 0.05 (UIKit treats 0 as unset); a number between 0.05
+and 1 is taken as the coefficient. Anything else (`nan`, `0.01`, `2`) is logged and leaves
+animations at normal speed. After each boot agemu makes (once the device is ready, before `boot`
+returns; `defaults` needs a booted device) and before the first launch this daemon makes on a
+device, agemu (`internal/ios/animations.go`):
+1. turns the feature flag on with an override file in the device's data directory
+   (`Library/Preferences/FeatureFlags/Domain/UIKit.plist`, read by every simulator process when
+   it starts);
+2. writes the coefficient with `defaults write com.apple.UIKit UIAnimationDragCoefficient` in the
+   device, and posts `com.apple.UIKit.InternalPreferences`, on which running UIKit processes read
+   their internal preferences again.
+
+Apps launched after that use the coefficient. SpringBoard has already started by then, so it
+picks the setting up from the next boot. Without the variable, agemu deletes the coefficient and
+removes the override (checked: no override file, no key, a push back at 1461 ms). The daemon logs
+what it applied, or why it could not (for example a helper that does not report the data
+directory).
+
+Checked end to end on 2026-11-07 (`agemu-iphone-se-3`, lean): a fresh daemon with
+`AGEMU_IOS_ANIMATIONS=0` booted the shut-down device and logged `UIKit animation coefficient 0.05
+(apps launched from now on; SpringBoard from the next boot)`; `defaults read` in the device gave
+0.05 and the override file was there. A daemon without the variable logged `back to normal
+speed` at its first launch, and the key and the file were gone. Time from the `tap`/`key` call to
+the last screen change, from agemu screenshots taken for 3.5 s after it, Settings, 10 rounds per
+arm in blocks of 5 (fast, normal, fast, normal), load average 14-68, median (range): General push
+1195 ms (1166-1811) against 2085 ms (2077-2590) at normal speed; back 199 ms (185-270) against
+988 ms (964-1248).
+
+**Measured** (Apple M2 Pro, `agemu-r2i4`, iOS 26.5, lean). Arms: normal, the feature flag
+alone, and the flag with coefficients 0.2, 0.1 and 0.05, 5 rounds each with the order rotated
+and reversed every round; load average 9-64 (other work on the host). For every step a private
+helper taps the element's center (read from the UI tree) on a screen that has been still for
+600 ms, and reads the time of the last big frame change after the touch from its frame monitor
+(more than 0.4% of a 48x104 pixel grid between two frames; for the 1 s animations, which move a
+small box, the last frame of any size). Each step was then checked in the UI tree. Median
+[range], ms:
+
+| step | normal | flag only | 0.2 | 0.1 | 0.05 |
+|---|---|---|---|---|---|
+| SwiftUI `NavigationStack` push | 1466 [1440-1575] | 1458 | 387 | 283 | 172 [158-199] |
+| back | 542 [530-543] | 535 | 177 | 119 | 93 [83-94] |
+| tab switch / back | 532 / 577 | 525 / 596 | 193 / 181 | 123 / 155 | 159 / 155 |
+| `.alert` appears / OK | 543 / 409 | 545 / 412 | 220 / 147 | 190 / 99 | 177 / 87 |
+| UIKit `pushViewController` / back | 1434 / 532 | 1415 / 521 | 311 / 153 | 191 / 105 | 132 / 88 |
+| `UIAlertController` appears / button | 495 / 430 | 467 / 421 | 145 / 146 | 107 / 100 | 94 / 78 |
+| Settings back to the root (2 panes) | 680 / 738 | 631 / 710 | 257 / 259 | 214 / 193 | 250 / 219 |
+| Settings push General / Accessibility | 2462 / 3233 | 2296 / 2653 | 931 / 1370 | 648 / 1517 | 1190 / 1749 |
+| sheet appears / is dismissed | 580 / 592 | 591 / 575 | 577 / 576 | 579 / 579 | 582 / 577 |
+| 1 s `UIView.animate` / `withAnimation` | 1046 / 1074 | 1043 / 1068 | 244 / 289 | 145 / 189 | 101 / 140 |
+
+Summed per group (normal -> 0.05): the 6 SwiftUI steps 4069 -> 843 ms (4.8x), the 4 UIKit
+steps 2891 -> 392 ms (7.4x), the 2 Settings backs 1418 -> 469 ms (3.0x), the 2 Settings pushes
+5695 -> 2939 ms (1.9x; 0.1: 2.6x). A Settings push is mostly Settings loading the pane; its
+first row also moved after launch, so 1-4 of 5 General pushes per arm opened another pane and
+were left out (normal speed included), so the General push has n=3-4 per arm. The flag alone
+changed nothing (1.0x). 0.05 was not slower than normal speed in any step (sheets: equal); 0.01,
+measured before, made Settings' back slower, so 0.05 is the smallest value accepted. 0.1 beat
+0.05 on all 4 Settings steps; the 0.05 arm ran at the highest mean load (38-42 against 29-30 at
+normal speed), so this may be load or a U-shape. The ratios depend on the 0.4% threshold: counting
+the last frame change of any size, they are 3.6x (SwiftUI), 6.5x (UIKit) and 2.4x (Settings back).
+
+- **Sheets keep their speed** at every coefficient. `SheetResponse` and `SheetDampingRatio`,
+  internal preferences named in UIKitCore, changed nothing either (3 sheets each, 543-588 ms).
+- **An agent flow** of 15 agemu calls (Settings push/back twice, then in the test app push,
+  back, tab and back, alert and OK, both 1 s animations, focus a field, type, enter; each call
+  acting and waiting for its result) took 13.26 s [10.96-20.85] normally, 12.27 s with the flag
+  alone, and 6.87 s [6.23-7.25] at 0.05 (1.9x; medians of sums of call times, 5 runs each). One
+  normal-speed run failed on a Settings mis-tap (a 10 s timeout); over the other 4 the median is
+  12.51 s (1.8x). None of the five 0.05 runs lost the alert tap of the next point; at 0.1 and 0.2,
+  where 2 of 5 runs each lost it, the medians were 12.86 and 7.90 s. These flows ran with the
+  previous daemon on a device set up by hand, not through agemu's boot path.
+- **A tap on a just-presented alert can be lost, at normal speed too.** This is a timing hazard
+  that exists without the setting; fast mode changes when it happens, and it is not shown to be a
+  breakage that only fast mode causes. In a loop of repeated alerts (agemu taps), the first tap
+  on OK was lost in 7 of 12 trials at normal speed and 6 of 12 at 0.05. In the agent flow,
+  `tap --text OK` after `tap --id show-alert --wait-text "Lab alert"` was lost in 4 of 10 runs at
+  0.1 or 0.2, in 1 of 8 at 0.05 and in 0 of 13 at normal speed (flag alone included; for 0.05
+  against normal speed, one-sided p about 0.38). agemu does not repeat such a tap, so the step
+  timed out after 10 s. Holding every tap until the screen had been still for 300 ms halved the
+  losses in the loop (3 of 12) but still lost the tap in 2 of 3 flows, so agemu does not do that.
+  With the app launched afresh before every alert, the same two calls lost no tap (0 of 5 at
+  normal speed, at 0.1 and at 0.05): the loss depends on what came before (in the flow, a tab
+  switch). A tap sent 48 ms after the alert was drawn at rest was lost at normal speed in 5 of 6,
+  at 0.05 in 2 of 6 and at 0.1 in 7 of 8; 100 ms or more later, none was lost (0 of 26). Check
+  the effect of such a tap (`--wait-text`) and repeat it.
+- **Typing: not slower in a targeted probe** (n=3 per arm, load about 20): `type hello` right
+  after focusing a field took 288, 293 and 1073 ms normally, 257-281 ms at 0.1 and 242-294 ms at
+  0.05, and the blinking caret drew the same 11-13 frames per second in every arm. In the agent
+  flow above, though, the `type` step's median was higher in every fast arm (0.05: 719 ms,
+  0.1: 1406, 0.2: 815, against 512 normally). The 0.05 arm ran at the highest mean load, so
+  this is confounded and not settled.
+
+**What an app sees.** UIKit and SwiftUI animations end sooner and their completion handlers run
+sooner; every step reached the same screen (checked in the UI tree). Measured in the test
+app at 0.05 (2 rounds, the same both times):
+- **Animation delays shrink too.** A toast that fades in over 0.3 s, waits with
+  `UIView.animate(withDuration:delay: 2.0)` and fades out was on screen from 311-313 ms to
+  2631-2632 ms after the tap normally, and from 30-31 to 166-167 ms at 0.05, so an agent that
+  checks for it a moment later can miss it (in one of three checks it did). The same toast hidden
+  by `asyncAfter(2 s)` stayed until 2148-2150 ms (only the fades are shorter).
+- **Timers and Core Animation keep their clock.** A 1 s `UIView` animation, a 0.5 s `Timer`, a
+  1 s `CABasicAnimation`, and `asyncAfter(1.2 s)` followed by a 0.5 s `UIView` animation ended at
+  1002 / 500-501 / 1001-1002 / 1761-1762 ms normally, and at 51 / 500 / 1001 / 1285 ms at 0.05.
+  The `UIView` animation now ends before the timer fires: code that relies on that order behaves
+  differently.
+- **Other processes.** The share sheet (`UIActivityViewController`, another process) and the
+  microphone permission alert (SpringBoard) were not faster in the first boot after the setting
+  (share sheet 1027 / 1450 ms, alert 746 / 563 ms, its answer 401 / 416 ms, one run each; the
+  share sheet's content was not verified in the UI tree).
+  After a reboot with the setting in place (one boot each way, not counterbalanced: the
+  normal-speed boot ran at load average 60-84, the fast one at 11-60, so a first look): pressing
+  home in an app until the home screen was still took 461-559 ms against
+  1023-1189 ms normally, tapping the app's icon until its screen was still 137-191 against
+  508-580 ms, the microphone alert 108-338 against 518-713 ms and its answer 73-79 against
+  406-430 ms; `agemu reset` took 710-1239 against 2259-4643 ms.
+- Not measured: scrolling and swipes (deceleration, paging, pull to refresh), the software
+  keyboard (agemu types with the hardware keyboard, so it did not come up), interactive
+  transitions, and animations that UIKit does not drive (React Native's JS-driven `Animated`,
+  Flutter, Lottie, `CADisplayLink` loops), which keep their speed while native transitions
+  speed up.
+- With the flag on, every key in the device's `com.apple.UIKit` domain takes effect, whoever
+  wrote it; agemu writes only `UIAnimationDragCoefficient`.
 
 ## Safety: which simulators agemu touches
 
@@ -550,8 +764,9 @@ The cause is not known. Repeating those steps alone missed none: 25 tab taps aft
 and 8 History taps sent 0-1.6 s after the tab opened.
 
 **What did not help.**
-- **Speeding up animations** with `UIAnimationDragCoefficient` (Simulator.app's slow-animation
-  switch, set lower): no effect on iOS 26.5.
+- **Speeding up animations** with `UIAnimationDragCoefficient` set in the defaults alone: no
+  effect on iOS 26.5, because UIKit reads that preference only with its internal preferences
+  turned on. With them on it works; see "Fast animations (opt-in)".
 - **Waiting only for the tapped element's region to go still.** UIKit ignores touches for the
   whole length of a screen transition, also where the target region is already still. One step
   missed its tap and took 34 s with the retry, so taps wait for the whole screen again.
