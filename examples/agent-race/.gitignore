@@ -1,0 +1,6 @@
+# Recorded frames and the agents' screenshots are large; the runs' JSON, the video and the poster
+# are kept.
+out/agent-race
+out/runs/*/frames/
+out/runs/*/shots/
+__pycache__/

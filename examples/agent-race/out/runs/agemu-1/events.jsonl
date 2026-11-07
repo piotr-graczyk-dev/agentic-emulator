@@ -1,0 +1,34 @@
+{"step":1,"label":"Open the app","cmd":"agemu launch dev.agemu.shop --wait-text \"Sign in\"","start":0.000014292,"end":0.254569334,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"agemu tap --text E-mail","start":0.254573084,"end":0.8132605,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"agemu type test@agemu.dev","start":0.813266667,"end":0.851678042,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"agemu tap --text Password","start":0.851702875,"end":0.975648584,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"agemu type hunter2","start":0.9756535,"end":1.005048209,"ok":true}
+{"step":4,"label":"Sign in","cmd":"agemu tap --text \"Sign in\" --wait-text \"Search products\"","start":1.005578375,"end":2.186789167,"ok":true}
+{"step":4,"label":"Sign in","cmd":"agemu screenshot -o catalog.png","start":2.1867929999999998,"end":2.360110625,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"agemu ui","start":2.360115042,"end":2.400436209,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"agemu swipe 540 1745 540 775 --ms 500 --ui","start":2.400464584,"end":3.3624018749999998,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"agemu swipe 540 1745 540 775 --ms 500 --ui","start":3.362416,"end":4.344643709,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"agemu tap --text \"Bath Towel\" --wait-text \"Add to cart\"","start":4.344656709,"end":4.663327125,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"agemu tap --text \"Add to cart\" --wait-contains \"cart: 1\"","start":4.663335292,"end":5.159032209,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"agemu screenshot -o towel.png","start":5.159044542,"end":5.2106515,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"agemu tap --text \"‹ Catalog\" --wait-text \"Search products\"","start":5.210680625,"end":5.49963075,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"agemu tap --text \"Search products\"","start":5.499637084,"end":5.985162625,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"agemu type lamp --wait-text \"Floor Lamp\"","start":5.985173417,"end":6.369582917,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"agemu tap --text \"Desk Lamp\" --wait-text \"Add to cart\"","start":6.369592292,"end":6.790587375,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"agemu tap --text \"Increase quantity\" --wait-text \"Quantity 2\"","start":6.790593375,"end":7.246134667,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"agemu tap --text \"Add to cart\" --wait-contains \"cart: 3\"","start":7.246162625,"end":7.361219334,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"agemu tap --text \"View cart\" --wait-contains \"Total $\"","start":7.361231542,"end":7.587210375,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"agemu screenshot -o cart.png","start":7.587216292,"end":7.755202,"ok":true}
+{"step":14,"label":"Check the total","cmd":"agemu ui","start":7.755205292,"end":7.764884209,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"agemu tap --text Checkout --wait-text \"Place order\"","start":7.764961292,"end":8.273021459,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu tap --text \"Full name\"","start":8.273029459,"end":8.75141975,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu type \"Ada Lovelace\"","start":8.751427709,"end":8.762309417,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu tap --text \"Street address\"","start":8.76233125,"end":8.841541209,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu type \"12 Analytical St\"","start":8.841564625,"end":8.866404417,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu tap --text City","start":8.866410875,"end":9.0581935,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu type London","start":9.058199542,"end":9.080566584,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu tap --text \"Postal code\"","start":9.080581542000001,"end":9.258627167,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agemu type \"N1 9GU\"","start":9.258631667,"end":9.280511584,"ok":true}
+{"step":17,"label":"Place the order","cmd":"agemu tap --text \"Place order\" --wait-contains \"Order #\"","start":9.280527584,"end":10.6677735,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"agemu ui","start":10.667776584,"end":10.67694925,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"agemu screenshot -o confirmation.png","start":10.677005334,"end":10.725171042,"ok":true}

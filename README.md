@@ -96,6 +96,22 @@ at lower load gave 1.14× and 2.10×. Details: [A real app](#a-real-app-against-
 | one UI tree / one screenshot | **24-122 ms / 18-26 ms** | 188-513 ms / 159-212 ms | 304-455 ms / 484-700 ms |
 | taps the app did not act on (retried; counted in the times) | 5 in 52 runs | 2 in 23 | none in 20 |
 
+### One task, recorded side by side
+
+An 18-step shopping task in the [Agemu Shop example app](examples/shop) (sign in, scroll, search,
+cart, checkout), the same agent plan with `adb` and `uiautomator` on the standard emulator
+(`emulator -avd Pixel_9_Pro`, with its window) and with the agemu CLI on an agemu device, with
+no model think time. 3 runs per side, alternated, on the shared Mac; one standard run failed when
+the host's load reached 38. Details and how to re-run it: [examples/agent-race](examples/agent-race).
+
+[![The agent race: the standard emulator and adb against agemu](examples/agent-race/out/agent-race.png)](examples/agent-race/out/agent-race.mp4)
+
+| | standard emulator + `adb` | agemu |
+|---|---|---|
+| task | 86.4 s, 90.1 s | **10.7-11.0 s** (about 8×) |
+| tool calls | 64 (33 of them `uiautomator dump`, 79 s in all) | **34** |
+| emulator CPU for the task | 39-45 CPU-s | **12-14 CPU-s** |
+
 ### What agemu fixed in the agent loop
 
 These rows compare agemu with its own earlier build on probe apps, with the next call sent the
