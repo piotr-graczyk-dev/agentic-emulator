@@ -13,6 +13,10 @@ import (
 
 const waitTimeout = 20 * time.Second
 
+// visibleBand: an element counts as on screen for ScrollUntil when its centre is in the top
+// visibleBand of the screen (below that, the home indicator and the list's bottom edge).
+const visibleBand = 0.88
+
 // ---- classic: adb + uiautomator, as an agent with a shell drives the standard emulator ----
 
 type classic struct {
@@ -47,7 +51,7 @@ func (n uiNode) walk(f func(uiNode) bool) bool {
 }
 
 func (c *classic) adb(display string, args ...string) ([]byte, error) {
-	return c.r.run(display, filepath.Join(androidSDK(), "platform-tools", "adb"), append([]string{"-s", c.serial}, args...)...)
+	return c.r.run(display, adbPath(), append([]string{"-s", c.serial}, args...)...)
 }
 
 // dump reads the screen's UI tree: one uiautomator dump written to stdout.
@@ -61,20 +65,18 @@ func (c *classic) dump() (uiNode, error) {
 		s = s[:i+len("</hierarchy>")]
 	}
 	var root struct {
-		Rotation string   `xml:"rotation,attr"`
-		Nodes    []uiNode `xml:"node"`
+		Nodes []uiNode `xml:"node"`
 	}
 	if err := xml.Unmarshal([]byte(s), &root); err != nil {
 		return uiNode{}, fmt.Errorf("uiautomator dump: %v", err)
 	}
-	top := uiNode{Kids: root.Nodes}
 	if c.w == 0 && len(root.Nodes) > 0 {
 		if m := boundsRe.FindStringSubmatch(root.Nodes[0].Bounds); m != nil {
 			c.w, _ = strconv.Atoi(m[3])
 			c.h, _ = strconv.Atoi(m[4])
 		}
 	}
-	return top, nil
+	return uiNode{Kids: root.Nodes}, nil
 }
 
 func find(root uiNode, match func(string) bool) (uiNode, bool) {
@@ -129,16 +131,16 @@ func (c *classic) waitFor(w Cond) (uiNode, error) {
 	}
 }
 
-func center(n uiNode) (int, int, error) {
+func boundsOf(n uiNode) (x1, y1, x2, y2 int, err error) {
 	m := boundsRe.FindStringSubmatch(n.Bounds)
 	if m == nil {
-		return 0, 0, fmt.Errorf("no bounds %q", n.Bounds)
+		return 0, 0, 0, 0, fmt.Errorf("no bounds %q", n.Bounds)
 	}
 	v := make([]int, 4)
 	for i := range v {
 		v[i], _ = strconv.Atoi(m[i+1])
 	}
-	return (v[0] + v[2]) / 2, (v[1] + v[3]) / 2, nil
+	return v[0], v[1], v[2], v[3], nil
 }
 
 func (c *classic) Launch(w Cond) error {
@@ -155,11 +157,11 @@ func (c *classic) Tap(target string, w Cond) error {
 		return err
 	}
 	n, _ := find(root, exact(target))
-	x, y, err := center(n)
+	x1, y1, x2, y2, err := boundsOf(n)
 	if err != nil {
 		return err
 	}
-	xs, ys := strconv.Itoa(x), strconv.Itoa(y)
+	xs, ys := strconv.Itoa((x1+x2)/2), strconv.Itoa((y1+y2)/2)
 	if _, err := c.adb("adb shell input tap "+xs+" "+ys, "shell", "input", "tap", xs, ys); err != nil {
 		return err
 	}
@@ -170,8 +172,11 @@ func (c *classic) Tap(target string, w Cond) error {
 	return err
 }
 
-// Type sends text with input text, which takes %s for a space.
-func (c *classic) Type(text string, w Cond) error {
+// Fill taps the field and sends the text with input text, which takes %s for a space.
+func (c *classic) Fill(field, text string, w Cond) error {
+	if err := c.Tap(field, Cond{}); err != nil {
+		return err
+	}
 	arg := strings.ReplaceAll(text, " ", "%s")
 	if _, err := c.adb("adb shell input text "+arg, "shell", "input", "text", arg); err != nil {
 		return err
@@ -199,8 +204,10 @@ func (c *classic) ScrollUntil(target string) error {
 		if err != nil {
 			return err
 		}
-		if _, ok := find(root, exact(target)); ok {
-			return nil
+		if n, ok := find(root, exact(target)); ok {
+			if _, a, _, b, err := boundsOf(n); err == nil && float64(a+b)/2 < visibleBand*float64(c.h) {
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("%q not found after scrolling", target)
@@ -228,7 +235,7 @@ func (c *classic) Screenshot(name string) error {
 	return os.WriteFile(filepath.Join(c.tmp, name+".png"), out, 0o644)
 }
 
-// ---- agemu: the agemu CLI, one process per call ----
+// ---- agemu: the agemu CLI, one process per call, an action and its wait in one call ----
 
 type agemuDriver struct {
 	r   *Recorder
@@ -250,7 +257,7 @@ func (a *agemuDriver) agemuShown(display string, args ...string) ([]byte, error)
 func quoteArgs(args []string) string {
 	q := make([]string, len(args))
 	for i, s := range args {
-		if s == "" || strings.ContainsAny(s, " \"'$#&‹") {
+		if s == "" || strings.ContainsAny(s, " \"'$#&‹{}") {
 			q[i] = strconv.Quote(s)
 		} else {
 			q[i] = s
@@ -276,17 +283,52 @@ func (a *agemuDriver) Launch(w Cond) error {
 	return err
 }
 
-func (a *agemuDriver) Tap(target string, w Cond) error {
-	_, err := a.agemu(append([]string{"tap", "--text", target}, waitArgs(w)...)...)
+// tap taps by text; when no element matches, it reads the screen again and retries once.
+func (a *agemuDriver) tap(args ...string) error {
+	_, err := a.agemu(args...)
+	if err == nil || !retryable(err) {
+		return err
+	}
+	if _, err := a.agemu("ui"); err != nil {
+		return err
+	}
+	_, err = a.agemu(args...)
 	return err
 }
 
-func (a *agemuDriver) Type(text string, w Cond) error {
+func (a *agemuDriver) Tap(target string, w Cond) error {
+	return a.tap(append([]string{"tap", "--text", target}, waitArgs(w)...)...)
+}
+
+func (a *agemuDriver) Fill(field, text string, w Cond) error {
+	if err := a.tap("tap", "--text", field); err != nil {
+		return err
+	}
 	_, err := a.agemu(append([]string{"type", text}, waitArgs(w)...)...)
 	return err
 }
 
 var screenRe = regexp.MustCompile(`screen (\d+)x(\d+)`)
+
+// outlineFrame finds the frame of the element with this exact text or label in an agemu outline
+// line: [e12] text "Bath Towel" @(x,y wxh).
+func outlineFrame(outline, target string) (y, h int, ok bool) {
+	q := strconv.Quote(target)
+	for _, line := range strings.Split(outline, "\n") {
+		if !strings.Contains(line, " "+q) && !strings.Contains(line, "label="+q) {
+			continue
+		}
+		i := strings.LastIndex(line, "@(")
+		if i < 0 {
+			continue
+		}
+		var x, w int
+		if _, err := fmt.Sscanf(line[i:], "@(%d,%d %dx%d)", &x, &y, &w, &h); err == nil {
+			return y, h, true
+		}
+	}
+	return 0, 0, false
+}
 
 func (a *agemuDriver) ScrollUntil(target string) error {
 	if a.w == 0 {
@@ -308,7 +350,7 @@ func (a *agemuDriver) ScrollUntil(target string) error {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(out), strconv.Quote(target)) {
+		if y, h, ok := outlineFrame(string(out), target); ok && y >= 0 && float64(y+h/2) < visibleBand*float64(a.h) {
 			return nil
 		}
 	}
@@ -317,13 +359,23 @@ func (a *agemuDriver) ScrollUntil(target string) error {
 
 var quoted = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
 
+func quotedStrings(s string) []string {
+	var r []string
+	for _, m := range quoted.FindAllStringSubmatch(s, -1) {
+		if u, err := strconv.Unquote(`"` + m[1] + `"`); err == nil {
+			r = append(r, u)
+		}
+	}
+	return r
+}
+
 func (a *agemuDriver) Read(sub string) (string, error) {
 	out, err := a.agemu("ui")
 	if err != nil {
 		return "", err
 	}
-	for _, m := range quoted.FindAllStringSubmatch(string(out), -1) {
-		if s, err := strconv.Unquote(`"` + m[1] + `"`); err == nil && strings.Contains(s, sub) {
+	for _, s := range quotedStrings(string(out)) {
+		if strings.Contains(s, sub) {
 			return s, nil
 		}
 	}

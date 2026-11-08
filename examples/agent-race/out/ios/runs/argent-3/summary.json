@@ -1,0 +1,43 @@
+{
+  "arm": "argent",
+  "date": "2026-11-08T03:49:35+01:00",
+  "device": "460BF55D-8220-4D6E-9766-D1C297251683",
+  "error": "",
+  "frame_h": 1174,
+  "frame_w": 540,
+  "loadavg": "{ 7.67 8.89 9.56 }",
+  "ok": true,
+  "platform": "ios",
+  "result": {
+    "order": "Order #31.614",
+    "total": "Total $91.98"
+  },
+  "screen_h": 2622,
+  "screen_w": 1206,
+  "steps": [
+    "Open the app",
+    "Enter the e-mail",
+    "Enter the password",
+    "Sign in",
+    "Scroll to Bath Towel",
+    "Open Bath Towel",
+    "Add it to the cart",
+    "Back to the catalog",
+    "Search for \"lamp\"",
+    "Open Desk Lamp",
+    "Set quantity to 2",
+    "Add 2 to the cart",
+    "Open the cart",
+    "Check the total",
+    "Go to checkout",
+    "Fill in the shipping address",
+    "Place the order",
+    "Read the order number"
+  ],
+  "tool_calls": 66,
+  "tool_s": 18.486837211000008,
+  "total_s": 18.492255417,
+  "versions": {
+    "argent": "0.32.0"
+  }
+}

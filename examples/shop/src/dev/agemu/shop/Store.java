@@ -38,6 +38,18 @@ final class Store {
         new Product("Travel Mug", "Kitchen", 2600, "Vacuum insulated, keeps coffee hot for 6 hours."),
         new Product("Wool Blanket", "Living", 7900, "Merino wool throw, 130 x 180 cm, woven in Portugal."),
         new Product("Picnic Basket", "Garden", 5800, "Willow basket with plates and cutlery for four."),
+        new Product("Linen Duvet", "Bedroom", 12900, "Stonewashed linen, double size, with two pillowcases."),
+        new Product("Reading Light", "Lighting", 3400, "A small ceramic lamp with a dimmer switch."),
+        new Product("Wool Rug", "Living", 14500, "Hand-tufted wool, 160 x 230 cm."),
+        new Product("Coat Hooks", "Home", 1700, "Three solid ash hooks on a brass rail."),
+        new Product("Tea Towels", "Kitchen", 1500, "Set of three, cotton herringbone."),
+        new Product("Salad Bowl", "Dining", 3800, "Turned acacia wood, 28 cm."),
+        new Product("Water Glasses", "Dining", 2600, "Set of four, mouth-blown glass."),
+        new Product("Desk Chair", "Office", 18900, "Oak frame, woven paper-cord seat."),
+        new Product("Watering Can", "Garden", 2900, "Galvanised steel, 2 litres, long spout."),
+        new Product("Garden Gloves", "Garden", 1300, "Goatskin palms, cotton backs."),
+        new Product("Bath Mat", "Bath", 2100, "Cotton waffle weave, 50 x 80 cm."),
+        new Product("Soap Dish", "Bath", 900, "Unglazed stoneware that drains."),
     };
 
     /** Product index -> quantity, in the order added. */

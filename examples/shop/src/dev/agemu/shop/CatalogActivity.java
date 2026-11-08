@@ -17,11 +17,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 /**
- * The catalog: 24 products in a scrolling list (the last ones are off screen on a phone), a
+ * The catalog: 36 products in a scrolling list (the last ones are off screen on a phone), a
  * search field that filters after a 300 ms debounce, and a cart button with the item count.
  */
 public class CatalogActivity extends Activity {
     LinearLayout list;
+    TextView count;
     Button cart;
     final Handler h = new Handler(Looper.getMainLooper());
     String query = "";
@@ -53,13 +54,15 @@ public class CatalogActivity extends Activity {
             }
         });
         root.addView(search, Ui.wide(this, 12));
+        count = Ui.text(this, "", 14, Ui.MUTED);
+        root.addView(count, Ui.wide(this, 8));
 
         ScrollView sv = new ScrollView(this);
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         sv.addView(list);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
-        lp.topMargin = Ui.dp(this, 12);
+        lp.topMargin = Ui.dp(this, 8);
         root.addView(sv, lp);
         render();
     }
@@ -98,6 +101,7 @@ public class CatalogActivity extends Activity {
             });
             list.addView(card, Ui.wide(this, shown == 1 ? 0 : 10));
         }
+        count.setText(shown == 1 ? "1 product" : shown + " products");
         if (shown == 0) list.addView(Ui.text(this, "No products match", 16, Ui.MUTED));
     }
 }

@@ -10,6 +10,14 @@ runtime), so apps behave as they do on the standard emulator and Simulator. agem
 emulator gRPC with a shared-memory frame stream, a warm on-device Android agent, and an in-process
 iOS helper for the framebuffer, touch and accessibility.
 
+[![The same agent task with adb, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
+
+One agent task with four tool stacks, real time until agemu finishes:
+[montage (67 s)](examples/agent-race/out/montage.mp4) ·
+[Android race](examples/agent-race/out/android/race.mp4) ·
+[iOS race](examples/agent-race/out/ios/race.mp4) ·
+[results](#one-task-four-tool-stacks-recorded)
+
 [agemu vs the standard tools](#agemu-vs-the-standard-tools) ·
 [What it costs](#what-agemu-does-not-speed-up-and-what-it-costs) · [Install](#install) ·
 [Use](#use) · [MCP](#mcp) · [Settings](#settings) · [Proof](#proof)
@@ -96,21 +104,24 @@ at lower load gave 1.14× and 2.10×. Details: [A real app](#a-real-app-against-
 | one UI tree / one screenshot | **24-122 ms / 18-26 ms** | 188-513 ms / 159-212 ms | 304-455 ms / 484-700 ms |
 | taps the app did not act on (retried; counted in the times) | 5 in 52 runs | 2 in 23 | none in 20 |
 
-### One task, recorded side by side
+### One task, four tool stacks, recorded
 
 An 18-step shopping task in the [Agemu Shop example app](examples/shop) (sign in, scroll, search,
-cart, checkout), the same agent plan with `adb` and `uiautomator` on the standard emulator
-(`emulator -avd Pixel_9_Pro`, with its window) and with the agemu CLI on an agemu device, with
-no model think time. 3 runs per side, alternated, on the shared Mac; one standard run failed when
-the host's load reached 38. Details and how to re-run it: [examples/agent-race](examples/agent-race).
+cart, checkout), the same agent plan driven by each tool stack's CLI with no model think time:
+the standard emulator with `adb` and `uiautomator`, agent-device 0.21.36 and Argent 0.32.0 on
+standard devices, and agemu on agemu devices. 3 runs per stack, the order rotated each round, all
+21 completed. vs: **std** and vs: **agent**. Videos, method and caveats:
+[examples/agent-race](examples/agent-race).
 
-[![The agent race: the standard emulator and adb against agemu](examples/agent-race/out/agent-race.png)](examples/agent-race/out/agent-race.mp4)
+| task time | standard + `adb` | agent-device | Argent | agemu |
+|---|---|---|---|---|
+| Android | 73.3-74.9 s (7.0×) | 24.0-24.8 s (2.4×) | 29.4-30.4 s (2.8×) | **10.4-10.7 s** |
+| iOS | - | 35.0-37.3 s (2.2×) | 17.8-18.5 s (1.1×) | **16.5-17.0 s** |
 
-| | standard emulator + `adb` | agemu |
-|---|---|---|
-| task | 86.4 s, 90.1 s | **10.7-11.0 s** (about 8×) |
-| tool calls | 64 (33 of them `uiautomator dump`, 79 s in all) | **34** |
-| emulator CPU for the task | 39-45 CPU-s | **12-14 CPU-s** |
+N× is how much longer than agemu (medians). On iOS most of the time is the app's, and Argent,
+which taps by coordinates without waiting for a still screen and scrolls without momentum, is
+close; agemu's lean simulator held half the memory (2.1-2.3 against 4.3-4.6 GB). Each stack's
+tool calls: `adb` 64, agent-device 26-33, Argent 66, agemu 34-35.
 
 ### What agemu fixed in the agent loop
 

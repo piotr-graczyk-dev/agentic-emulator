@@ -1,0 +1,33 @@
+{"step":1,"label":"Open the app","cmd":"agent-device open dev.agemu.shop --relaunch","start":0.000012791,"end":2.1729195,"ok":true}
+{"step":1,"label":"Open the app","cmd":"agent-device wait text \"Sign in\" 20000","start":2.172925291,"end":2.3060593750000002,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"agent-device fill \"label=\\\"E-mail\\\"\" test@agemu.dev --settle","start":2.30608825,"end":3.616548791,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"agent-device fill \"label=\\\"Password\\\"\" hunter2 --settle","start":3.616565666,"end":4.68435175,"ok":true}
+{"step":4,"label":"Sign in","cmd":"agent-device press \"label=\\\"Sign in\\\"\" --settle","start":4.68436425,"end":5.484368375,"ok":true}
+{"step":4,"label":"Sign in","cmd":"agent-device wait text \"Search products\" 20000","start":5.484382041,"end":5.9768965,"ok":true}
+{"step":4,"label":"Sign in","cmd":"agent-device screenshot catalog.png","start":5.976901958,"end":6.2309262499999996,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"agent-device scroll down --until \"label=\\\"Bath Towel\\\"\" --max-passes 8","start":6.230935791,"end":7.434305,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"agent-device press \"label=\\\"Bath Towel\\\"\" --settle","start":7.43432025,"end":9.1743415,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"agent-device press \"label=\\\"Add to cart\\\"\" --settle","start":9.174358,"end":9.945485791,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"agent-device wait text \"cart: 1\" 20000","start":9.945503875,"end":10.060853125,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"agent-device screenshot towel.png","start":10.060858208,"end":10.265083833,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"agent-device press \"label=\\\"‹ Catalog\\\"\" --settle","start":10.265102375,"end":11.610367958,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"agent-device fill \"label=\\\"Search products\\\"\" lamp --settle","start":11.610389333,"end":12.7034315,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"agent-device wait text \"2 products\" 20000","start":12.703438,"end":12.841466375,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"agent-device press \"label=\\\"Desk Lamp\\\"\" --settle","start":12.841474625,"end":14.412242125,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"agent-device press \"label=\\\"+\\\"\" --settle","start":14.412250458,"end":15.191513375,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"agent-device wait text \"Quantity: 2\" 20000","start":15.191538416,"end":15.30288125,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"agent-device press \"label=\\\"Add to cart\\\"\" --settle","start":15.302923,"end":16.062142166,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"agent-device wait text \"cart: 3\" 20000","start":16.062161541,"end":16.177524458,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"agent-device press \"label=\\\"View cart\\\"\" --settle","start":16.177545958,"end":17.576054541,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"agent-device wait text \"Total $\" 20000","start":17.57605875,"end":17.693270833,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"agent-device screenshot cart.png","start":17.693291958,"end":17.902169708,"ok":true}
+{"step":14,"label":"Check the total","cmd":"agent-device snapshot --force-full","start":17.902181708,"end":18.021588791,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"agent-device press \"label=\\\"Checkout\\\"\" --settle","start":18.021648791,"end":19.430973875,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agent-device fill \"label=\\\"Full name\\\"\" \"Ada Lovelace\" --settle","start":19.430983375,"end":20.340689958,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agent-device fill \"label=\\\"Street address\\\"\" \"12 Analytical St\" --settle","start":20.340698458,"end":21.243416458,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agent-device fill \"label=\\\"City\\\"\" London --settle","start":21.243426833,"end":22.139682791,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"agent-device fill \"label=\\\"Postal code\\\"\" \"N1 9GU\" --settle","start":22.139702541,"end":23.192271791,"ok":true}
+{"step":17,"label":"Place the order","cmd":"agent-device press \"label=\\\"Place order\\\"\" --settle","start":23.192285958,"end":23.971180625,"ok":true}
+{"step":17,"label":"Place the order","cmd":"agent-device wait text \"Order #\" 20000","start":23.9711875,"end":24.466010041,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"agent-device snapshot --force-full","start":24.466014958,"end":24.585460791,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"agent-device screenshot confirmation.png","start":24.585486791,"end":24.790913041,"ok":true}

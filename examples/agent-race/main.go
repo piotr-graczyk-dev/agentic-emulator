@@ -1,18 +1,23 @@
 // agent-race runs one shopping task in the Agemu Shop example app (examples/shop) the way an
-// agent's tool calls would, and records it: the screen (the emulator's own gRPC frame stream,
-// host-side, so it does not touch the guest), every tool call with its start and end, and the
-// CPU and memory of the emulator and of the control plane. compose.py turns two runs into a
-// side-by-side video.
+// agent's tool calls would, and records it: the screen (host-side: the emulator's gRPC frame
+// stream, or the Simulator's own video), every tool call with its start and end, and the CPU and
+// memory of the device and of the tool's host processes. compose.py renders runs side by side.
 //
-//	agent-race run --arm classic --avd Pixel_9_Pro --out runs/classic-1
-//	agent-race run --arm agemu   --avd agemu-lab   --out runs/agemu-1 --agemu bin/agemu
+//	agent-race run --platform android --arm classic      --device Pixel_9_Pro --out runs/classic-1
+//	agent-race run --platform android --arm agent-device --device Pixel_9_Pro --out runs/agent-device-1
+//	agent-race run --platform android --arm argent       --device Pixel_9_Pro --out runs/argent-1
+//	agent-race run --platform android --arm agemu        --device agemu-lab   --out runs/agemu-1
+//	agent-race run --platform ios     --arm agemu        --device <udid>      --out runs/agemu-1
 //
-// Both arms follow the same plan, step for step (see plan in plan.go). The classic arm uses the
-// standard tools an agent with a shell has: adb shell input, adb exec-out uiautomator dump to
-// read the screen (and to poll it until the expected screen shows), adb exec-out screencap. The
-// agemu arm uses the agemu CLI, one process per call, with an action and its wait in one call.
-// There is no model think time in either arm: the next call starts as soon as the previous one
-// returns, so the difference is the tools' own time.
+// Every arm follows the same plan (plan.go); only the tools differ (drivers*.go):
+//   - classic (Android): adb shell input, adb exec-out uiautomator dump to read the screen and to
+//     poll it until the expected screen shows, adb exec-out screencap;
+//   - agent-device: its CLI, press/fill by selector, wait text, scroll --until, snapshot;
+//   - argent: its CLI (argent run <tool>), describe + gesture-tap, fill, await-ui-element;
+//   - agemu: the agemu CLI, one process per call, an action and its wait in one call.
+//
+// There is no model think time: the next call starts as soon as the previous one returns, so the
+// differences are the tools' own time.
 package main
 
 import (
@@ -61,7 +66,9 @@ func (r *Recorder) run(display string, name string, args ...string) ([]byte, err
 	end := time.Now()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			err = fmt.Errorf("%v: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			err = fmt.Errorf("%v: %s", err, lastLine(string(ee.Stderr)))
+		} else if len(out) > 0 {
+			err = fmt.Errorf("%v: %s", err, lastLine(string(out)))
 		}
 	}
 	r.mu.Lock()
@@ -70,67 +77,150 @@ func (r *Recorder) run(display string, name string, args ...string) ([]byte, err
 	return out, err
 }
 
+func lastLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndex(s, "\n"); i >= 0 && len(s)-i < 400 {
+		return s[i+1:]
+	}
+	if len(s) > 400 {
+		return s[len(s)-400:]
+	}
+	return s
+}
+
+var arms = map[string]bool{"classic": true, "agemu": true, "agent-device": true, "argent": true}
+
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: agent-race run --arm classic|agemu --avd NAME --out DIR [--agemu PATH]")
+		fmt.Fprintln(os.Stderr, "usage: agent-race run --platform android|ios --arm classic|agemu|agent-device|argent --device NAME --out DIR")
 		os.Exit(2)
 	}
+	home, _ := os.UserHomeDir()
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	arm := fs.String("arm", "", "classic or agemu")
-	avd := fs.String("avd", "", "AVD name of the running emulator")
-	out := fs.String("out", "", "output directory")
-	agemuBin := fs.String("agemu", "bin/agemu", "agemu CLI (agemu arm)")
-	width := fs.Int("width", 540, "recorded frame width")
+	o := opts{}
+	fs.StringVar(&o.platform, "platform", "android", "android or ios")
+	fs.StringVar(&o.arm, "arm", "", "classic (Android), agemu, agent-device or argent")
+	fs.StringVar(&o.device, "device", "", "Android: the running emulator's AVD name; iOS: the simulator's UDID")
+	fs.StringVar(&o.out, "out", "", "output directory")
+	fs.StringVar(&o.agemu, "agemu", "bin/agemu", "agemu CLI")
+	fs.StringVar(&o.tools, "tools", filepath.Join(home, ".cache", "agemu-race-tools", "node_modules", ".bin"),
+		"directory with the agent-device and argent CLIs")
+	fs.IntVar(&o.width, "width", 540, "recorded frame width")
 	_ = fs.Parse(os.Args[2:])
-	if *out == "" || *avd == "" || (*arm != "classic" && *arm != "agemu") {
+	if o.out == "" || o.device == "" || !arms[o.arm] || (o.platform != "android" && o.platform != "ios") ||
+		(o.arm == "classic" && o.platform != "android") {
 		fs.Usage()
 		os.Exit(2)
 	}
-	if err := runRace(*arm, *avd, *out, *agemuBin, *width); err != nil {
+	if err := runRace(o); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-race:", err)
 		os.Exit(1)
 	}
 }
 
-func runRace(arm, avd, out, agemuBin string, width int) error {
-	emu, err := findEmulator(avd)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(out, "frames"), 0o755); err != nil {
-		return err
-	}
-	agemuAbs, _ := filepath.Abs(agemuBin)
-	rec := &Recorder{}
-	var d Driver
-	var plane []int // control-plane processes, sampled with the emulator
-	switch arm {
-	case "classic":
-		c := &classic{r: rec, serial: emu.serial(), tmp: filepath.Join(out, "shots")}
-		d = c
-		plane = pgrep("adb", "fork-server")
-	case "agemu":
-		d = &agemuDriver{r: rec, bin: agemuAbs, dev: "android:" + avd, tmp: filepath.Join(out, "shots")}
-		plane = pgrep("agemud", "")
-	}
-	_ = os.MkdirAll(filepath.Join(out, "shots"), 0o755)
+type opts struct {
+	platform, arm, device, out, agemu, tools string
+	width                                    int
+}
 
-	// Untimed: one warm-up launch (the first launch after a device resumes can take seconds),
-	// then the app stopped and the home screen in front, so the timed launch is a cold start.
-	adb := filepath.Join(androidSDK(), "platform-tools", "adb")
-	_ = exec.Command(adb, "-s", emu.serial(), "shell", "am", "start", "-W", "-n", appID+"/.LoginActivity").Run()
-	time.Sleep(1 * time.Second)
-	_ = exec.Command(adb, "-s", emu.serial(), "shell", "am", "force-stop", appID).Run()
-	_ = exec.Command(adb, "-s", emu.serial(), "shell", "input", "keyevent", "KEYCODE_HOME").Run()
-	time.Sleep(1500 * time.Millisecond)
+func runRace(o opts) error {
+	if err := os.MkdirAll(filepath.Join(o.out, "frames"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(o.out, "shots"), 0o755); err != nil {
+		return err
+	}
+	agemuAbs, _ := filepath.Abs(o.agemu)
+	shots := filepath.Join(o.out, "shots")
+	rec := &Recorder{}
+	ios := o.platform == "ios"
+
+	var emu emulator
+	var devSel func(map[int]proc) []int
+	var agemuID string
+	var adSel []string
+	var udid string // Argent's device id: the iOS UDID or the Android serial
+	if ios {
+		udid = o.device
+		devSel = simTree(o.device)
+		agemuID = "ios:" + o.device
+		adSel = []string{"--platform", "ios", "--udid", o.device}
+	} else {
+		var err error
+		if emu, err = findEmulator(o.device); err != nil {
+			return err
+		}
+		udid = emu.serial()
+		devSel = byPID(emu.PID)
+		agemuID = "android:" + o.device
+		adSel = []string{"--platform", "android", "--serial", emu.serial()}
+	}
+
+	var d Driver
+	var plane func(map[int]proc) []int
+	var warm [][]string // untimed: start the tool's daemons before the task
+	adBin, arBin := filepath.Join(o.tools, "agent-device"), filepath.Join(o.tools, "argent")
+	switch o.arm {
+	case "classic":
+		d = &classic{r: rec, serial: emu.serial(), tmp: shots}
+		plane = byArgs([]string{"adb", "fork-server"})
+		warm = [][]string{{adbPath(), "-s", emu.serial(), "shell", "true"}}
+	case "agemu":
+		d = &agemuDriver{r: rec, bin: agemuAbs, dev: agemuID, tmp: shots}
+		plane = byArgs([]string{"agemud"}, []string{"agemu-ios-helper"})
+		warm = [][]string{{agemuAbs, "ui", "-d", agemuID}}
+	case "agent-device":
+		d = &agentDevice{r: rec, bin: adBin, tmp: shots, sel: adSel, plat: o.platform}
+		plane = byArgs([]string{"agent-device"})
+		warm = [][]string{append([]string{adBin, "open", appID, "--relaunch"}, adSel...), append([]string{adBin, "snapshot"}, adSel...)}
+	case "argent":
+		d = &argent{r: rec, bin: arBin, udid: udid, tmp: shots, plat: o.platform}
+		plane = byArgs([]string{"argent"})
+		warm = [][]string{{arBin, "run", "launch-app", "--udid", udid, "--bundleId", appID}, {arBin, "run", "describe", "--udid", udid}}
+	}
+	for _, w := range warm { // a daemon's first start can time out; it is retried
+		var err error
+		var out []byte
+		for try := 0; try < 3; try++ {
+			if out, err = exec.Command(w[0], w[1:]...).CombinedOutput(); err == nil {
+				break
+			}
+			time.Sleep(3 * time.Second)
+		}
+		if err != nil {
+			return fmt.Errorf("warm-up %v: %v: %s", w, err, lastLine(string(out)))
+		}
+	}
+
+	// Untimed: one launch (the first launch after a device resumes can take seconds), then the
+	// app stopped and the home screen in front, so the timed launch is a cold start.
+	if ios {
+		_ = exec.Command("xcrun", "simctl", "launch", o.device, appID).Run()
+		time.Sleep(1 * time.Second)
+		_ = exec.Command("xcrun", "simctl", "terminate", o.device, appID).Run()
+		time.Sleep(2 * time.Second)
+	} else {
+		adb := adbPath()
+		_ = exec.Command(adb, "-s", emu.serial(), "shell", "am", "start", "-W", "-n", appID+"/.LoginActivity").Run()
+		time.Sleep(1 * time.Second)
+		_ = exec.Command(adb, "-s", emu.serial(), "shell", "am", "force-stop", appID).Run()
+		_ = exec.Command(adb, "-s", emu.serial(), "shell", "input", "keyevent", "KEYCODE_HOME").Run()
+		time.Sleep(1500 * time.Millisecond)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	frames, err := startFrames(ctx, emu, width, filepath.Join(out, "frames"))
-	if err != nil {
-		return fmt.Errorf("frame stream: %w", err)
+	var frames frameSource
+	var err error
+	if ios {
+		frames, err = startIOSRecording(ctx, o.device, o.width, filepath.Join(o.out, "frames"))
+	} else {
+		frames, err = startFrames(ctx, emu, o.width, filepath.Join(o.out, "frames"))
 	}
-	samples := startSampler(ctx, append([]int{emu.PID}, plane...), emu.PID)
+	if err != nil {
+		return fmt.Errorf("recording: %w", err)
+	}
+	samples := startSampler(ctx, procSel{device: devSel, plane: plane})
 	time.Sleep(1 * time.Second) // lead-in on the home screen
 
 	rec.t0 = time.Now()
@@ -143,10 +233,12 @@ func runRace(arm, avd, out, agemuBin string, width int) error {
 	frames.wait()
 	samples.wait()
 
+	fw, fh, sw, sh := frames.size()
 	load, _ := exec.Command("sysctl", "-n", "vm.loadavg").Output()
 	summary := map[string]any{
-		"arm":        arm,
-		"avd":        avd,
+		"platform":   o.platform,
+		"arm":        o.arm,
+		"device":     o.device,
 		"ok":         runErr == nil,
 		"error":      errString(runErr),
 		"total_s":    total,
@@ -154,29 +246,48 @@ func runRace(arm, avd, out, agemuBin string, width int) error {
 		"tool_s":     toolTime(rec.events),
 		"result":     result,
 		"steps":      stepNames(),
-		"frame_w":    frames.w,
-		"frame_h":    frames.h,
-		"screen_w":   frames.sw,
-		"screen_h":   frames.sh,
+		"frame_w":    fw,
+		"frame_h":    fh,
+		"screen_w":   sw,
+		"screen_h":   sh,
 		"loadavg":    strings.TrimSpace(string(load)),
 		"date":       time.Now().Format(time.RFC3339),
-		"pids":       map[string]any{"emulator": emu.PID, "control_plane": plane},
+		"versions":   toolVersions(o, adBin, arBin, agemuAbs),
 	}
-	if err := writeJSON(filepath.Join(out, "summary.json"), summary); err != nil {
+	if err := writeJSON(filepath.Join(o.out, "summary.json"), summary); err != nil {
 		return err
 	}
-	if err := writeJSONL(filepath.Join(out, "events.jsonl"), rec.events); err != nil {
+	if err := writeJSONL(filepath.Join(o.out, "events.jsonl"), rec.events); err != nil {
 		return err
 	}
-	if err := writeJSONL(filepath.Join(out, "frames.jsonl"), frames.index); err != nil {
+	if err := writeJSONL(filepath.Join(o.out, "frames.jsonl"), frames.frames()); err != nil {
 		return err
 	}
-	if err := writeJSONL(filepath.Join(out, "samples.jsonl"), samples.rows); err != nil {
+	if err := writeJSONL(filepath.Join(o.out, "samples.jsonl"), samples.rows); err != nil {
 		return err
 	}
-	fmt.Printf("%s: %.2f s, %d tool calls, ok=%v %s\n", arm, total, len(rec.events), runErr == nil, errString(runErr))
+	fmt.Printf("%s %s: %.2f s, %d tool calls, ok=%v %s\n", o.platform, o.arm, total, len(rec.events), runErr == nil, errString(runErr))
 	return runErr
 }
+
+func toolVersions(o opts, adBin, arBin, agemuBin string) map[string]string {
+	v := map[string]string{}
+	get := func(name string, args ...string) string {
+		out, _ := exec.Command(name, args...).Output()
+		return lastLine(string(out))
+	}
+	switch o.arm {
+	case "agent-device":
+		v["agent-device"] = get(adBin, "--version")
+	case "argent":
+		v["argent"] = get(arBin, "--version")
+	case "agemu":
+		v["agemu"] = get("git", "-C", filepath.Dir(agemuBin), "rev-parse", "--short", "HEAD")
+	}
+	return v
+}
+
+func adbPath() string { return filepath.Join(androidSDK(), "platform-tools", "adb") }
 
 func toolTime(ev []Event) float64 {
 	t := 0.0
@@ -267,24 +378,4 @@ func findEmulator(avd string) (emulator, error) {
 		return e, nil
 	}
 	return emulator{}, fmt.Errorf("emulator for %s is not running", avd)
-}
-
-// pgrep returns the pids of processes whose name is name and whose arguments contain arg.
-func pgrep(name, arg string) []int {
-	out, _ := exec.Command("pgrep", "-x", name).Output()
-	var pids []int
-	for _, f := range strings.Fields(string(out)) {
-		pid, _ := strconv.Atoi(f)
-		if pid <= 0 {
-			continue
-		}
-		if arg != "" {
-			cmd, _ := exec.Command("ps", "-o", "args=", "-p", f).Output()
-			if !strings.Contains(string(cmd), arg) {
-				continue
-			}
-		}
-		pids = append(pids, pid)
-	}
-	return pids
 }

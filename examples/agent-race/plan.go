@@ -14,13 +14,16 @@ type Cond struct {
 
 func (c Cond) zero() bool { return c == Cond{} }
 
-// Driver is the tool set of one arm.
+// Driver is the tool set of one arm. Each driver does a step the way that tool is meant to be
+// used: Fill is one agent-device `fill`, a tap and a `type` with agemu or adb, a tap and a `fill`
+// with Argent; ScrollUntil is one `scroll --until` with agent-device and a swipe-and-look loop
+// with the others.
 type Driver interface {
 	Launch(wait Cond) error
-	Tap(target string, wait Cond) error // the element with this text or label
-	Type(text string, wait Cond) error  // into the focused field
-	ScrollUntil(target string) error    // swipe up until the element is on screen
-	Read(contains string) (string, error)
+	Tap(target string, wait Cond) error       // the element with this text or label
+	Fill(field, text string, wait Cond) error // the text field with this label
+	ScrollUntil(target string) error          // swipe up until the element is on screen
+	Read(contains string) (string, error)     // the text of an element on screen
 	Screenshot(name string) error
 }
 
@@ -41,16 +44,10 @@ var plan = []step{
 		return d.Launch(Cond{Text: "Sign in"})
 	}},
 	{"Enter the e-mail", func(d Driver, _ map[string]string) error {
-		if err := d.Tap("E-mail", Cond{}); err != nil {
-			return err
-		}
-		return d.Type(email, Cond{})
+		return d.Fill("E-mail", email, Cond{})
 	}},
 	{"Enter the password", func(d Driver, _ map[string]string) error {
-		if err := d.Tap("Password", Cond{}); err != nil {
-			return err
-		}
-		return d.Type(password, Cond{})
+		return d.Fill("Password", password, Cond{})
 	}},
 	{"Sign in", func(d Driver, _ map[string]string) error {
 		if err := d.Tap("Sign in", Cond{Text: "Search products"}); err != nil {
@@ -74,16 +71,13 @@ var plan = []step{
 		return d.Tap("‹ Catalog", Cond{Text: "Search products"})
 	}},
 	{`Search for "lamp"`, func(d Driver, _ map[string]string) error {
-		if err := d.Tap("Search products", Cond{}); err != nil {
-			return err
-		}
-		return d.Type("lamp", Cond{Text: "Floor Lamp"}) // off screen until the filter applies
+		return d.Fill("Search products", "lamp", Cond{Text: "2 products"}) // the filter applied
 	}},
 	{"Open Desk Lamp", func(d Driver, _ map[string]string) error {
 		return d.Tap("Desk Lamp", Cond{Text: "Add to cart"})
 	}},
 	{"Set quantity to 2", func(d Driver, _ map[string]string) error {
-		return d.Tap("Increase quantity", Cond{Text: "Quantity 2"})
+		return d.Tap("+", Cond{Text: "Quantity: 2"})
 	}},
 	{"Add 2 to the cart", func(d Driver, _ map[string]string) error {
 		return d.Tap("Add to cart", Cond{Contains: "cart: 3"})
@@ -110,10 +104,7 @@ var plan = []step{
 	}},
 	{"Fill in the shipping address", func(d Driver, _ map[string]string) error {
 		for _, f := range [][2]string{{"Full name", "Ada Lovelace"}, {"Street address", "12 Analytical St"}, {"City", "London"}, {"Postal code", "N1 9GU"}} {
-			if err := d.Tap(f[0], Cond{}); err != nil {
-				return err
-			}
-			if err := d.Type(f[1], Cond{}); err != nil {
+			if err := d.Fill(f[0], f[1], Cond{}); err != nil {
 				return err
 			}
 		}

@@ -140,14 +140,104 @@ func startFrames(ctx context.Context, emu emulator, width int, dir string) (*fra
 	return f, nil
 }
 
-// Sample is the CPU and memory of the emulator and of the control plane over one interval.
+// Sample is the CPU and memory of the device and of the tool's control plane over one interval.
 type Sample struct {
 	T          float64 `json:"t"`
-	EmuCPU     float64 `json:"emu_cpu"`          // % of one core
-	EmuRSSMB   float64 `json:"emu_rss_mb"`       // resident memory (ps; misses most guest RAM)
-	EmuFootMB  float64 `json:"emu_footprint_mb"` // phys_footprint (footprint -p), refreshed every 2 s
-	PlaneCPU   float64 `json:"plane_cpu"`        // adb server, or agemud
+	EmuCPU     float64 `json:"emu_cpu"`          // device: % of one core (the emulator, or the simulator's processes)
+	EmuRSSMB   float64 `json:"emu_rss_mb"`       // device: resident memory (ps; misses most of an emulator's guest RAM)
+	EmuFootMB  float64 `json:"emu_footprint_mb"` // device: phys_footprint (footprint), refreshed every 2 s
+	PlaneCPU   float64 `json:"plane_cpu"`        // the tool's host processes (adb server, agemud, daemons)
 	PlaneRSSMB float64 `json:"plane_rss_mb"`
+}
+
+type proc struct {
+	ppid int
+	cpu  float64 // cumulative CPU-seconds
+	rss  float64 // MB
+	args string
+}
+
+// readProcs lists every process with ps.
+func readProcs() map[int]proc {
+	out, _ := exec.Command("ps", "-A", "-o", "pid=,ppid=,time=,rss=,args=").Output()
+	m := map[int]proc{}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		pid, _ := strconv.Atoi(f[0])
+		ppid, _ := strconv.Atoi(f[1])
+		rss, _ := strconv.ParseFloat(f[3], 64)
+		m[pid] = proc{ppid: ppid, cpu: cpuSeconds(f[2]), rss: rss / 1024, args: strings.Join(f[4:], " ")}
+	}
+	return m
+}
+
+// procSel picks the device's and the control plane's processes from a process list.
+type procSel struct {
+	device func(map[int]proc) []int
+	plane  func(map[int]proc) []int
+}
+
+// byPID selects one process.
+func byPID(pid int) func(map[int]proc) []int {
+	return func(map[int]proc) []int { return []int{pid} }
+}
+
+// simTree selects a booted simulator's processes: its launchd_sim and everything under it.
+func simTree(udid string) func(map[int]proc) []int {
+	return func(ps map[int]proc) []int {
+		root := 0
+		for pid, p := range ps {
+			if strings.Contains(p.args, "launchd_sim") && strings.Contains(p.args, udid) {
+				root = pid
+			}
+		}
+		if root == 0 {
+			return nil
+		}
+		kids := map[int][]int{}
+		for pid, p := range ps {
+			kids[p.ppid] = append(kids[p.ppid], pid)
+		}
+		var out []int
+		stack := []int{root}
+		for len(stack) > 0 {
+			pid := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			out = append(out, pid)
+			stack = append(stack, kids[pid]...)
+		}
+		return out
+	}
+}
+
+// byArgs selects processes whose command line contains every part of one of the patterns.
+func byArgs(patterns ...[]string) func(map[int]proc) []int {
+	self := os.Getpid()
+	return func(ps map[int]proc) []int {
+		var out []int
+		for pid, p := range ps {
+			if pid == self || strings.HasPrefix(p.args, "ps ") || strings.HasPrefix(p.args, "pgrep") {
+				continue
+			}
+			for _, pat := range patterns {
+				all := true
+				for _, part := range pat {
+					if !strings.Contains(p.args, part) {
+						all = false
+						break
+					}
+				}
+				if all {
+					out = append(out, pid)
+					break
+				}
+			}
+		}
+		return out
+	}
 }
 
 type sampler struct {
@@ -160,32 +250,15 @@ type sampler struct {
 func (s *sampler) setT0(t time.Time) { s.mu.Lock(); s.t0 = t; s.mu.Unlock() }
 func (s *sampler) wait()             { <-s.done }
 
-// startSampler reads cumulative CPU time and RSS with ps every 500 ms.
-func startSampler(ctx context.Context, pids []int, emuPID int) *sampler {
+// startSampler reads every process's cumulative CPU time and RSS with ps every 500 ms, and the
+// device's phys_footprint every 2 s.
+func startSampler(ctx context.Context, sel procSel) *sampler {
 	s := &sampler{done: make(chan struct{})}
-	args := []string{"-o", "pid=,time=,rss="}
-	for _, p := range pids {
-		args = append(args, "-p", strconv.Itoa(p))
-	}
-	read := func() map[int][2]float64 {
-		out, _ := exec.Command("ps", args...).Output()
-		m := map[int][2]float64{}
-		for _, line := range strings.Split(string(out), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 3 {
-				continue
-			}
-			pid, _ := strconv.Atoi(f[0])
-			rss, _ := strconv.ParseFloat(f[2], 64)
-			m[pid] = [2]float64{cpuSeconds(f[1]), rss / 1024}
-		}
-		return m
-	}
 	var foot float64
 	var footMu sync.Mutex
-	go func() { // footprint takes about 0.1 s, so it runs apart from the CPU samples
+	go func() { // footprint takes 0.1 s or more, so it runs apart from the CPU samples
 		for ctx.Err() == nil {
-			if v := footprintMB(emuPID); v > 0 {
+			if v := footprintMB(sel.device(readProcs())); v > 0 {
 				footMu.Lock()
 				foot = v
 				footMu.Unlock()
@@ -198,7 +271,7 @@ func startSampler(ctx context.Context, pids []int, emuPID int) *sampler {
 	}()
 	go func() {
 		defer close(s.done)
-		prev, prevT := read(), time.Now()
+		prev, prevT := readProcs(), time.Now()
 		tick := time.NewTicker(500 * time.Millisecond)
 		defer tick.Stop()
 		for {
@@ -207,17 +280,23 @@ func startSampler(ctx context.Context, pids []int, emuPID int) *sampler {
 				return
 			case <-tick.C:
 			}
-			cur, now := read(), time.Now()
+			cur, now := readProcs(), time.Now()
 			dt := now.Sub(prevT).Seconds()
-			var row Sample
-			for pid, v := range cur {
-				cpu := 100 * (v[0] - prev[pid][0]) / dt
-				if pid == emuPID {
-					row.EmuCPU, row.EmuRSSMB = cpu, v[1]
-				} else {
-					row.PlaneCPU += cpu
-					row.PlaneRSSMB += v[1]
+			delta := func(pid int) float64 {
+				c := cur[pid].cpu
+				if p, ok := prev[pid]; ok {
+					c -= p.cpu
 				}
+				return 100 * c / dt
+			}
+			var row Sample
+			for _, pid := range sel.device(cur) {
+				row.EmuCPU += delta(pid)
+				row.EmuRSSMB += cur[pid].rss
+			}
+			for _, pid := range sel.plane(cur) {
+				row.PlaneCPU += delta(pid)
+				row.PlaneRSSMB += cur[pid].rss
 			}
 			footMu.Lock()
 			row.EmuFootMB = foot
@@ -234,23 +313,30 @@ func startSampler(ctx context.Context, pids []int, emuPID int) *sampler {
 	return s
 }
 
-var footRe = regexp.MustCompile(`Footprint: ([0-9.]+) (KB|MB|GB)`)
+var footRe = regexp.MustCompile(`\[\d+\]: .*Footprint: ([0-9.]+) (KB|MB|GB)`)
 
-// footprintMB is the process's phys_footprint, as footprint(1) reports it.
-func footprintMB(pid int) float64 {
-	out, _ := exec.Command("footprint", "-p", strconv.Itoa(pid)).Output()
-	m := footRe.FindStringSubmatch(string(out))
-	if m == nil {
+// footprintMB is the processes' summed phys_footprint, as footprint(1) reports it per process.
+func footprintMB(pids []int) float64 {
+	if len(pids) == 0 {
 		return 0
 	}
-	v, _ := strconv.ParseFloat(m[1], 64)
-	switch m[2] {
-	case "KB":
-		v /= 1024
-	case "GB":
-		v *= 1024
+	args := []string{}
+	for _, p := range pids {
+		args = append(args, "-p", strconv.Itoa(p))
 	}
-	return v
+	out, _ := exec.Command("footprint", args...).Output()
+	total := 0.0
+	for _, m := range footRe.FindAllStringSubmatch(string(out), -1) {
+		v, _ := strconv.ParseFloat(m[1], 64)
+		switch m[2] {
+		case "KB":
+			v /= 1024
+		case "GB":
+			v *= 1024
+		}
+		total += v
+	}
+	return total
 }
 
 // cpuSeconds parses ps's cumulative time: [[dd-]hh:]mm:ss.cc.

@@ -31,23 +31,20 @@ public class ProductActivity extends Activity {
         root.addView(Ui.text(this, p.blurb, 17, Ui.INK), Ui.wide(this, 12));
 
         LinearLayout stepper = Ui.row(this);
-        stepper.addView(Ui.text(this, "Quantity", 17, Ui.INK), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        Button minus = Ui.secondary(this, "−");
-        final TextView count = Ui.text(this, "1", 20, Ui.INK);
-        count.setGravity(Gravity.CENTER);
-        count.setContentDescription("Quantity 1");
+        // Visible text only (no content descriptions), so every tool reads the same labels.
+        final TextView count = Ui.text(this, "Quantity: 1", 17, Ui.INK);
+        stepper.addView(count, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final Button minus = Ui.secondary(this, "−");
         Button plus = Ui.secondary(this, "+");
-        minus.setContentDescription("Decrease quantity");
-        plus.setContentDescription("Increase quantity");
         int w = Ui.dp(this, 56);
+        LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(w, w);
+        gap.leftMargin = Ui.dp(this, 12);
         stepper.addView(minus, new LinearLayout.LayoutParams(w, w));
-        stepper.addView(count, new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.WRAP_CONTENT));
-        stepper.addView(plus, new LinearLayout.LayoutParams(w, w));
+        stepper.addView(plus, gap);
         View.OnClickListener step = new View.OnClickListener() {
             public void onClick(View v) {
-                qty = Math.max(1, Math.min(9, qty + (v.getContentDescription().toString().startsWith("Increase") ? 1 : -1)));
-                count.setText(String.valueOf(qty));
-                count.setContentDescription("Quantity " + qty);
+                qty = Math.max(1, Math.min(9, qty + (v == minus ? -1 : 1)));
+                count.setText("Quantity: " + qty);
             }
         };
         minus.setOnClickListener(step);

@@ -1,0 +1,66 @@
+{"step":1,"label":"Open the app","cmd":"argent run launch-app --bundleId dev.agemu.shop","start":0.000014583,"end":0.846068125,"ok":true}
+{"step":1,"label":"Open the app","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Sign in\\\"}\" --timeoutMs 20000","start":0.846097208,"end":1.7733626660000001,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"argent run describe --json","start":1.774015125,"end":1.9506101249999999,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"argent run gesture-tap --x 0.5000 --y 0.2065","start":1.950896333,"end":2.297031916,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"argent run fill --text test@agemu.dev","start":2.2970486660000002,"end":2.723058958,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"argent run describe --json","start":2.723063541,"end":3.7037537499999997,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"argent run gesture-tap --x 0.5000 --y 0.2715","start":3.703975083,"end":3.870113625,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"argent run fill --text hunter2","start":3.870126666,"end":4.25586475,"ok":true}
+{"step":4,"label":"Sign in","cmd":"argent run describe --json","start":4.255869916,"end":4.8758522079999995,"ok":true}
+{"step":4,"label":"Sign in","cmd":"argent run gesture-tap --x 0.5000 --y 0.3700","start":4.87621825,"end":5.05993525,"ok":true}
+{"step":4,"label":"Sign in","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Search products\\\"}\" --timeoutMs 20000","start":5.059976583,"end":6.957831708,"ok":true}
+{"step":4,"label":"Sign in","cmd":"argent run screenshot --out catalog.png","start":6.957861958,"end":7.143903833,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run gesture-swipe --fromX 0.5 --fromY 0.72 --toX 0.5 --toY 0.32 --durationMs 500 --momentum false","start":7.143916,"end":7.8195865829999995,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run describe --json","start":7.819590291,"end":8.526028958,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run gesture-swipe --fromX 0.5 --fromY 0.72 --toX 0.5 --toY 0.32 --durationMs 500 --momentum false","start":8.526097875,"end":9.202838083,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run describe --json","start":9.202841583,"end":9.923877583,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run gesture-swipe --fromX 0.5 --fromY 0.72 --toX 0.5 --toY 0.32 --durationMs 500 --momentum false","start":9.923954833,"end":10.766506,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"argent run describe --json","start":10.766509583,"end":11.735799875,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"argent run describe --json","start":11.735873708,"end":12.160888791,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"argent run gesture-tap --x 0.5000 --y 0.7705","start":12.161006708,"end":12.341756291,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Add to cart\\\"}\" --timeoutMs 20000","start":12.34183,"end":13.008192333,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"argent run describe --json","start":13.008210416,"end":13.508274125,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"argent run gesture-tap --x 0.5000 --y 0.4430","start":13.508394458,"end":13.679240708,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"cart: 1\\\"}\" --timeoutMs 20000","start":13.67928625,"end":14.186463541,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"argent run screenshot --out towel.png","start":14.186484916,"end":14.347971790999999,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"argent run describe --json","start":14.347998041,"end":14.498871416,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"argent run gesture-tap --x 0.1500 --y 0.0880","start":14.498994541,"end":14.66777075,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Search products\\\"}\" --timeoutMs 20000","start":14.6678055,"end":15.748131875,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"argent run describe --json","start":15.748161583,"end":15.90275,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"argent run gesture-tap --x 0.5000 --y 0.1615","start":15.902885,"end":16.066842625,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"argent run fill --text lamp","start":16.066853208,"end":16.401508458,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"2 products\\\"}\" --timeoutMs 20000","start":16.401529791,"end":17.253986,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"argent run describe --json","start":17.254002458,"end":17.817747375,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"argent run gesture-tap --x 0.5000 --y 0.2645","start":17.817948958,"end":17.991322125,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Add to cart\\\"}\" --timeoutMs 20000","start":17.991363208,"end":19.147832166,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"argent run describe --json","start":19.147865666,"end":19.304873625,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"argent run gesture-tap --x 0.8875 --y 0.3805","start":19.305010958,"end":19.474236875,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Quantity: 2\\\"}\" --timeoutMs 20000","start":19.47431425,"end":19.984229125,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"argent run describe --json","start":19.984255541,"end":20.13862925,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"argent run gesture-tap --x 0.5000 --y 0.4640","start":20.138736458,"end":20.306235916,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"cart: 3\\\"}\" --timeoutMs 20000","start":20.306275208,"end":20.815529625,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"argent run describe --json","start":20.8155675,"end":20.966915333,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"argent run gesture-tap --x 0.5000 --y 0.5620","start":20.967020416,"end":21.134385708,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Total $\\\"}\" --timeoutMs 20000","start":21.134435458,"end":22.243288666,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"argent run screenshot --out cart.png","start":22.2433265,"end":22.391495875,"ok":true}
+{"step":14,"label":"Check the total","cmd":"argent run describe --json","start":22.391511416,"end":22.529789458,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"argent run describe --json","start":22.53001225,"end":22.678333958,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"argent run gesture-tap --x 0.5000 --y 0.4250","start":22.678420958,"end":22.843678041,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Place order\\\"}\" --timeoutMs 20000","start":22.843756625,"end":23.967107583,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run describe --json","start":23.967131708,"end":24.132271208,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run gesture-tap --x 0.5000 --y 0.1975","start":24.132353666,"end":24.302830708,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run fill --text \"Ada Lovelace\"","start":24.302851791,"end":24.634700833,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run describe --json","start":24.634708791,"end":25.161983125,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run gesture-tap --x 0.5000 --y 0.2635","start":25.162162833,"end":25.330956791,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run fill --text \"12 Analytical St\"","start":25.330982416,"end":25.648330916,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run describe --json","start":25.648336833,"end":26.091638166,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run gesture-tap --x 0.5000 --y 0.3295","start":26.0918665,"end":26.251906833,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run fill --text London","start":26.251921916,"end":26.566095375,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run describe --json","start":26.566104625,"end":27.064266333,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run gesture-tap --x 0.5000 --y 0.3955","start":27.064459708,"end":27.231249416,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"argent run fill --text \"N1 9GU\"","start":27.231272083,"end":27.548386041,"ok":true}
+{"step":17,"label":"Place the order","cmd":"argent run describe --json","start":27.548404166,"end":27.986509166,"ok":true}
+{"step":17,"label":"Place the order","cmd":"argent run gesture-tap --x 0.5000 --y 0.4930","start":27.98673825,"end":28.152585041,"ok":true}
+{"step":17,"label":"Place the order","cmd":"argent run await-ui-element --condition visible --selector-json \"{\\\"text\\\":\\\"Order #\\\"}\" --timeoutMs 20000","start":28.152656625,"end":29.70796225,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"argent run describe --json","start":29.70799525,"end":30.202506541,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"argent run screenshot --out confirmation.png","start":30.202586833,"end":30.356042208,"ok":true}
