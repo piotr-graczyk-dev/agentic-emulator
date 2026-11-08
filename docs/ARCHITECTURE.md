@@ -50,7 +50,10 @@ holds in memory (docs/CAPABILITIES.md, "Logs and crashes").
 A device can be parked (`backend.Parker`: iOS SIGSTOPs the simulator's processes, Android
 pauses the VM in place). The daemon resumes a parked device under its device lock before any
 other call on it, `logs` and `crashes` excepted, so backends never see a call for a stopped
-device.
+device. With `AGEMU_AUTO_PARK` set, the daemon also counts each call on a device from
+its start to its end (`internal/daemon/autopark.go`) and parks a device it has served after that
+long without one; it marks the device first, so a call that starts during the park waits for it
+and then resumes the device as above.
 
 ## Conventions
 
