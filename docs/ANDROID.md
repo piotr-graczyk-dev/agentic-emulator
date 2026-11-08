@@ -47,7 +47,7 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: leave on the Google apps a lean baseline turns off (applies when a baseline is taken). |
 | `AGEMU_ANDROID_ANIMATIONS` | `1` | `0`: set the window, transition and animator scales to 0 after every boot and reset (screen changes finish at once). |
 | `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. Less RAM saves host memory but changes what apps get; see "Guest RAM, vCPUs and display size" for the measured trade-off. |
-| `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`). `2` cut device CPU-seconds per flow by 11-21% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
+| `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`), 1 to 8 (the emulator boots no more; `create` refuses other values). `2` cut device CPU-seconds per flow by 11-19% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
@@ -237,6 +237,8 @@ Any TCP failure falls back to adb.
 - **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu host -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
   - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 45 s once).
   - Neither does a baseline taken before the AVD's `hw.ramSize` or `hw.cpu.ncore` was changed in its `config.ini` ("different AVD configuration"); agemu retakes it the same way. Before 2026-11-08 every boot of such an AVD failed until the snapshot was deleted by hand.
+  - A retake (either kind) snapshots whatever the AVD's disk holds at that moment. With the default standby the disk is back at the baseline before the emulator powers off, so this matters after `AGEMU_ANDROID_STANDBY=0`, a crashed or killed emulator, or a host reboot: apps installed since the old baseline then go into the new one and survive every later `reset` (reproduced with `AGEMU_ANDROID_STANDBY=0`). The daemon log says so when it retakes.
+  - A `config.ini` edit made while the device is in standby takes effect only after a real power-off (`agemu shutdown` twice): `boot` resumes the paused VM first.
   - With a baseline, agemu restores it in place (gRPC `LoadSnapshot`) as soon as gRPC answers, before the cold boot gets anywhere. Restoring it at startup (`-snapshot`) corrupts guest memory on this emulator; see Guest restarts.
   - The process is detached from the daemon.
   - Ports are taken from 5580/8580 upward and skip ports used by any running emulator.
@@ -1422,9 +1424,14 @@ Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`r
 | reset | 1.55 s (n=30) | 1.38 (n=20), p=0.02 | 1.38 | 1.22 | 1.11 |
 | powered-off boot | 4.96 s | 4.91 | 4.91 | 4.82 | 4.68 |
 
-- Host memory falls by about 0.75-0.9 MB per MB of guest RAM, not 1:1. The guest RAM mapping
-  shrinks 1:1, but GPU and MALLOC_LARGE were each 38-67 MB higher in every arm below 2048 (cause not
-  established).
+- At 1792 MB host memory falls about 1:1 with guest RAM. The independent re-check (round 6
+  skeptic, its own AVD, 4 interleaved blocks per arm, a new baseline each) measured 3284 MB
+  (3255-3313) against 3030 MB (3011-3085) 40 s after a reset, **-254 MB** (p=0.029), and -259 MB
+  40 s after a powered-off boot (p=0.014): 0.99-1.01 MB per MB. The figures in the table above
+  (n=4 against 6, other holds) gave -195 MB, within noise of that (bootstrap 95% interval
+  0.51-1.03 MB per MB). In this run GPU and MALLOC_LARGE were 38-67 MB higher in every arm below
+  2048; the re-check did not see that at 1792. The 1536, 1280 and 1024 MB columns rest on 2, 2
+  and 1 blocks.
 - `dalvik.vm.heapgrowthlimit` (the normal memory class, 192m), `ro.config.low_ram` (empty) and
   `nproc` (4) did not change. `dalvik.vm.heapsize`, the heap an app with `largeHeap` gets, did:
   the emulator sets it from the RAM size. The AVD's `vm.heapSize=256` does not apply.
@@ -1442,8 +1449,8 @@ Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`r
   - 1024 MB killed the app under test after Settings, Chrome and the Play Store, restarted GMS
     and Gboard during the shop task itself, and never finished the 300 MB page (60 s).
 - **Verdict:** the default stays 2048. 1792 MB is the only size below it with no measurably
-  slower flow and no kill of the app under test (n=5). It saves about 195 MB of host memory per
-  device (6%), but it is not the same device: apps see a smaller large heap (448m), about 25% less
+  slower flow and no kill of the app under test (n=5). It saves about 250 MB of host memory per
+  device (8%), but it is not the same device: apps see a smaller large heap (448m), about 25% less
   available memory (MemAvailable after a cold boot, medians 437 against 582 MB), and under a 600 MB page lmkd kills more. Set `AGEMU_ANDROID_RAM_MB=1792` for
   new AVDs if that trade suits the app. 1536 and below are slower and lose app processes.
 
@@ -1452,17 +1459,20 @@ Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`r
 | | 4 (default) | 3 | 2 |
 |---|---|---|---|
 | device CPU-s: agent step | 1.20 (n=20) | 1.11 (n=8) | **1.00** (n=12), -17% |
-| device CPU-s: Settings cold launch / shop task / reset | 1.04 / 11.19 / 4.11 | 0.91 / 10.55 / 3.50 | **0.85 / 9.23 / 3.26** (-19 / -18 / -21%) |
+| device CPU-s: Settings cold launch / shop task / reset | 1.04 / 11.19 / 4.11 | 0.91 / 10.55 / 3.50 | **0.85 / 9.23** / 3.26 (-19 / -18%; reset see below) |
 | agent step / Settings cold launch | 736 / 345 ms | 725 / 315 | 748 / 339 (p=0.70 / 0.64) |
 | **shop cold launch** | 206 ms (194-236) | 218 (200-224) | **221 (201-283), +7%, p=0.014** |
 | shop task / reset / powered-off boot | 10.87 / 1.55 / 4.96 s | 10.73 / 1.42 / 5.02 | 10.85 / 1.41 / 4.93 |
 | idle (% of a core, 30 s) | 13.9 (9.4-115.4, n=18) | 9.5 (5.6-12.8, n=6) | 11.8 (9.2-27.1, n=9) |
 | host memory (region sum) | 3264 MB | 3264 | 3305 |
 
-- Fewer vCPUs do the same guest work in less host CPU time; the idle windows overlap too much to
-  show a saving at rest.
-- The shop's cold launch was slower at 2 cores in every block (block medians 211-249 ms against
-  197-213 ms at 4). Apps see 2 processors (`nproc`, `Runtime.availableProcessors()`), and thread
+- Fewer vCPUs do the same guest work in less host CPU time: compared block by block (3 blocks
+  against 6), every 2-core block used less CPU than every 4-core block for the agent step (-17%),
+  the Settings cold launch (-19%), the shop task (-18%) and the shop cold launch (-11%). Reset is
+  not shown: the pooled 4.11 CPU-s at 4 cores comes from two slow blocks, and block medians
+  differ by about 3% (p=0.55). The idle windows overlap too much to show a saving at rest.
+- The shop's cold launch was slower at 2 cores (block medians 211, 216 and 249 ms against 197-213
+  ms at 4; one 2-core block is below the slowest 4-core block; block-level p=0.048). Apps see 2 processors (`nproc`, `Runtime.availableProcessors()`), and thread
   pools sized from it shrink. Fidelity runs (4 at 2 cores, 2 at 3) killed nothing below the
   cached range.
 - `scripts/e2e-android.sh` passed 44/44 at 2 cores and at 4.
@@ -1474,8 +1484,10 @@ Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`r
 `pixel-9` 1080x2424@420; 2 blocks against 6):
 - Host memory (region sum) 40 s after a reset: 2990 MB (2986-2993) against 3264. GPU 179
   against 328 MB, MALLOC_LARGE 472 against 587 MB: **-274 MB**; -303 MB after the flows.
-- Reset 1.15 s against 1.55 s (-26%, p=0.003), device CPU per reset 2.95 against 4.11 CPU-s.
-  Powered-off boot 4.69 against 4.96 s.
+- Reset 1.15 s against 1.40 s (about -18%), device CPU per reset 2.95 against 3.43 CPU-s (-14%),
+  against the `pixel-9` blocks of the same session (2 blocks each, so no block-level p below
+  0.07). Against all `pixel-9` blocks, which include two slow ones from other sessions, it would
+  read 1.15 against 1.55 s. Powered-off boot 4.69 against 4.96 s.
 - Agent step 737 against 736 ms, with 11% fewer device CPU-seconds (1.07 against 1.20); agemud's
   own CPU per shop task 0.30 against 0.33 CPU-s. The shop task itself took longer (11.6 s), only
   because the smaller screen needs more scrolling to reach its product.
@@ -1491,8 +1503,11 @@ Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`r
   run started from a fresh emulator process and the emulator was powered off after it, so a
   snapshot load after Chrome was not tried again; how often it crashes is not known.
 - **A tap on a text field, then `type`, can type into the previous field.** In 17 of 102 runs of
-  the shop task, on every arm (2048/4: 3 of 28), `type London` right after `tap --text City` went
-  into the street field ("12 Analytical StLondon"), so the order was refused. Waiting until the
+  the shop task, on every arm (2048/4: 3 of 28), the text typed right after a tap on a field went
+  into the field focused before it: City into Street ("12 Analytical StLondon"), and in the
+  dumps also Postal code into City (4 of 9). The order was then refused. It is not caused by this
+  round's changes: the skeptic reproduced it on the base commit (2 of 20 shop tasks, once Street
+  into Full name). Waiting until the
   tapped field reported focus before typing (fidelity runs only) avoided it in 7 of 7 runs; before
   that wait, 5 of 21 fidelity runs had stopped on it. agemu's `tap` returns once the touch is
   queued (see Caveats), so the next call can act before the app has moved focus.

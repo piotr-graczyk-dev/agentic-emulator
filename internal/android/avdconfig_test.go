@@ -29,10 +29,26 @@ func TestAVDConfigRAMAndCores(t *testing.T) {
 		t.Errorf("hw.ramSize %q hw.cpu.ncore %q, want 1792 and 2", c["hw.ramSize"], c["hw.cpu.ncore"])
 	}
 
-	for _, bad := range []string{"0", "-1", "two"} {
+	for _, bad := range []string{"0", "-1", "two", "9", "16"} {
 		t.Setenv("AGEMU_ANDROID_CORES", bad)
 		if v, ok := avdConfig("agemu-x", prof)["hw.cpu.ncore"]; ok {
 			t.Errorf("AGEMU_ANDROID_CORES=%q set hw.cpu.ncore=%q", bad, v)
+		}
+	}
+}
+
+func TestCoresSetting(t *testing.T) {
+	for v, want := range map[string]int{"": 0, "1": 1, "2": 2, " 3 ": 3, "8": 8} {
+		t.Setenv("AGEMU_ANDROID_CORES", v)
+		if n, err := coresSetting(); err != nil || n != want {
+			t.Errorf("AGEMU_ANDROID_CORES=%q: got %d, %v; want %d", v, n, err, want)
+		}
+	}
+	// Values the emulator cannot boot must make create fail, not produce an AVD that hangs.
+	for _, bad := range []string{"0", "-1", "two", "9", "16"} {
+		t.Setenv("AGEMU_ANDROID_CORES", bad)
+		if n, err := coresSetting(); err == nil {
+			t.Errorf("AGEMU_ANDROID_CORES=%q accepted as %d", bad, n)
 		}
 	}
 }
