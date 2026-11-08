@@ -300,6 +300,11 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 		return // a profile switch may be acting on it; look again on the next tick
 	}
 	a.handled = true
+	if why == notListed {
+		// An id no backend lists (a mistyped one, a deleted device): forget it rather than keep
+		// a List per idle stretch for it. A later call on it adds it back.
+		delete(s.activity, id)
+	}
 	if why != "" {
 		s.actMu.Unlock()
 		return
@@ -335,6 +340,9 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 	close(gate)
 }
 
+// notListed is notParkable's answer for an id its backend does not list.
+const notListed = "it is not listed"
+
 // notParkable returns why the parker must leave the device alone, or "" if it may park it:
 // it must be listed by its backend as booted (not booting, standby or shut down) and be one of
 // agemu's own devices.
@@ -359,7 +367,7 @@ func (s *Service) notParkable(ctx context.Context, b backend.Backend, id string)
 		}
 		return ""
 	}
-	return "it is not listed"
+	return notListed
 }
 
 // stopAutoPark stops the parker and resumes the devices it parked, in parallel, each within

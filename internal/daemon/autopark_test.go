@@ -794,3 +794,26 @@ func TestTheDaemonResumesItsParksOnThePlatformBeforeAProfileSwitch(t *testing.T)
 		t.Fatalf("the switch acted on a parked device: %v", bad)
 	}
 }
+
+func TestAnIdNoBackendListsIsForgotten(t *testing.T) {
+	b := newAPBackend(api.Android, "agemu-a")
+	s := apService(t, 20*time.Millisecond, 2*time.Millisecond, b)
+	// logs reaches the fake without a device lookup; the point is the daemon's bookkeeping.
+	if _, err := s.Call(context.Background(), "logs", json.RawMessage(`{"device":"android:agemu-typo"}`)); err != nil {
+		t.Fatal(err)
+	}
+	s.actMu.Lock()
+	_, added := s.activity["android:agemu-typo"]
+	s.actMu.Unlock()
+	if !added {
+		t.Fatal("setup: the call was not counted")
+	}
+	if !waitFor(time.Second, func() bool {
+		s.actMu.Lock()
+		defer s.actMu.Unlock()
+		_, still := s.activity["android:agemu-typo"]
+		return !still
+	}) {
+		t.Fatal("the unknown id's activity entry was kept")
+	}
+}

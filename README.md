@@ -535,8 +535,10 @@ has had no call for that long; the next call resumes it as after `agemu park`, t
 taking the resume's time. Only devices this daemon has served a call on since it started are
 parked, and only while they are booted and agemu's. The daemon sees only its own calls: a device
 it served that is then driven by another daemon (another `AGEMU_HOME`), by `simctl` or `adb`, in
-Simulator.app or by a person can be parked under them, and only a call through this daemon
-resumes it; with auto-park on, drive each device through one daemon. A call counts from its start
+Simulator.app or by a person is parked under them once this daemon's own calls stop, and their
+calls then fail until a call through this daemon resumes it (a second daemon calling `ui` every
+2 s on a simulator the first one parked: 5 of 5 calls failed after about 5 s each, one run). With
+auto-park on, drive each device through one daemon. A call counts from its start
 to its end, so a long `wait`, an install, a boot or a profile switch is never cut short (while a
 profile switch runs, no device of its platform is parked, since it may boot any of them; the
 daemon resumes the devices of that platform it parked before the switch, and a simulator an
@@ -554,8 +556,8 @@ Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host
 |---|---|---|
 | parked after the last call, `AGEMU_AUTO_PARK=15s` | 15.0-16.0 s (n=6) | 15.2-15.8 s (n=5) |
 | first call after it: `ui` | 66-94 ms (n=6) | 9-17 ms (n=5) |
-| device CPU, running idle / auto-parked | home screen: 1.2% of a core (two simulators, 0.9-2.1%, 4 blocks) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
-| saved per idle device-minute | 0.7 CPU-s on the home screen; more with an app running (docs/IOS.md) | 5.3 CPU-s |
+| device CPU, running idle / auto-parked | home screen: 0.9-4.4% of a core (two iPhone 17 Pro, 4 blocks of about 36 s: 0.9-2.1%; an iPhone 16e, n=3: 2.5-4.4%) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
+| saved per idle device-minute | 0.5-2.6 CPU-s on the home screen; more with an app running (docs/IOS.md) | 5.3 CPU-s |
 
 - **It did not make an active device faster.** One simulator ran r5-s1's Settings and test-app
   flow while two idle simulators were parked or not (4 blocks of 5 flows per arm, alternated):

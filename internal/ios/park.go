@@ -171,14 +171,23 @@ func (b *Backend) parkLock(udid string) *sync.Mutex {
 }
 
 // Park stops a booted simulator in place (see the comment at the top of this file). It does
-// not count as a use of the device: a parked simulator stays the least recently used one.
+// not count as a use of the device: it does not move the simulator to most recently used in the
+// order a boot shuts simulators down by (a simulator idle longer is still shut down first).
 func (b *Backend) Park(ctx context.Context, id string) error {
 	udid, err := udidOf(id)
 	if err != nil {
 		return err
 	}
 	pl := b.parkLock(udid)
-	pl.Lock()
+	// A shutdown of the simulator holds the lock for up to a minute; the park gives up when its
+	// context ends instead of waiting it out (the simulator is shut down by then anyway).
+	for !pl.TryLock() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("parking %s: waiting for its shutdown: %w", udid, ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 	defer pl.Unlock()
 	d, err := b.lookup(ctx, id)
 	if err != nil {

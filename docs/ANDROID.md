@@ -1381,7 +1381,10 @@ writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu p
 **Auto-park** (`AGEMU_AUTO_PARK=<duration>`, off by default; 2026-11-08, agemu-lab, host load
 average 2.5-3.7, `.lab/r6/autopark`): the daemon parks a device it has served once it has had no
 call for that long, only while it is running (not booting, not in standby, not parked); see the
-README's Auto-park. It sees only its own calls (not another daemon's, `adb`'s or a person's). Ids
+README's Auto-park. It sees only its own calls (not another daemon's, `adb`'s or a person's): a
+device another daemon drives after this one's last call is paused under it, and the park marker
+is in this daemon's `AGEMU_HOME`, so the other daemon does not know to resume it (what its calls
+then answer was not measured on Android; on iOS they failed). Ids
 are compared in the AVD file's spelling, so `android:Agemu-Lab` shares agemu-lab's count, lock and
 park state on a case-insensitive disk. With `AGEMU_AUTO_PARK=15s`:
 - Parked 15.2-15.8 s after the last call (n=5); the first `ui` after it took 9-17 ms. The park
