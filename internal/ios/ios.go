@@ -214,8 +214,8 @@ func (b *Backend) target(ctx context.Context, id string) (simDevice, error) {
 	return d, nil
 }
 
-// lookup is target without counting the call as a use of the device (park: a parked device is
-// an idle one, the first to shut down for another boot).
+// lookup is target without counting the call as a use of the device (park: parking does not move
+// the simulator to most recently used, so it keeps its place in the shutdown order).
 func (b *Backend) lookup(ctx context.Context, id string) (simDevice, error) {
 	udid, err := udidOf(id)
 	if err != nil {

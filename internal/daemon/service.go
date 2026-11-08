@@ -270,17 +270,25 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 		return nil, nil, err
 	}
 	defer s.endCall(id, method)
-	if method == "set_profile" {
-		if err := s.resumeAutoParked(ctx, b.Platform()); err != nil {
-			return nil, nil, err
-		}
-	}
 	// Arguments are checked before the device lock and the backend: a bad call fails at once.
 	if err := checkCapability(method, &p); err != nil {
 		return nil, nil, err
 	}
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
+	}
+	if method == "set_profile" {
+		if _, err := switchProfile(b.Platform(), p); err != nil {
+			return nil, nil, err
+		}
+		// An iOS profile switch moves to another simulator, which may be one this daemon
+		// auto-parked: resume those first. An Android switch stays on this AVD, which wake
+		// below resumes.
+		if b.Platform() == api.IOS {
+			if err := s.resumeAutoParked(ctx, api.IOS); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 	if err := s.wake(ctx, b, id, method); err != nil {
 		return nil, nil, err
@@ -320,6 +328,26 @@ func (s *Service) wake(ctx context.Context, b backend.Backend, id, method string
 		return fmt.Errorf("resuming the parked device before %s: %w", method, err)
 	}
 	return nil
+}
+
+// switchProfile is the profile a set_profile call asks for, checked against the device's platform.
+func switchProfile(plat api.Platform, p Params) (api.Profile, error) {
+	var prof api.Profile
+	switch {
+	case p.Profile != "":
+		var err error
+		if prof, err = profiles.Get(p.Profile); err != nil {
+			return api.Profile{}, err
+		}
+	case p.Width > 0 && p.Height > 0 && p.Density > 0:
+		prof = profiles.Custom(p.Width, p.Height, p.Density)
+	default:
+		return api.Profile{}, fmt.Errorf("set_profile needs profile or width+height+density")
+	}
+	if prof.Platform != plat {
+		return api.Profile{}, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, plat)
+	}
+	return prof, nil
 }
 
 // onDevice runs one method on a resolved device whose arguments were checked.
@@ -394,8 +422,6 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 
 // act runs one device action (the caller holds the device lock).
 func (s *Service) act(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
-	var err error
-
 	switch method {
 	case "boot":
 		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
@@ -417,19 +443,9 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		}
 		return map[string]any{"ok": true, "resumed": resumed}, nil
 	case "set_profile":
-		var prof api.Profile
-		if p.Profile != "" {
-			prof, err = profiles.Get(p.Profile)
-			if err != nil {
-				return nil, err
-			}
-		} else if p.Width > 0 && p.Height > 0 && p.Density > 0 {
-			prof = profiles.Custom(p.Width, p.Height, p.Density)
-		} else {
-			return nil, fmt.Errorf("set_profile needs profile or width+height+density")
-		}
-		if prof.Platform != b.Platform() {
-			return nil, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, b.Platform())
+		prof, err := switchProfile(b.Platform(), p)
+		if err != nil {
+			return nil, err
 		}
 		return b.SetProfile(ctx, id, prof)
 	case "tap":

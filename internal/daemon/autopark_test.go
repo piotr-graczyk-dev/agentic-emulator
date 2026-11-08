@@ -795,6 +795,71 @@ func TestTheDaemonResumesItsParksOnThePlatformBeforeAProfileSwitch(t *testing.T)
 	}
 }
 
+// A set_profile that fails its argument checks (unknown profile, another platform's profile)
+// resumes nothing: the daemon's parks stay parked.
+func TestAnInvalidProfileSwitchResumesNothing(t *testing.T) {
+	b := &noResumeSwitch{newAPBackend(api.IOS, "agemu-iphone", "agemu-ipad")}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", "ios:agemu-ipad"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !b.Parked("ios:agemu-ipad") && time.Now().Before(deadline) {
+		if err := apCall(s, "ui", "ios:agemu-iphone"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !b.Parked("ios:agemu-ipad") {
+		t.Fatal("setup: the iPad was not auto-parked")
+	}
+	for _, args := range []string{
+		`{"device":"ios:agemu-iphone","profile":"no-such-profile"}`,
+		`{"device":"ios:agemu-iphone","profile":"pixel-9"}`,
+		`{"device":"ios:agemu-iphone"}`,
+	} {
+		if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(args)); err == nil {
+			t.Fatalf("set_profile %s succeeded", args)
+		}
+		if !b.Parked("ios:agemu-ipad") {
+			t.Fatalf("set_profile %s (invalid) resumed an auto-parked device", args)
+		}
+	}
+}
+
+// androidSwitch models Android's profile switch: it reconfigures the same AVD.
+type androidSwitch struct{ *apBackend }
+
+func (b *androidSwitch) SetProfile(ctx context.Context, id string, p api.Profile) (api.Device, error) {
+	b.use(id, "set_profile reconfigures the AVD")
+	return api.Device{ID: id, Name: strings.TrimPrefix(id, "android:"), Platform: api.Android, State: "booted"}, nil
+}
+
+// An Android profile switch stays on its own AVD: it resumes no other device the daemon parked.
+func TestAnAndroidProfileSwitchResumesNoOtherDevice(t *testing.T) {
+	b := &androidSwitch{newAPBackend(api.Android, "agemu-a", "agemu-b")}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", "android:agemu-b"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !b.Parked("android:agemu-b") && time.Now().Before(deadline) {
+		if err := apCall(s, "ui", "android:agemu-a"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !b.Parked("android:agemu-b") {
+		t.Fatal("setup: agemu-b was not auto-parked")
+	}
+	if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"android:agemu-a","profile":"small-phone"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !b.Parked("android:agemu-b") {
+		t.Fatal("an Android profile switch resumed another auto-parked AVD")
+	}
+}
+
 func TestAnIdNoBackendListsIsForgotten(t *testing.T) {
 	b := newAPBackend(api.Android, "agemu-a")
 	s := apService(t, 20*time.Millisecond, 2*time.Millisecond, b)
