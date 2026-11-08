@@ -21,12 +21,14 @@ import (
 )
 
 const (
-	quietWindow     = 10 * time.Second // one guest sample
-	quietWindows    = 6                // consecutive quiet samples needed (a minute)
-	quietBusyPct    = 10.0             // % of one vCPU; a settled guest idles at 4-6%
-	quietRxKBps     = 50.0             // guest network receive rate; a Play Store download is ~1 MB/s
-	quietAfterHome  = 60 * time.Second // the freezer freezes and compacts cached apps by then
-	quietExtraLimit = 10 * time.Minute // past the uptime target, save even if never quiet
+	quietWindow        = 10 * time.Second // one guest sample
+	quietWindows       = 6                // samples in the quiet minute
+	quietMeanPct       = 15.0             // mean over the minute, % of one vCPU; a settled guest reads 4-11%
+	quietPeakPct       = 30.0             // no sample above this (a job, an install, a dexopt)
+	quietRxKBps        = 50.0             // guest network receive rate; a Play Store download is ~1 MB/s
+	quietAfterHome     = 60 * time.Second // the freezer freezes and compacts cached apps by then
+	quietExtraLimit    = 5 * time.Minute  // past the uptime target, save even if never quiet
+	quietSampleTimeout = 15 * time.Second // one guest read (adb)
 )
 
 // baselineUptime is the guest uptime the baseline waits for (0: no wait).
@@ -142,69 +144,119 @@ func busyPct(a, b guestSample) float64 {
 	return float64(b.busy-a.busy) / el
 }
 
+// quietSample is one 10 s sample of the guest.
+type quietSample struct {
+	busyPct float64 // % of one vCPU
+	rxKBps  float64
+}
+
+// quietVerdict says whether the last quietWindows samples are a quiet minute: their mean CPU is
+// below quietMeanPct, none is above quietPeakPct (a job, an install or a dexopt shows as a burst)
+// and none received quietRxKBps or more (a download uses little CPU). A mean, not a per-sample
+// threshold: a settled guest reads 4-11% of a vCPU per sample, more on a loaded host, and a
+// per-sample threshold of 10% could keep the wait going for its whole cap.
+func quietVerdict(win []quietSample) (bool, string) {
+	if len(win) < quietWindows {
+		return false, fmt.Sprintf("%d of %d samples", len(win), quietWindows)
+	}
+	win = win[len(win)-quietWindows:]
+	var sum float64
+	for _, q := range win {
+		if q.rxKBps >= quietRxKBps {
+			return false, fmt.Sprintf("receiving %.0f KB/s", q.rxKBps)
+		}
+		if q.busyPct >= quietPeakPct {
+			return false, fmt.Sprintf("a sample at %.1f%% of a vCPU", q.busyPct)
+		}
+		sum += q.busyPct
+	}
+	if mean := sum / float64(len(win)); mean >= quietMeanPct {
+		return false, fmt.Sprintf("mean %.1f%% of a vCPU over the last minute", mean)
+	}
+	return true, ""
+}
+
 // settleDecision is the pure part of waitGuestSettled: given the uptime, the time since the
-// home screen, the run of quiet samples and the time past the uptime target, is the guest
-// settled, and if not, why.
-func settleDecision(uptime, target, sinceHome time.Duration, quietRun int) (bool, string) {
+// home screen and the quiet verdict of the last minute, is the guest settled, and if not, why.
+func settleDecision(uptime, target, sinceHome time.Duration, quiet bool, why string) (bool, string) {
 	switch {
 	case uptime < target:
 		return false, fmt.Sprintf("uptime %v < %v", uptime.Round(time.Second), target)
 	case sinceHome < quietAfterHome:
 		return false, fmt.Sprintf("%v since going home < %v", sinceHome.Round(time.Second), quietAfterHome)
-	case quietRun < quietWindows:
-		return false, fmt.Sprintf("%d of %d quiet samples", quietRun, quietWindows)
+	case !quiet:
+		return false, why
 	}
 	return true, ""
 }
 
 // waitGuestSettled blocks until the guest has been up baselineUptime(), the home screen has been
-// shown for quietAfterHome, and the guest's CPU stayed below quietBusyPct for quietWindows
-// samples in a row while receiving less than quietRxKBps from the network (a Play Store app
-// update downloads at about 1 MB/s with little CPU; a baseline saved during one resumed the
-// download, the install and its dexopt after every reset); or until quietExtraLimit past the uptime target. Best effort: an adb error
-// ends the wait (the baseline is then saved as before).
-func (d *device) waitGuestSettled(ctx context.Context, serial string, home time.Time) {
+// shown for quietAfterHome, and the last minute was quiet (quietVerdict: a Play Store app update
+// downloads at about 1 MB/s with little CPU; a baseline saved during one resumed the download,
+// the install and its dexopt after every reset); or until quietExtraLimit past the uptime target.
+// Every sample has its own timeout and the whole wait a deadline, so a stuck adb read cannot hold
+// the boot (and the device's lifecycle lock) for longer. It returns an error only when ctx is
+// cancelled (a shutdown, or the daemon stopping); an adb error ends the wait and the baseline is
+// saved as before.
+func (d *device) waitGuestSettled(ctx context.Context, serial string, home time.Time) error {
 	target := baselineUptime()
 	if target <= 0 {
-		return
+		return nil
 	}
 	t0 := time.Now()
-	prev, err := readGuestSample(ctx, serial)
-	if err != nil {
-		logf("%s: could not read the guest's CPU (%v); saving the baseline without waiting for it to settle", d.name, err)
-		return
+	sample := func() (guestSample, error) {
+		sctx, cancel := context.WithTimeout(ctx, quietSampleTimeout)
+		defer cancel()
+		return readGuestSample(sctx, serial)
 	}
-	logf("%s: waiting until the guest has been up %v and is quiet (uptime now %v; AGEMU_ANDROID_BASELINE_UPTIME_S=0 skips this)", d.name, target, prev.uptime.Round(time.Second))
-	quietRun := 0
-	var last, lastRx float64
+	prev, err := sample()
+	if err != nil {
+		if ctx.Err() != nil {
+			return d.settleCancelled(ctx, t0)
+		}
+		logf("%s: could not read the guest's CPU (%v); saving the baseline without waiting for it to settle", d.name, err)
+		return nil
+	}
+	// The wait cannot outlast the uptime cap by much, whatever the samples do.
+	deadline := t0.Add(target - prev.uptime + quietExtraLimit + time.Minute)
+	logf("%s: waiting until the guest has been up %v and is quiet (uptime now %v; at most until %v of uptime; AGEMU_ANDROID_BASELINE_UPTIME_S=0 skips this)", d.name, target, prev.uptime.Round(time.Second), target+quietExtraLimit)
+	var win []quietSample
+	quiet, why := false, "no sample yet"
+	var last quietSample
 	for {
-		ok, why := settleDecision(prev.uptime, target, time.Since(home), quietRun)
+		ok, reason := settleDecision(prev.uptime, target, time.Since(home), quiet, why)
 		if ok {
-			logf("%s: guest settled after %v (uptime %v, last %.1f%% of a vCPU, %.1f KB/s received)", d.name, time.Since(t0).Round(time.Second), prev.uptime.Round(time.Second), last, lastRx)
-			return
+			logf("%s: guest settled after %v (uptime %v, last %.1f%% of a vCPU, %.1f KB/s received)", d.name, time.Since(t0).Round(time.Second), prev.uptime.Round(time.Second), last.busyPct, last.rxKBps)
+			return nil
 		}
-		if prev.uptime > target+quietExtraLimit {
-			logf("%s: guest not quiet %v past the uptime target (%s, last %.1f%% of a vCPU, %.1f KB/s received); saving the baseline anyway", d.name, quietExtraLimit, why, last, lastRx)
-			return
+		if prev.uptime > target+quietExtraLimit || time.Now().After(deadline) {
+			logf("%s: guest not quiet %v past the uptime target (%s); saving the baseline anyway", d.name, quietExtraLimit, reason)
+			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(quietWindow):
+		if err := sleepCtx(ctx, quietWindow); err != nil {
+			return d.settleCancelled(ctx, t0)
 		}
-		cur, err := readGuestSample(ctx, serial)
+		cur, err := sample()
 		if err != nil {
+			if ctx.Err() != nil {
+				return d.settleCancelled(ctx, t0)
+			}
 			logf("%s: could not read the guest's CPU (%v); saving the baseline now", d.name, err)
-			return
+			return nil
 		}
-		last, lastRx = busyPct(prev, cur), rxKBps(prev, cur)
-		if last < quietBusyPct && lastRx < quietRxKBps {
-			quietRun++
-		} else {
-			quietRun = 0
+		last = quietSample{busyPct: busyPct(prev, cur), rxKBps: rxKBps(prev, cur)}
+		win = append(win, last)
+		if len(win) > quietWindows {
+			win = win[len(win)-quietWindows:]
 		}
+		quiet, why = quietVerdict(win)
 		prev = cur
 	}
+}
+
+func (d *device) settleCancelled(ctx context.Context, t0 time.Time) error {
+	logf("%s: the wait for the guest to settle was cancelled after %v (%v); no baseline is saved", d.name, time.Since(t0).Round(time.Second), context.Cause(ctx))
+	return fmt.Errorf("preparing the baseline was cancelled: %w", context.Cause(ctx))
 }
 
 // Zero-filled free memory (opt-in). The emulator stores a guest page that is all zeros as an

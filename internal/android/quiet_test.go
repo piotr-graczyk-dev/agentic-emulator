@@ -50,21 +50,65 @@ func TestSettleDecision(t *testing.T) {
 	target := 420 * time.Second
 	cases := []struct {
 		up, home time.Duration
-		quiet    int
+		quiet    bool
 		ok       bool
 		why      string
 	}{
-		{100 * time.Second, 90 * time.Second, quietWindows, false, "uptime"},
-		{500 * time.Second, 30 * time.Second, quietWindows, false, "since going home"},
-		{500 * time.Second, 90 * time.Second, quietWindows - 1, false, "quiet samples"},
-		{500 * time.Second, 90 * time.Second, quietWindows, true, ""},
-		{420 * time.Second, 60 * time.Second, quietWindows, true, ""},
+		{100 * time.Second, 90 * time.Second, true, false, "uptime"},
+		{500 * time.Second, 30 * time.Second, true, false, "since going home"},
+		{500 * time.Second, 90 * time.Second, false, false, "busy"},
+		{500 * time.Second, 90 * time.Second, true, true, ""},
+		{420 * time.Second, 60 * time.Second, true, true, ""},
 	}
 	for _, c := range cases {
-		ok, why := settleDecision(c.up, target, c.home, c.quiet)
+		ok, why := settleDecision(c.up, target, c.home, c.quiet, "busy")
 		if ok != c.ok || !strings.Contains(why, c.why) {
-			t.Errorf("settleDecision(%v, %v, %d) = %v %q, want %v ~%q", c.up, c.home, c.quiet, ok, why, c.ok, c.why)
+			t.Errorf("settleDecision(%v, %v, %v) = %v %q, want %v ~%q", c.up, c.home, c.quiet, ok, why, c.ok, c.why)
 		}
+	}
+}
+
+func TestQuietVerdict(t *testing.T) {
+	q := func(pcts ...float64) []quietSample {
+		var w []quietSample
+		for _, p := range pcts {
+			w = append(w, quietSample{busyPct: p, rxKBps: 1})
+		}
+		return w
+	}
+	cases := []struct {
+		name string
+		win  []quietSample
+		ok   bool
+		why  string
+	}{
+		{"too few samples", q(5, 5, 5), false, "of 6 samples"},
+		{"settled guest on an idle host", q(5, 6, 4, 7, 5, 6), true, ""},
+		// The skeptic's settled guests read 5.5-11% per sample on a loaded host: a
+		// per-sample 10% threshold kept failing, the mean passes.
+		{"settled guest on a loaded host", q(9, 11, 10, 9.5, 11, 10), true, ""},
+		{"busy minute", q(16, 14, 18, 15, 16, 17), false, "mean"},
+		{"one burst (a job, a dexopt)", q(5, 5, 45, 5, 5, 5), false, "a sample at 45.0%"},
+		{"older samples do not count", append(q(80, 80), q(5, 5, 5, 5, 5, 5)...), true, ""},
+	}
+	for _, c := range cases {
+		ok, why := quietVerdict(c.win)
+		if ok != c.ok || !strings.Contains(why, c.why) {
+			t.Errorf("%s: quietVerdict = %v %q, want %v ~%q", c.name, ok, why, c.ok, c.why)
+		}
+	}
+	// A download: little CPU, but bytes coming in.
+	w := q(5, 5, 5, 5, 5, 5)
+	w[3].rxKBps = 900
+	if ok, why := quietVerdict(w); ok || !strings.Contains(why, "receiving") {
+		t.Errorf("download: %v %q", ok, why)
+	}
+}
+
+func TestPrepMaxCoversTheWait(t *testing.T) {
+	t.Setenv("AGEMU_ANDROID_BASELINE_UPTIME_S", "")
+	if got := prepMax(); got < baselineUptime()+quietExtraLimit || got > 20*time.Minute {
+		t.Fatalf("prepMax %v", got)
 	}
 }
 

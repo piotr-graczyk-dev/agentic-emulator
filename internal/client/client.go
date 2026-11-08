@@ -163,7 +163,7 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 // device's platform, or the call failed while the app the agent launched was down after a crash.
 type Error struct {
 	Message string
-	Code    string        // daemon.CodeNotImplemented, daemon.CodeAppCrashed or ""
+	Code    string        // daemon.CodeNotImplemented, daemon.CodeAppCrashed, daemon.CodePreparing or ""
 	Crash   *api.AppCrash // the crash, with code app_crashed
 }
 
@@ -175,6 +175,8 @@ func (e *Error) Unwrap() error {
 		return api.ErrNotImplemented
 	case daemon.CodeAppCrashed:
 		return api.ErrAppCrashed
+	case daemon.CodePreparing:
+		return api.ErrPreparing
 	}
 	return nil
 }

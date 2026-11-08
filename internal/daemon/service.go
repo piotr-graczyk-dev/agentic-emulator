@@ -25,6 +25,7 @@ type Params struct {
 	Name     string       `json:"name,omitempty"`
 	Profile  string       `json:"profile,omitempty"`
 	Cold     bool         `json:"cold,omitempty"`
+	NoWait   bool         `json:"noWait,omitempty"` // boot: return once it is preparing (api.BootOptions)
 
 	// set_profile custom size (Android)
 	Width   int `json:"width,omitempty"`
@@ -246,6 +247,9 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
 	}
+	if err := checkPreparing(b, id, method); err != nil {
+		return nil, nil, err
+	}
 	if err := s.wake(ctx, b, id, method); err != nil {
 		return nil, nil, err
 	}
@@ -256,6 +260,25 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 		return res, nil, err
 	}
 	return s.report(ctx, b, id, res, err)
+}
+
+// checkPreparing answers a call on a device that is preparing its baseline at once, instead of
+// letting it wait for minutes behind the boot (backend.Preparer). Boot (which returns the state or
+// waits), shutdown (which cancels the preparation) and the reads of what was captured go through.
+func checkPreparing(b backend.Backend, id, method string) error {
+	pr, ok := b.(backend.Preparer)
+	if !ok {
+		return nil
+	}
+	switch method {
+	case "boot", "shutdown", "logs", "crashes":
+		return nil
+	}
+	p := pr.Preparing(id)
+	if p == nil {
+		return nil
+	}
+	return &api.PreparingError{Device: id, Phase: p.Phase, Elapsed: p.ElapsedS, MaxS: p.MaxS}
 }
 
 // wake resumes a parked device (backend.Parker) before a call that needs it running: every call
@@ -318,6 +341,13 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 		return s.crashes(ctx, b, id, p)
 	}
 
+	if method == "shutdown" {
+		// A boot that is preparing a baseline can hold the device lock for minutes (a boot
+		// without NoWait); the backend cancels the preparation and orders the rest itself.
+		if pr, ok := b.(backend.Preparer); ok && pr.Preparing(id) != nil {
+			return ok2(b.Shutdown(ctx, id))
+		}
+	}
 	l := s.deviceLock(id)
 	l.Lock()
 	defer l.Unlock()
@@ -359,7 +389,7 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 
 	switch method {
 	case "boot":
-		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
+		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold, NoWait: p.NoWait})
 	case "shutdown":
 		return ok(b.Shutdown(ctx, id))
 	case "reset":
@@ -450,6 +480,8 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 type keyTyper interface {
 	TypeKeys(ctx context.Context, id, text string) error
 }
+
+func ok2(err error) (any, error) { return ok(err) }
 
 func ok(err error) (any, error) {
 	if err != nil {

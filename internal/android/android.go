@@ -39,10 +39,25 @@ import (
 type Backend struct {
 	mu   sync.Mutex
 	devs map[string]*device
+
+	bg       context.Context // boots run on it (prepare.go); Close cancels it
+	bgCancel context.CancelFunc
+	// bootHook replaces bootSync in tests of the preparation state machine.
+	bootHook func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error)
 }
 
 // New is cheap: it spawns nothing and connects to nothing until a device is used.
-func New() *Backend { return &Backend{devs: map[string]*device{}} }
+func New() *Backend {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Backend{devs: map[string]*device{}, bg: ctx, bgCancel: cancel}
+}
+
+func (b *Backend) background() context.Context {
+	if b.bg == nil {
+		return context.Background()
+	}
+	return b.bg
+}
 
 func (b *Backend) Platform() api.Platform { return api.Android }
 
@@ -59,9 +74,11 @@ type device struct {
 	agent   *agentClient
 	disp    displayInfo // last known logical display
 	dispAt  time.Time
-	proc    *exec.Cmd // emulator we launched (reaped by a goroutine)
-	retook  bool      // baseline already retaken by this daemon
-	agentOK bool      // agent version checked on the current connection
+	proc    *exec.Cmd  // emulator we launched (reaped by a goroutine)
+	retook  bool       // baseline already retaken by this daemon
+	agentOK bool       // agent version checked on the current connection
+	prep    *prepState // the boot in progress (prepare.go)
+	prepErr string     // why the last preparation failed, until the next boot
 
 	// lastInput is when agemu last sent input (unix ns); screenshots taken right after an
 	// input wait for the frame that shows its effect (see frameStream.get).
@@ -437,7 +454,15 @@ func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
 	if !d.dispAt.IsZero() {
 		scr = api.Screen{Width: d.disp.W, Height: d.disp.H, Density: d.disp.Density}
 	}
+	dev.PrepareError = d.prepErr
 	d.mu.Unlock()
+	if p := d.preparing(); p != nil {
+		dev.State = api.StatePreparing
+		dev.Preparing = p.info()
+		dev.Screen = &scr
+		dev.Profile = profileName(scr)
+		return dev
+	}
 	if _, ok := run[a.Name]; ok {
 		dev.State = "booted"
 		if d.parked() {
@@ -616,16 +641,22 @@ func emulatorEnv(environ []string) []string {
 // restores the old behaviour.
 func inPlaceBootLoad() bool { return env("AGEMU_ANDROID_BOOT_LOAD", "inplace") != "startup" }
 
-func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (api.Device, error) {
-	d, err := b.devFor(id)
-	if err != nil {
-		return api.Device{}, err
-	}
+// bootSync boots the device to agent-ready, taking the baseline when it has none or the old one
+// cannot be used. It runs in the goroutine Boot starts (prepare.go).
+func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
 	d.life.Lock()
 	defer d.life.Unlock()
 	a, err := loadAVD(d.name)
 	if err != nil {
 		return api.Device{}, fmt.Errorf("unknown device %s: %w", id, err)
+	}
+	if _, ok := findRunning(d.name); ok && !opts.Cold && !a.hasBaseline() {
+		// An emulator runs but there is no baseline: a previous daemon stopped (or was
+		// restarted) while it prepared one. Start over: power it off and prepare it again.
+		logf("%s: boot: the emulator runs without %s (a previous daemon stopped while preparing it?); powering it off and preparing it again", d.name, baselineSnapshot)
+		if err := d.shutdown(ctx); err != nil {
+			return api.Device{}, err
+		}
 	}
 	if _, ok := findRunning(d.name); ok {
 		if !opts.Cold && d.inStandby(ctx) {
@@ -661,6 +692,9 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 
 	loadBaseline := !opts.Cold && a.hasBaseline()
 	retake := false
+	if !a.hasBaseline() {
+		d.markNeeded()
+	}
 	t0 := time.Now()
 	if err := d.launch(ctx, a, loadBaseline); err != nil {
 		return api.Device{}, err
@@ -678,11 +712,13 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			// guest, which keeps cold-booting (-no-snapshot-load); the baseline is retaken below.
 			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
+			d.markNeeded()
 		case err != nil && configMismatch(err):
 			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
 			// taken. Refused the same way, before the guest is touched; retaken below.
 			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
+			d.markNeeded()
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
 		default:
@@ -692,6 +728,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if loadBaseline {
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
 	} else {
+		d.setPhase(phaseColdBoot)
 		err = d.waitBooted(ctx, 180*time.Second)
 	}
 	if err != nil {
@@ -741,6 +778,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	d.mu.Unlock()
 	if stale {
 		logf("%s: %s has no current agent; retaking it", d.name, baselineSnapshot)
+		d.markNeeded()
 	}
 	if !loadBaseline || restarted {
 		d.checkGuest(ctx)
@@ -925,8 +963,11 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	}
 	settle := time.Duration(envInt("AGEMU_ANDROID_BASELINE_SETTLE_S", 20)) * time.Second
 	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
+	d.setPhase(phaseSteps)
 	// Let boot-time work (launcher, package scans) finish so a restored device is quiet.
-	time.Sleep(settle)
+	if err := sleepCtx(ctx, settle); err != nil {
+		return err
+	}
 	// The emulator's touchscreen advertises a stylus, so Gboard treats taps on text fields as
 	// stylus input and shows its floating handwriting toolbar instead of the keyboard. A phone
 	// is used with a finger: turn stylus handwriting off (a user setting, `settings put`).
@@ -944,7 +985,10 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
 	// Work the guest still has pending would run again after every reset (see quiet.go).
-	d.waitGuestSettled(ctx, serial, time.Now())
+	d.setPhase(phaseSettling)
+	if err := d.waitGuestSettled(ctx, serial, time.Now()); err != nil {
+		return err
+	}
 	if baselineUptime() > 0 {
 		// Anything that came up during the wait (a dialog, a notification shade) is dismissed;
 		// on the home screen the key does nothing.
@@ -967,9 +1011,14 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if a.rd != nil {
 		a.rd.drop(ctx)
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+		return err
+	}
+	d.setPhase(phaseSaving)
 	t := time.Now()
-	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// The save is not cancelled with the boot (a shutdown waits for it): an interrupted save
+	// could leave a snapshot that does not load.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	defer cancel()
 	if names, err := e.listSnapshots(sctx); err == nil {
 		for _, n := range names {
@@ -1064,6 +1113,9 @@ func (d *device) warmUpKeyboard(ctx context.Context, e *emuClient, a *agentClien
 func (b *Backend) Shutdown(ctx context.Context, id string) error {
 	d, err := b.devFor(id)
 	if err != nil {
+		return err
+	}
+	if err := d.cancelPrep("shutdown"); err != nil {
 		return err
 	}
 	d.life.Lock()
@@ -1210,7 +1262,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 		return err
 	}
 	if !a.hasBaseline() {
-		return fmt.Errorf("%s has no baseline snapshot yet (boot it once)", id)
+		return fmt.Errorf("%s has no baseline snapshot: a device's first boot takes it, and a daemon stopped or restarted while preparing it leaves none; run `agemu boot %s` (it prepares the baseline again, up to about %.0f min once)", id, id, prepMax().Minutes())
 	}
 	e, ag, err := d.ready(ctx)
 	if err != nil {
@@ -1627,6 +1679,9 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 }
 
 func (b *Backend) Close() error {
+	if b.bgCancel != nil {
+		b.bgCancel() // boots in progress stop; the next daemon prepares again (bootSync)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, d := range b.devs {
