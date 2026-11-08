@@ -46,7 +46,8 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_GPU` | `host` | Emulator `-gpu` mode. `auto` picks software rendering (SwiftShader) without a window; see "Host GPU and lean devices". |
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: leave on the Google apps a lean baseline turns off (applies when a baseline is taken). |
 | `AGEMU_ANDROID_ANIMATIONS` | `1` | `0`: set the window, transition and animator scales to 0 after every boot and reset (screen changes finish at once). |
-| `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. |
+| `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. Less RAM saves host memory but changes what apps get; see "Guest RAM, vCPUs and display size" for the measured trade-off. |
+| `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`). `2` cut device CPU-seconds per flow by 11-21% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
@@ -235,6 +236,7 @@ Any TCP failure falls back to adb.
   - quickboot auto-snapshots off.
 - **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu host -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
   - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 45 s once).
+  - Neither does a baseline taken before the AVD's `hw.ramSize` or `hw.cpu.ncore` was changed in its `config.ini` ("different AVD configuration"); agemu retakes it the same way. Before 2026-11-08 every boot of such an AVD failed until the snapshot was deleted by hand.
   - With a baseline, agemu restores it in place (gRPC `LoadSnapshot`) as soon as gRPC answers, before the cold boot gets anywhere. Restoring it at startup (`-snapshot`) corrupts guest memory on this emulator; see Guest restarts.
   - The process is detached from the daemon.
   - Ports are taken from 5580/8580 upward and skip ports used by any running emulator.
@@ -1377,6 +1379,126 @@ the emulator was gone (`elapsedRealtime` gap 2.6-3.7 s for 29-31 s of wall time)
 one seen firing). It
 writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu parks instead.
 
+### Guest RAM, vCPUs and display size (2026-11-08)
+
+Can a smaller device, with less guest RAM, fewer vCPUs or a smaller screen, cost the host less
+without the app under test noticing? Every snapshot load makes all guest RAM resident, so guest
+RAM is host memory.
+
+**Method.** One AVD (`agemu-r6-android-size`, emulator 37.1, host GPU, lean, compressed baseline),
+reconfigured between blocks: `hw.ramSize`, `hw.cpu.ncore`, display, then a new baseline. 22
+blocks, arms interleaved. Each block ran:
+- memory 40 s after a reset and after the flows: the emulator's region sum from `footprint`, the
+  memory the host gets back when the emulator exits (round 2 kill tests); `phys_footprint`
+  overstates it by 1.3-2.1 GB;
+- two 30 s idle windows;
+- 3-4 rounds of timed flows, each with the emulator's CPU-seconds: agent step (find + tap + wait
+  + screenshot in Settings), Settings cold and warm launch, a cold launch of the Agemu Shop, and
+  the agent-race task (`examples/agent-race`, 18 steps, about 35 CLI calls);
+- 4 resets and 3 powered-off boots;
+- 1-2 fidelity runs, each from a fresh emulator process.
+
+A fidelity run does the shop task, then home, Settings, a page in Chrome and the Play Store, then
+back to the shop (is its process the same?). Then the same with a WebView page that holds 300
+MB, then 600 MB, of JavaScript memory (`.lab/r6/android-size/heavyapp`). Kills are read from
+logcat (lmkd's `lowmemorykiller` lines, `am_kill` without force-stops), and the pids of 14 system
+processes are compared. The host was shared (load average 2-139, 4.0-7.8 GB of swap in use).
+Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`runs.jsonl`,
+`analyze.py`, `stats.py`; p values are two-sided Mann-Whitney).
+
+**Guest RAM** (4 vCPUs, `pixel-9`):
+
+| | 2048 MB (default) | 1792 MB | 1536 MB | 1280 MB | 1024 MB |
+|---|---|---|---|---|---|
+| host memory, region sum, 40 s after a reset | 3264 MB (3173-3326, n=6) | 3069 (3057-3083, n=4): **-195** | 2813 (n=2): -451 | 2592 (n=2): -672 | 2350 (n=1): -914 |
+| of it: guest RAM / GPU / MALLOC_LARGE | 2178 / 328 / 587 | 1916 / 368 / 627 | 1660 / 368 / 625 | 1404 / 392 / 645 | 1152 / 395 / 648 |
+| `ram.bin` (compressed) | 778-816 MB | 700-733 | 628-632 | 521-564 | 428 |
+| guest MemTotal / MemAvailable after a cold boot | 1994 / 567-620 MB | 1739 / 424-453 | 1484 / 321-327 | 1229 / 195-202 | 977 / 106 |
+| `dalvik.vm.heapsize` (large memory class) | 512m | **448m** | 384m | 336m | 336m |
+| Settings cold launch | 345 ms (n=20) | 338 (n=12) | 415 (n=6), p=0.03 | 604 (n=5) | 1103 (n=3) |
+| shop cold launch | 206 ms | 210 | 216 | 245 | 380 |
+| agent step | 736 ms | 766, p=0.31 | 783, p=0.03 | 883 | 1699 |
+| shop task | 10.87 s (n=18) | 10.87 (n=10) | 10.93 (n=5) | 11.65 (n=4) | 12.05 (n=2) |
+| reset | 1.55 s (n=30) | 1.38 (n=20), p=0.02 | 1.38 | 1.22 | 1.11 |
+| powered-off boot | 4.96 s | 4.91 | 4.91 | 4.82 | 4.68 |
+
+- Host memory falls by about 0.75-0.9 MB per MB of guest RAM, not 1:1. The guest RAM mapping
+  shrinks 1:1, but GPU and MALLOC_LARGE were each 38-67 MB higher in every arm below 2048 (cause not
+  established).
+- `dalvik.vm.heapgrowthlimit` (the normal memory class, 192m), `ro.config.low_ram` (empty) and
+  `nproc` (4) did not change. `dalvik.vm.heapsize`, the heap an app with `largeHeap` gets, did:
+  the emulator sets it from the RAM size. The AVD's `vm.heapSize=256` does not apply.
+- **Fidelity** (runs per arm: 2048 7, 1792 5, 1536 2, 1024 1; at 1280 no run completed, see below):
+  - At 2048 MB the app under test kept its process in every phase of every run. lmkd killed only
+    cached processes (oom adj 900+), except the 600 MB page, which once also restarted Gboard
+    and the Play Store.
+  - 1792 MB looked the same: the app kept its process 5/5, no kill below the cached range before
+    the 600 MB page. The 300 MB page had a median of 0 lmkd kills (0-5; 2048: 0, 0-2). At the
+    600 MB page lmkd killed more (median 31, 16-34, against 0, 0-34), `android.process.acore`
+    was gone once, and one WebView renderer was killed below the cached range.
+  - 1536 MB killed the app under test at the 600 MB page in 2 of 2 runs (2048: 0 of 7) and
+    restarted GMS (once also `gms.persistent`), Gboard and the launcher. The 300 MB page made
+    lmkd kill 20-26 processes (2048: 0-2), once `android.process.acore`.
+  - 1024 MB killed the app under test after Settings, Chrome and the Play Store, restarted GMS
+    and Gboard during the shop task itself, and never finished the 300 MB page (60 s).
+- **Verdict:** the default stays 2048. 1792 MB is the only size below it with no measurably
+  slower flow and no kill of the app under test (n=5). It saves about 195 MB of host memory per
+  device (6%), but it is not the same device: apps see a smaller large heap (448m), about 25% less
+  available memory (MemAvailable after a cold boot, medians 437 against 582 MB), and under a 600 MB page lmkd kills more. Set `AGEMU_ANDROID_RAM_MB=1792` for
+  new AVDs if that trade suits the app. 1536 and below are slower and lose app processes.
+
+**vCPUs** (2048 MB, `pixel-9`; 2 cores: 3 blocks, 3 cores: 2, 4 cores: 6):
+
+| | 4 (default) | 3 | 2 |
+|---|---|---|---|
+| device CPU-s: agent step | 1.20 (n=20) | 1.11 (n=8) | **1.00** (n=12), -17% |
+| device CPU-s: Settings cold launch / shop task / reset | 1.04 / 11.19 / 4.11 | 0.91 / 10.55 / 3.50 | **0.85 / 9.23 / 3.26** (-19 / -18 / -21%) |
+| agent step / Settings cold launch | 736 / 345 ms | 725 / 315 | 748 / 339 (p=0.70 / 0.64) |
+| **shop cold launch** | 206 ms (194-236) | 218 (200-224) | **221 (201-283), +7%, p=0.014** |
+| shop task / reset / powered-off boot | 10.87 / 1.55 / 4.96 s | 10.73 / 1.42 / 5.02 | 10.85 / 1.41 / 4.93 |
+| idle (% of a core, 30 s) | 13.9 (9.4-115.4, n=18) | 9.5 (5.6-12.8, n=6) | 11.8 (9.2-27.1, n=9) |
+| host memory (region sum) | 3264 MB | 3264 | 3305 |
+
+- Fewer vCPUs do the same guest work in less host CPU time; the idle windows overlap too much to
+  show a saving at rest.
+- The shop's cold launch was slower at 2 cores in every block (block medians 211-249 ms against
+  197-213 ms at 4). Apps see 2 processors (`nproc`, `Runtime.availableProcessors()`), and thread
+  pools sized from it shrink. Fidelity runs (4 at 2 cores, 2 at 3) killed nothing below the
+  cached range.
+- `scripts/e2e-android.sh` passed 44/44 at 2 cores and at 4.
+- **Verdict:** not a default (one flow slower, and the guest differs). `AGEMU_ANDROID_CORES=2`
+  applies to new AVDs, like the RAM. The cores are fixed when the AVD is created, because the
+  baseline snapshot holds them.
+
+**Display size** (`small-phone` 720x1600@320 created as the AVD's native profile, against
+`pixel-9` 1080x2424@420; 2 blocks against 6):
+- Host memory (region sum) 40 s after a reset: 2990 MB (2986-2993) against 3264. GPU 179
+  against 328 MB, MALLOC_LARGE 472 against 587 MB: **-274 MB**; -303 MB after the flows.
+- Reset 1.15 s against 1.55 s (-26%, p=0.003), device CPU per reset 2.95 against 4.11 CPU-s.
+  Powered-off boot 4.69 against 4.96 s.
+- Agent step 737 against 736 ms, with 11% fewer device CPU-seconds (1.07 against 1.20); agemud's
+  own CPU per shop task 0.30 against 0.33 CPU-s. The shop task itself took longer (11.6 s), only
+  because the smaller screen needs more scrolling to reach its product.
+- A profile is the user's choice of device, so this is not a default: a screen the size of a
+  budget phone (`agemu create --profile small-phone`) costs about 0.27 GB less per device.
+
+**Seen on the way:**
+- **Emulator crash on a snapshot load after Chrome.** One reset (2048 MB, the reference) crashed
+  the emulator: `hvf_map_safe: FATAL: tried to map [0x9fbff8000 0x9fc000000) ... while it was
+  mapped to [0x9faffc000 0x9fbffc000)`. It came after a session in which Chrome had created a
+  Vulkan device and a WebView page had run. agemu then waited for the restored agent until the
+  CLI's 3-minute limit, without noticing that the emulator was gone. Afterwards, every fidelity
+  run started from a fresh emulator process and the emulator was powered off after it, so a
+  snapshot load after Chrome was not tried again; how often it crashes is not known.
+- **A tap on a text field, then `type`, can type into the previous field.** In 17 of 102 runs of
+  the shop task, on every arm (2048/4: 3 of 28), `type London` right after `tap --text City` went
+  into the street field ("12 Analytical StLondon"), so the order was refused. Waiting until the
+  tapped field reported focus before typing (fidelity runs only) avoided it in 7 of 7 runs; before
+  that wait, 5 of 21 fidelity runs had stopped on it. agemu's `tap` returns once the touch is
+  queued (see Caveats), so the next call can act before the app has moved focus.
+- **Installed apps survive a new baseline.** Deleting the baseline keeps `userdata`, so apps
+  installed earlier go into the next baseline.
+
 ### End-to-end run
 
 Round 5's merge (2026-11-07, agemu-lab, compressed baseline, load average 2.9-5.9):
@@ -1391,6 +1513,7 @@ and a "keeps stopping" dialog covered the lab screen after the second crash.
   - On this emulator `-lowram` does **not** set `ro.config.low_ram` in the guest. Verified: the property is empty, and `dumpsys meminfo` reports `Total RAM: 2,041,792K` with `Tuning: ... (high-end-gfx)`, not low-ram. So the device behaves like a normal 2 GB phone.
   - agemu re-checks `ro.config.low_ram` after every cold boot and logs a warning if it is ever set.
   - `AGEMU_ANDROID_RAM_MB=4096` drops the flag. The snapshot then grows from about 2 GB to about 4 GB.
+  - The emulator sets `dalvik.vm.heapsize` (an app's large heap) from the RAM size: 512m at 2048 MB, 448m at 1792, 384m at 1536, 336m at 1280 and below. `heapgrowthlimit` stays 192m. See "Guest RAM, vCPUs and display size".
 - **Non-native profiles are resampled.** Only the AVD's native profile is pixel-exact; see Screen profiles.
   - For larger profiles (fold, tablet, pixel-9-pro on a 1080x2424 AVD) the framebuffer has fewer pixels than the profile, so screenshots are upscaled and slightly soft.
   - Taps land within one framebuffer pixel, which is up to 2 profile pixels for the fold profile.

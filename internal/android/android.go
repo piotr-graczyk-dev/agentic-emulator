@@ -678,6 +678,11 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			// guest, which keeps cold-booting (-no-snapshot-load); the baseline is retaken below.
 			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
+		case err != nil && configMismatch(err):
+			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
+			// taken. Refused the same way, before the guest is touched; retaken below.
+			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it", d.name, baselineSnapshot, err)
+			loadBaseline, retake = false, true
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
 		default:

@@ -186,6 +186,15 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	}
 	// The SDK leaves an empty sdcard image behind for hw.sdCard=yes; we disable the SD card.
 	_ = os.Remove(filepath.Join(a.Dir, "sdcard.img"))
+	set := avdConfig(name, prof)
+	if err := patchINI(filepath.Join(a.Dir, "config.ini"), set, []string{"disk.dataPartition.path"}); err != nil {
+		return avdInfo{}, err
+	}
+	return loadAVD(name)
+}
+
+// avdConfig is what createAVD writes into a new AVD's config.ini on top of avdmanager's defaults.
+func avdConfig(name string, prof api.Profile) map[string]string {
 	set := map[string]string{
 		"AvdId": name, "avd.ini.displayname": name, "avd.id": name, "avd.name": name,
 		"hw.lcd.width": strconv.Itoa(prof.Width), "hw.lcd.height": strconv.Itoa(prof.Height),
@@ -204,10 +213,14 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 		"firstboot.saveToLocalSnapshot": "no", "fastboot.forceFastBoot": "no",
 		"agemu.profile": prof.Name,
 	}
-	if err := patchINI(filepath.Join(a.Dir, "config.ini"), set, []string{"disk.dataPartition.path"}); err != nil {
-		return avdInfo{}, err
+	// vCPUs, like the RAM, are set when the AVD is created: the baseline snapshot holds the
+	// guest's CPUs, so changing hw.cpu.ncore later makes the next boot retake the baseline
+	// (configMismatch). Unset, avdmanager's default stays (4 for the default image). See
+	// docs/ANDROID.md, "Guest RAM, vCPUs and display size".
+	if n := envInt("AGEMU_ANDROID_CORES", 0); n > 0 {
+		set["hw.cpu.ncore"] = strconv.Itoa(n)
 	}
-	return loadAVD(name)
+	return set
 }
 
 // patchINI rewrites key=value pairs in place, keeping order; drop lists keys to delete.

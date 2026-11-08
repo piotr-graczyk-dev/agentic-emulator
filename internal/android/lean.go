@@ -60,6 +60,14 @@ func rendererMismatch(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "different renderer")
 }
 
+// configMismatch reports the emulator refusing a snapshot taken with another AVD hardware
+// configuration ("Snapshot load failure: different AVD configuration"), e.g. after hw.ramSize or
+// hw.cpu.ncore was changed in the AVD's config.ini. Without a retake every boot failed until the
+// snapshot was deleted by hand (seen on emulator 37.1 for both keys, 2026-11-08).
+func configMismatch(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "different AVD configuration")
+}
+
 // animationsOff: AGEMU_ANDROID_ANIMATIONS=0 sets the system's window, transition and animator
 // duration scales to 0 after every boot and reset, as Espresso setups do. Screen changes then
 // finish at once: the agent step (find, tap, wait for the next screen, screenshot) took 357-379
