@@ -632,16 +632,28 @@ Measured on agemu-r6-autopark-a (iPhone 17 Pro, iOS 26.5, lean), host load avera
 - Device CPU running idle, 0 parked: on the home screen 0.9-2.1% of a core per simulator (two
   iPhone 17 Pro, 1.48 CPU-s per minute together, 1.16-2.49, 4 blocks) and 2.5-4.4% on an iPhone
   16e (the review, n=3, one more window of 78.7% a minute after a boot left out); with the test
-  app in front 8.3% (7.4-8.4, n=3, indicative); r5-s2's Park screen, with a 0.5 s timer and a TCP
-  stream, 12.5%. So auto-park saves about 0.5-7.5 CPU-s per idle simulator-minute, depending on
-  the device and what its screen runs.
+  app in front 4.4% (4.2-4.7, n=4, 20 s windows alternated, a new iPhone 17 Pro; an earlier 8.3%,
+  7.4-8.4, n=3, came from the simulator later damaged by the base race runs); r5-s2's Park screen,
+  with a 0.5 s timer and a TCP stream, 12.5%. So auto-park saves about 0.5-7.5 CPU-s per idle
+  simulator-minute, depending on the device and what its screen runs.
 - It did not speed up a simulator in use: with two idle simulators parked or not (4 blocks of 5
   flows per arm, alternated, `AGEMU_AUTO_PARK=30s`), the active one's flow took 7.31 s against
   7.22 s (block medians, 7.25-7.52 and 7.16-7.44), 4.44 against 4.28 CPU-s per flow, host CPU 4.17
   against 4.15 busy cores; footprints, free memory and swap-ins did not change.
-- `scripts/e2e-ios.sh` with the device names changed to agemu-r6-autopark-a and the profile
+- Profile switches onto a parked simulator (a new iPhone 17 Pro and iPhone Air, the only agemu
+  simulators of their types; switching to the profile iphone-air from the 17 Pro): with
+  `AGEMU_AUTO_PARK=10s`, the Air parked 10.2-11.1 s after its last call while the 17 Pro was in
+  use, and the switch resumed it and returned in 60-125 ms (4 of 4; the daemon's resume before the
+  switch); with auto-park off and the Air parked by `agemu park`, 52-59 ms (3 of 3; the backend's
+  resume). Each time the Air was running afterwards and its screenshot was 1260x2736. Before the
+  fix such a switch was still waiting after 60 s (2 of 2, the review).
+- `ios:<lower-case udid>`: a call under it resumed a park made under the upper-case id (131-196
+  ms, 3 of 3), and a 25 s `wait` under it held off the park (0 stopped samples in 44 polls, 3 of 3).
+- `scripts/e2e-ios.sh` with the device names changed to the lane's simulator and the profile
   switches left out (they use the shared agemu-iphone-se-3 and agemu-ipad-mini): 85 of 85 with
-  auto-park off and with `AGEMU_AUTO_PARK=10s`.
+  auto-park off (twice) and with `AGEMU_AUTO_PARK=10s` (twice); one more run with 10 s failed 2
+  checks when the tap on General hit an "Apple Intelligence & Siri" row inserted above it (see
+  "Taps on a list that changes after the read"), with no park in that run until its end.
 
 It stays opt-in: the CPU it frees did not make the devices in use faster, and a park changes what
 the app sees (clocks, timers, see above) without the agent asking.

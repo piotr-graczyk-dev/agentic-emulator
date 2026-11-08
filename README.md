@@ -556,8 +556,8 @@ Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host
 |---|---|---|
 | parked after the last call, `AGEMU_AUTO_PARK=15s` | 15.0-16.0 s (n=6) | 15.2-15.8 s (n=5) |
 | first call after it: `ui` | 66-94 ms (n=6) | 9-17 ms (n=5) |
-| device CPU, running idle / auto-parked | home screen: 0.9-4.4% of a core (two iPhone 17 Pro, 4 blocks of about 36 s: 0.9-2.1%; an iPhone 16e, n=3: 2.5-4.4%) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
-| saved per idle device-minute | 0.5-2.6 CPU-s on the home screen; more with an app running (docs/IOS.md) | 5.3 CPU-s |
+| device CPU, running idle / auto-parked | home screen: 0.9-4.4% of a core (two iPhone 17 Pro, 4 blocks of about 36 s: 0.9-2.1%; an iPhone 16e, n=3: 2.5-4.4%); the test app in front: 4.4% (4.2-4.7, n=4) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
+| saved per idle device-minute | 0.5-2.6 CPU-s (home screen, test app) | 5.3 CPU-s |
 
 - **It did not make an active device faster.** One simulator ran r5-s1's Settings and test-app
   flow while two idle simulators were parked or not (4 blocks of 5 flows per arm, alternated):
