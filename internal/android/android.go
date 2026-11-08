@@ -938,6 +938,20 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
 	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+	// Work the guest still has pending would run again after every reset (see quiet.go).
+	d.waitGuestSettled(ctx, serial, time.Now())
+	if baselineUptime() > 0 {
+		// Anything that came up during the wait (a dialog, a notification shade) is dismissed;
+		// on the home screen the key does nothing.
+		_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
+		_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+		bctx, bcancel := context.WithTimeout(ctx, 60*time.Second)
+		if _, err := adbShellOK(bctx, serial, "am wait-for-broadcast-idle"); err != nil {
+			logf("%s: broadcast queue not idle: %v", d.name, err)
+		}
+		bcancel()
+	}
+	d.zeroFreeMemory(ctx, serial)
 	// The snapshot must contain a running agent, so boots from it are agent-ready at once.
 	if _, err := ensureAgent(ctx, a, logf); err != nil {
 		return fmt.Errorf("agent not running before snapshot: %w", err)

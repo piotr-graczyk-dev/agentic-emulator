@@ -104,7 +104,7 @@ var tools = []tool{
 	{Name: "devices", method: "devices", Description: "List Android and iOS devices with state, profile and screen size.", InputSchema: obj(map[string]any{})},
 	{Name: "profiles", method: "profiles", Description: "List screen profiles (real device sizes) usable with set_profile.", InputSchema: obj(map[string]any{"platform": str("android or ios")})},
 	{Name: "create", method: "create", Description: "Create a new device.", InputSchema: obj(map[string]any{"platform": str("android or ios"), "name": str("Device name"), "profile": str("Profile name")}, "platform", "name")},
-	{Name: "boot", method: "boot", Description: "Boot a device to an agent-ready state (warm snapshot, seconds).", InputSchema: obj(map[string]any{"device": device, "cold": boolT("Force a cold boot")})},
+	{Name: "boot", method: "boot", Description: "Boot a device to an agent-ready state (warm snapshot, seconds). The first boot of a new Android device also builds its baseline snapshot and takes about 8 minutes.", InputSchema: obj(map[string]any{"device": device, "cold": boolT("Force a cold boot")})},
 	{Name: "shutdown", method: "shutdown", Description: "Shut a device down.", InputSchema: obj(map[string]any{"device": device})},
 	{Name: "reset", method: "reset", Description: "Restore a booted device to its clean baseline state (fast).", InputSchema: obj(map[string]any{"device": device})},
 	{Name: "park", method: "park", Description: "Park a booted device: stop it in place, so it uses no CPU and the host can reclaim its memory, keeping its apps and screen as they are. The next call on it resumes it (or use resume).", InputSchema: obj(map[string]any{"device": device})},

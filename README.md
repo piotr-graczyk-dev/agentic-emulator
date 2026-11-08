@@ -427,6 +427,16 @@ launch rows are
   (1.36 s on 2026-11-06); that was not measured again. agemu always sets the emulator's
   `ANDROID_SNAPSHOT_COMPRESS`; `AGEMU_ANDROID_SNAPSHOT_COMPRESS=0` keeps the baseline raw. See
   [docs/ANDROID.md](docs/ANDROID.md#caveats) (Disk).
+- **Quiet baseline** (vs: **prev**, the baseline saved 20 s after boot). A snapshot restores the work
+  the guest had pending, so it ran again after every reset: Play Store jobs and app updates, the app
+  freezer's compactions, Play services' flag push. agemu now saves the baseline once the guest has
+  been up 7 minutes and has been quiet for a minute (CPU and network). Emulator CPU in the 2 minutes
+  after a reset fell from 54.0 to 11.5 CPU-seconds (-79%; n=8 per arm, interleaved; 49.0 over all
+  22 resets of the old baseline), idle CPU after that from 44% to 9.1% of a core, `phys_footprint`
+  from 5.0 to 3.88 GB; resets, boots and the agent step were not slower. A new device's first boot
+  takes about 7-8 minutes instead of about 1, once. Existing devices keep their baseline until it is
+  retaken. `AGEMU_ANDROID_BASELINE_UPTIME_S=0` saves at once. See
+  [docs/ANDROID.md](docs/ANDROID.md#quiet-baseline-2026-11-08).
 - **Frame stream idle stop** (vs: **prev**, f4286db). After 30 s without calls agemu stops its frame
   stream if the screen is still posting frames, and the next call restarts it. With an app that
   keeps animating, emulator plus daemon CPU fell from 57.5% to 39.9% of a core (n=7 per arm). The
@@ -473,6 +483,7 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: keep the Google apps (applies when a baseline is taken). |
 | `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |
+| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; `0`: save at once (applies when a baseline is taken). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Seconds without calls before the frame stream of a changing screen stops; `0`: never. |
 | `AGEMU_ANDROID_ANIMATIONS` | normal | `0`: system animations off. |
 | `AGEMU_IOS_ANIMATIONS` | normal | `0`: UIKit and SwiftUI animations ×0.05 (or a factor from 0.05 to 1). |

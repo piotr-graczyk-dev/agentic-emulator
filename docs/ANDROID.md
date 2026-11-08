@@ -26,7 +26,7 @@ agemu daemon (Go, internal/android)
 make android-build                                              # bin/android/{agemu,agemud,agemu-bench}
 export AGEMU_HOME=$HOME/.agemu-dev-android                      # optional, default ~/.agemu
 bin/android/agemu create --platform android --name pixel        # -> android:agemu-pixel (no download)
-bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (~1 min)
+bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (~7-8 min, once)
 bin/android/agemu launch com.android.settings
 bin/android/agemu ui                                            # outline; --json for the full tree
 bin/android/agemu tap --text "Network & internet"
@@ -50,7 +50,9 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
-| `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline snapshot. |
+| `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline steps (stylus, lean apps, keyboard). |
+| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Before saving the baseline, wait until the guest has been up this long and has been quiet for a minute (CPU and network), so work it still had pending does not run again after every reset; see Quiet baseline. `0`: save right after the baseline steps (agemu before 2026-11-08). Applies when a baseline is taken. |
+| `AGEMU_ANDROID_BASELINE_ZERO_MB` | `0` | Opt-in: zero-fill this many MB of free guest memory just before the baseline is saved (capped 128 MB below MemAvailable). `ram.bin` gets smaller; the restored guest has a smaller page cache. See Quiet baseline. |
 | `AGEMU_ANDROID_STREAM` | `1` | `0`: no frame stream; every screenshot reads the framebuffer (`getScreenshot`). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Close the frame stream after this many seconds without a call to the device, if the screen is still posting frames then (at least one per 3 s over the last 10 s); the next call reopens it. `0`: keep it open. See Screenshots. |
 | `AGEMU_ANDROID_AGENT_TCP` | `1` | `0`: reach the agent through adb only (no console port redirection). |
@@ -234,14 +236,15 @@ Any TCP failure falls back to adb.
   - phone hardware: `hw.keyboard=no`, `hw.mainKeys=no` (gesture navigation), no dpad, trackball or SD card;
   - quickboot auto-snapshots off.
 - **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu host -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
-  - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 45 s once).
+  - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 7-8 minutes once, see Quiet baseline).
   - With a baseline, agemu restores it in place (gRPC `LoadSnapshot`) as soon as gRPC answers, before the cold boot gets anywhere. Restoring it at startup (`-snapshot`) corrupts guest memory on this emulator; see Guest restarts.
   - The process is detached from the daemon.
   - Ports are taken from 5580/8580 upward and skip ports used by any running emulator.
 - **Agent-ready** means `sys.boot_completed=1` **and** the on-device agent answers.
 - **Baseline.** On the first boot agemu waits 20 s for the device to settle, then:
-  - turns stylus handwriting off (see Caveats) and warms up the keyboard;
+  - turns stylus handwriting off (see Caveats), turns the lean apps off and warms up the keyboard;
   - clears recent tasks and goes home;
+  - waits until the guest has been up 7 minutes, has shown the home screen for a minute and has been quiet for a minute (below 10% of a vCPU and 50 KB/s received in each 10 s sample; at most 10 minutes past the 7), then waits for the broadcast queue to drain (see Quiet baseline). A first boot therefore takes about 7-8 minutes, once;
   - deletes its console redirections and closes its agent connection (see Agent transport);
   - saves the one snapshot it keeps, `agemu-baseline`, with the agent running inside it. Every boot or reset from it is agent-ready at once.
   - If agemu is upgraded and the snapshot holds an older agent, it is retaken once.
@@ -607,6 +610,95 @@ in use) the emulator's `phys_footprint` exceeded the sum of its memory regions (
 The idle CPU rows above are single sessions on a busy host. The interleaved 30 s windows on the
 launcher home in the next section ranged from 5.8% to 93.4% of a core, as the guest's own
 background work comes and goes.
+
+### Quiet baseline (2026-11-08)
+
+A snapshot restores the guest exactly as it was saved, including work it still had pending. That
+work runs again after every reset and powered-off boot. agemu used to save the baseline 20 s after
+`sys.boot_completed` plus its baseline steps, so how much was pending depended on how fast the
+cold boot was: on `agemu-lab` one baseline was saved at 49 s of guest uptime (quiet host), an older
+one at about 290 s (busy host).
+
+What a restored guest replayed (guest logs and `/proc` after a reset or boot, 2 GB guest, host GPU):
+- **Play Store jobs and updates.** With the baseline saved at 49 s of uptime, Play Store's daily
+  hygiene jobs started 23 s after every restore. One baseline was saved while Play Store was
+  auto-updating WebView (a 97 MB download at 29%): every restore resumed the download, installed
+  the update and ran its dexopt about 98 s later.
+- **The app freezer.** Apps started for the boot were frozen and compacted again (`am_compact`)
+  10-50 s after every restore: 26-31 compactions per restore with the early baseline, 4 with a
+  settled one.
+- **Play services' flag push**, about 357 s after a cold boot. With the baseline saved at 290 s it
+  came 68 s after every restore: 34 DeviceConfig namespaces, and system_server logged about 1,350
+  lines (its flag mapper cannot reach the `aconfigd` sockets in this image).
+- **The clock change.** The guest's clock jumps by the time since the save (`TIME_SET`; UsageStats
+  "Time changed by +8h0m30s"), which starts Settings' battery receiver and wakes Play services. This
+  one is correct behaviour and stays.
+
+agemu now waits, before the save, until the guest has been up `AGEMU_ANDROID_BASELINE_UPTIME_S`
+(420 s), has shown the home screen for a minute, and has been quiet for a minute: six 10 s samples
+in a row below 10% of one vCPU (`/proc/stat`) and below 50 KB/s received (`/proc/net/dev`); at most
+10 minutes past the uptime target. Then it waits for the broadcast queue to drain
+(`am wait-for-broadcast-idle`). A first version checked only the CPU, below 20% for 30 s: it saved
+the baseline during the WebView download above (a download uses little CPU) and was as busy after
+restores as the old default. The network check made the same AVD wait out the update.
+
+Measured on `agemu-lab`, emulator 37.1.11, host GPU, lean, compressed baseline, the agemu daemon
+attached, launcher home on screen, emulator CPU and `phys_footprint` from `.lab/meter.py`, arms
+interleaved (whole AVD directories swapped while powered off, each block a powered-off boot and two
+resets, each followed by a 120 s window, then two 30 s idle windows), host load average 2-11 (one
+block 29). The "agemu now" column and its default arm ran in the same 8 blocks (D: 47.4 CPU-s after a
+boot and 54.0 after a reset there, n=4 and 8). "Settled, by hand" is the 420 s procedure done with fixed waits (360 s settle, then the
+steps, then 60 s); "settled, agemu now" is the shipped code:
+
+| per restore | default before (saved at 49 s of uptime) | settled, by hand | **settled, agemu now** |
+|---|---|---|---|
+| emulator CPU in the 120 s after a reset | 49.0 CPU-s (43.1-89.1, n=22) | 12.3 (6.5-13.9, n=10) | **11.5** (9.4-12.1, n=8) |
+| emulator CPU in the 120 s after a powered-off boot | 44.1 (40.6-52.2, n=11) | 12.5 (11.6-13.2, n=5) | **11.9** (11.8-12.5, n=4) |
+| idle CPU after that (30 s windows) | 33% of a core (11.1-76.1, n=22) | 10.7% (7.2-13.9, n=10) | **9.1%** (7.7-10.8, n=8) |
+| `phys_footprint` 120 s after a reset | 4.99 GB (4.78-5.09) | 3.95 GB (3.84-4.05) | **3.88 GB** (3.77-4.01) |
+| `am_compact` per reset | 28 (26-31) | 4 (4-5) | 4.5 (4-5) |
+| reset (wall) | 1.92 s (1.47-2.63) | 2.13 s (1.39-2.46) | 1.44 s (1.33-1.76) |
+| powered-off boot to agent-ready | 5.47 s (5.07-6.02) | 5.66 s (5.20-5.72) | 5.23 s (4.98-5.25) |
+| `ram.bin` | 0.86 GB | 0.87-0.95 GB (two baselines) | 0.89 GB |
+| agent step (`agemu-bench`, daemon, n=10 x 2, 150 s after a reset) | 1337, 1336 ms | - | 1324, 1337 ms |
+
+- **The cost** is the first boot of a device (and any retake): 435-460 s instead of about 54 s,
+  once. Boots and resets from the baseline are as fast as before.
+- **Steady state.** On the older baseline (saved at about 290 s of uptime) the emulator used 6.2% of a
+  core 3-4 minutes after a reset; per-thread CPU put all of the extra in the first minutes on the
+  4 vCPU threads (guest work), not on the emulator's own threads.
+- **Existing devices keep their baseline** until it is retaken. agemu retakes it by itself only on
+  an agent upgrade or a GPU mode change; to retake it now, power the device off (`shutdown` twice),
+  delete `~/.android/avd/<avd>.avd/snapshots/agemu-baseline`, and `boot`.
+- **Not measured:** baselines days old. Apps that keep a "last run" wall-clock time could see a day
+  pass on every restore and run daily work again; the oldest baseline measured here was 8 hours old.
+  A Play Store update that starts in the last seconds before the save would still be captured.
+- **Fidelity** (on the shipped baseline): `scripts/e2e-android.sh agemu-lab` passed 44/44. Play
+  services enabled and running, the WebView provider valid (WebView had updated itself during the
+  wait), Gboard the default keyboard, Play Store opened to its sign-in screen, Chrome loaded
+  example.com, Settings search typed through the keyboard, Bluetooth on. A 10-minute idle soak
+  after a reset had no crash in the crash buffer and no dropbox entry; in a second one the Bluetooth
+  stack aborted once ("hci_layer.cc:589 on_hardware_error: Hardware Error Event with code 0x42",
+  6 minutes after the reset). The default baseline did the same in its soak (4.4 minutes after the
+  reset), and the older baseline 19.5 s after a powered-off boot: it is not caused by the quiet
+  baseline (see Parking for the same abort after a resume).
+
+**Explored and not shipped:**
+- **Auto-rotate off** (`accelerometer_rotation 0`): idle 8.65% (5.7-9.6) against 9.8% (8.1-14.2)
+  of a core, 6 ABBA pairs of 30 s windows in one running device; 4 of 6 pairs lower. The
+  accelerometer stays on anyway for system_server's `FaceDownDetector`. No measurable gain.
+- **Zero-filled free memory** (`AGEMU_ANDROID_BASELINE_ZERO_MB`, opt-in). The emulator saves an
+  all-zero guest page as an index entry and restores it by leaving a zero host page alone
+  (`RamLoader::zeroOutPage` calls `isBufferZeroed` before `bzero`); pages the guest kernel freed
+  still hold old data. A shell `dd` that reads 400 MB of `/dev/zero` into one buffer and frees it
+  (0.15 s; no process killed for it) before the save gave `ram.bin` 0.67 GB against 0.87-0.95 GB
+  with the same procedure. Against such a baseline (2 blocks each, interleaved, 6 resets): emulator
+  CPU per load 2.93 CPU-s (2.75-4.21) against 3.65 (3.10-5.10), reset 1.31-1.67 s against
+  1.29-4.58 s, `phys_footprint` 15 s after a reset the same (3.87-4.64 against 3.94-4.64 GB), cold
+  launch after a reset not slower (Settings 0.31-0.42 s against 0.30-1.41 s, Chrome 0.24-0.27 s
+  against 0.28-1.02 s). The restored guest's page cache is 200 MB smaller (597 -> 396 MB). Footprint
+  under host memory pressure, where zero pages compress to nothing, was not measured; n is small, so
+  it stays opt-in.
 
 ### Frame stream idle stop (2026-11-06, night)
 
