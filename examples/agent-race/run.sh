@@ -219,4 +219,9 @@ if [[ -f "$OUT/android/picked.json" && -f "$OUT/ios/picked.json" ]]; then
     --race "$(race_spec Android "$OUT/android" classic agent-device argent agemu)" \
     --race "$(race_spec iOS "$OUT/ios" agent-device argent agemu)" \
     --out "$OUT/montage.mp4" --gif "$OUT/teaser.gif"
+  uv run -q --with pillow examples/agent-race/montage.py \
+    --race "$(race_spec Android "$OUT/android" classic agent-device argent agemu)" \
+    --race "$(race_spec iOS "$OUT/ios" agent-device argent agemu)" \
+    --out "$OUT/.montage-ios.mp4" --gif "$OUT/ios/race.gif" --gif-race 2
+  rm -f "$OUT/.montage-ios.mp4"
 fi

@@ -110,8 +110,16 @@ An 18-step shopping task in the [Agemu Shop example app](examples/shop) (sign in
 cart, checkout), the same agent plan driven by each tool stack's CLI with no model think time:
 the standard emulator with `adb` and `uiautomator`, agent-device 0.21.36 and Argent 0.32.0 on
 standard devices, and agemu on agemu devices. 3 runs per stack, the order rotated each round, all
-21 completed. vs: **std** and vs: **agent**. Videos, method and caveats:
+21 completed. vs: **std** and vs: **agent**. Method and caveats:
 [examples/agent-race](examples/agent-race).
+
+| Android: `adb`, agent-device, Argent, agemu | iOS: agent-device, Argent, agemu |
+|---|---|
+| [![Android race](examples/agent-race/out/teaser.gif)](examples/agent-race/out/android/race.mp4) | [![iOS race](examples/agent-race/out/ios/race.gif)](examples/agent-race/out/ios/race.mp4) |
+| [full race, real time (mp4)](examples/agent-race/out/android/race.mp4) | [full race, real time (mp4)](examples/agent-race/out/ios/race.mp4) |
+
+The GIFs run in real time until agemu finishes, then sped up; the timers keep the true time. Both
+races in one video: [montage (67 s)](examples/agent-race/out/montage.mp4).
 
 | task time | standard + `adb` | agent-device | Argent | agemu |
 |---|---|---|---|---|

@@ -6,7 +6,9 @@ Argent, against agemu; on iOS a standard Simulator with agent-device and Argent,
 Every run is recorded; the median run of each stack is rendered side by side, per platform and in
 one montage.
 
-[![Montage: the Android and iOS races, then the task times](out/teaser.gif)](out/montage.mp4)
+| Android | iOS |
+|---|---|
+| [![Android race](out/teaser.gif)](out/android/race.mp4) | [![iOS race](out/ios/race.gif)](out/ios/race.mp4) |
 
 **Videos:** [montage, both platforms (67 s)](out/montage.mp4) ·
 [Android race, 4 stacks, real time](out/android/race.mp4) ·
