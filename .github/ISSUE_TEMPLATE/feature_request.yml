@@ -1,0 +1,16 @@
+name: Feature request
+description: A capability an agent needs, or something that should be faster
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What the agent needs to do
+      description: The task, and what the standard tools or agemu do today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+      description: Optional. The CLI command or MCP tool you have in mind.

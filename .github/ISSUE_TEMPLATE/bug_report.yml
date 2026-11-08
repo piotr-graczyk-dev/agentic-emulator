@@ -1,0 +1,32 @@
+name: Bug report
+description: Something agemu does wrong, or a command that fails
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran (CLI commands or MCP calls), what you expected, and what you got.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [iOS, Android, both, neither (install or daemon)]
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: The agemu commit or version, your Mac (chip, macOS), Xcode and Android SDK versions.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Daemon log
+      description: The relevant lines of ~/.agemu/daemon.log.
+      render: text
