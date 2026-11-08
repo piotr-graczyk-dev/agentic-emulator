@@ -7,17 +7,15 @@ package ios
 // ends such clean daemons first when it needs memory (JETSAM_REASON_MEMORY_IDLE_EXIT), and
 // launchd starts them again at the next request; the simulator only does so when the Mac runs
 // short of memory. After a cold boot iOS starts dozens of them for one-off work and they then
-// sit idle. A lean simulator ends the ones that stay idle and clean, the way jetsam would, and
-// leaves alone any that iOS starts again (see idlePasses); by default only those that serve no
-// public app API (see appFacing).
+// sit idle. A lean simulator ends the ones that stay idle and clean, the way jetsam would (see
+// idlePasses for what counts as idle); by default not those in appFacing, the daemons found to
+// serve a public app API.
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -46,11 +44,12 @@ func idleExitOn() bool {
 // idleExitAll: AGEMU_IOS_IDLE_EXIT=all also ends the daemons behind public app APIs (appFacing).
 func idleExitAll() bool { return strings.ToLower(os.Getenv("AGEMU_IOS_IDLE_EXIT")) == "all" }
 
-// appFacing are idle-exit daemons that serve a public API an app under test calls. Ended, the
-// app's first call after that waits for launchd to start the daemon again: Contacts and EventKit
-// took about 2 s instead of 0.15 s, StoreKit, WatchConnectivity and the speech voice list about
-// 0.9 s, MapKit directions up to 3 s (one probe run each way). So they are ended only with
-// AGEMU_IOS_IDLE_EXIT=all; by default only daemons with no public API of their own are.
+// appFacing are idle-exit daemons found to serve a public API an app under test can call. Ended,
+// the app's first call after that waits for launchd to start the daemon again: Contacts and
+// EventKit took about 2 s instead of 0.15 s, StoreKit, WatchConnectivity and the speech voice list
+// about 0.9 s, MapKit directions up to 3 s (one probe run each way). So they are ended only with
+// AGEMU_IOS_IDLE_EXIT=all. By default every other idle daemon may be ended; some of those may
+// serve public APIs not identified here.
 var appFacing = map[string]bool{
 	"contactsd": true, "calaccessd": true, "remindd": true, // Contacts, EventKit
 	"healthd": true, "usernotificationsd": true, "geod": true, // HealthKit, UserNotifications, MapKit
@@ -67,6 +66,18 @@ var appFacing = map[string]bool{
 	"searchd": true, "assetsd": true, "financed": true, "filecoordinationd": true, // CoreSpotlight, Photos, FinanceKit, NSFileCoordinator
 	"fontservicesd": true, "containermanagerd": true, // font registration, app and group containers
 	"installd": true, "installcoordinationd": true, // app installs (agemu install)
+	// Found by the round-6 skeptic among the daemons the default ended (a probe app called
+	// WeatherKit, AdServices, ManagedSettings, FamilyControls, File Provider, Verify with Wallet,
+	// ...): they serve public APIs too.
+	"weatherd": true, "adprivacyd": true, // WeatherKit, AdServices / AdAttributionKit
+	"ManagedSettingsAgent": true, "FamilyControlsAgent": true, // ManagedSettings, FamilyControls
+	"fileproviderd": true, "bird": true, "coreidvd": true, // File Provider, iCloud Drive, Verify with Wallet
+	"backgroundassets.user": true, "AppSSODaemon": true, "GSSCred": true, // Background Assets, Extensible SSO, GSS/Kerberos
+	"deviceaccessd": true, "clipserviced": true, "splashboardd": true, // AccessorySetupKit, App Clips, launch snapshots
+	"StatusKitAgent": true, "healthappd": true, "webprivacyd": true, // Focus status sharing, Health, WebKit privacy
+	"dataaccessd": true, "videosubscriptionsd": true, "biomed": true, // EventKit/Contacts accounts, VideoSubscriberAccount, INInteraction donations
+	"profiled": true, "amsondevicestoraged": true, "ProtectedCloudKeySyncing": true, // managed app configuration, App Store media services, CloudKit keys
+	"communicationtrustd": true, "finhealthd": true, // Live Caller ID Lookup, FinanceKit
 }
 
 // The kernel's dirty-tracking flags of a process (proc_get_dirty: PROC_DIRTY_*).
@@ -74,12 +85,13 @@ const (
 	dirtyTracked        = 0x1
 	dirtyAllowsIdleExit = 0x2
 	dirtyIsDirty        = 0x4
+	dirtyLaunching      = 0x8 // PROC_DIRTY_LAUNCH_IN_PROGRESS
 )
 
-// idleExitable: the process takes part in dirty tracking, allows idle exit, and is clean now
-// (no open transaction).
+// idleExitable: the process takes part in dirty tracking, allows idle exit, is clean now (no open
+// transaction) and is not being launched.
 func idleExitable(flags uint32) bool {
-	return flags&(dirtyTracked|dirtyAllowsIdleExit|dirtyIsDirty) == dirtyTracked|dirtyAllowsIdleExit
+	return flags&(dirtyTracked|dirtyAllowsIdleExit|dirtyIsDirty|dirtyLaunching) == dirtyTracked|dirtyAllowsIdleExit
 }
 
 // idleKeep are idle-exit daemons that are never ended: diagnosticd and logd_helper serve agemu's
@@ -93,23 +105,22 @@ func idleExitable(flags uint32) bool {
 // ended, the home key from Settings took 1.44-1.57 s instead of 1.15-1.25 s (8 boots each; 1.15
 // and 1.16 s with it kept); gamecontrollerd (the GameController framework) was started again at
 // once, and the new one then used 0.17-0.19 s of CPU a minute, with diagnosticd and backboardd
-// 0.3 s more, where the original one used none (4 of 4 boots; kept, it still did so in 1 of 4
-// boots, and in none of 16 without the stop: what else sets it off was not found).
+// 0.3 s more, where the original one used none (4 of 4 boots). (The original one too is busy
+// like that in some boots, without the stop as well.)
 var idleKeep = map[string]bool{
 	"diagnosticd": true, "logd_helper": true, "dasd": true, "followupd": true, "iconservicesagent": true,
 	"gamecontrollerd": true,
 }
 
 // The passes of stopIdleDaemons: every 30 s from 1 to 5 minutes after the device is ready, like
-// the background stop. A daemon is ended when two passes in a row found it idle-exitable and it
-// used less than idleCPU of CPU time between them.
+// the background stop. A daemon is idle when idleQuietPasses+1 passes in a row (60 s) found it
+// idle-exitable and its CPU time (in the kernel's own units, not rounded) did not change at all
+// between them: a daemon that serves an app's calls, even one every 45-60 s, uses CPU for each.
 const (
-	idleFirstPass = time.Minute
-	idlePassEvery = 30 * time.Second
-	idleLastPass  = 5 * time.Minute
-	// idleCPU is the CPU time an idle daemon may use between two passes (timers, a notification
-	// it reacted to).
-	idleCPU = 20 * time.Millisecond
+	idleFirstPass   = time.Minute
+	idlePassEvery   = 30 * time.Second
+	idleLastPass    = 5 * time.Minute
+	idleQuietPasses = 2
 	// idleKillAfter: a daemon that is still running this long after SIGTERM and still clean is
 	// sent SIGKILL, as launchd does for a pressured exit (most do not end on SIGTERM).
 	idleKillAfter = 3 * time.Second
@@ -117,12 +128,30 @@ const (
 	idleMaxEnds = 3
 )
 
+// procUsage is what the kernel's resource accounting (proc_pid_rusage) says about a process: its
+// user+system CPU time and its start time, both in mach units. Two reads of the same process have
+// the same start; a reused pid does not.
+type procUsage struct {
+	cpu, start uint64
+}
+
 // daemonProc is one process of the simulator that idlePasses looks at.
 type daemonProc struct {
 	pid   int
 	name  string // executable file name
 	flags uint32 // dirty-tracking flags
-	cpu   time.Duration
+	usage procUsage
+}
+
+// idleSnapshot is one look at a simulator for idlePasses.
+type idleSnapshot struct {
+	// root is the simulator's launchd_sim (0: the simulator is not running).
+	root int
+	// daemons are the simulator runtime's processes that launchd_sim started.
+	daemons []daemonProc
+	// firstApp is the start time of the earliest running process of an installed app (its
+	// executable or one of its extensions); 0 when none runs.
+	firstApp uint64
 }
 
 // idleEnv is what the passes observe and act on: one cold boot of a device (deviceIdle), or a fake
@@ -130,23 +159,31 @@ type daemonProc struct {
 type idleEnv interface {
 	waitUntil(at time.Duration) bool
 	current() bool
-	// daemons lists the simulator runtime's processes that launchd_sim started, with their
-	// dirty-tracking flags and CPU time.
-	daemons() ([]daemonProc, error)
-	// dirty reads one process's flags again; an error means it has exited.
-	dirty(pid int) (uint32, error)
+	// held: agemu is installing, launching or uninstalling an app on the device, or the device is
+	// parked or being parked. A pass then does nothing.
+	held() bool
+	snapshot() (idleSnapshot, error)
+	// recheck reads p again: gone when it has exited (or its pid now names another process),
+	// killable when it is the same process, still idle-exitable and the device is not held.
+	recheck(p daemonProc) (gone, killable bool)
 	signal(pid int, sig syscall.Signal) error
 	sleep(d time.Duration)
 }
 
-// idlePasses runs the passes and returns how many processes it ended, by name. Each pass ends the
-// daemons that the previous pass found too (same pid), that are idle-exitable at both passes and
-// used under idleCPU in between: SIGTERM, then SIGKILL after idleKillAfter if still running and
-// clean. A name is left alone for the rest of the boot when ending it did not hold: it was
-// running again at the next pass (something asks for it all the time, so ending it only costs a
-// relaunch), or it became dirty before the SIGKILL. A name that comes back later (a one-off job,
-// such as device management's on-reboot task at +120..200 s, started it) may be ended again once
-// it is idle, up to idleMaxEnds times per boot.
+// idlePasses runs the passes and returns how many processes it ended, by name.
+//
+// A daemon is ended when it has been idle for idleQuietPasses intervals in a row (same process,
+// idle-exitable at each pass, CPU time unchanged), it started before the first process of an app
+// in this boot (a daemon an app started, or that iOS started after the app was launched, may serve
+// that app and is left alone), and its name is not kept. Ending is SIGTERM, then SIGKILL after
+// idleKillAfter if recheck finds the same process still idle-exitable. A name is left alone for
+// the rest of the boot when ending it did not hold: it was running again at the next pass
+// (something asks for it all the time, so ending it only costs a relaunch), or it became busy
+// before the SIGKILL. A name that comes back later (a one-off job, such as device management's
+// on-reboot task at +120..200 s, started it) may be ended again once it is idle, up to
+// idleMaxEnds times per boot. A pass while the device is held does nothing and starts the
+// counting again; the passes stop when the simulator's launchd_sim changes (a boot not made by
+// agemu) or is gone.
 func idlePasses(env idleEnv, name string) map[string]int {
 	stopped := map[string]int{}
 	endedAt := map[string]int{} // pass index of the last end, by name
@@ -156,54 +193,80 @@ func idlePasses(env idleEnv, name string) map[string]int {
 			keep[n] = true
 		}
 	}
-	var prev map[int]daemonProc
+	prev := map[int]daemonProc{}
+	quiet := map[int]int{} // pid -> idle intervals in a row
+	root := 0
+	var firstApp uint64
 	i := 0
 	for at := idleFirstPass; at <= idleLastPass; at, i = at+idlePassEvery, i+1 {
 		if !env.waitUntil(at) || !env.current() {
 			break
 		}
-		procs, err := env.daemons()
+		if env.held() {
+			prev, quiet = map[int]daemonProc{}, map[int]int{}
+			continue
+		}
+		snap, err := env.snapshot()
 		if err != nil {
 			log.Printf("ios lean %s: idle daemons: %v", name, err)
 			break
 		}
+		if snap.root == 0 || (root != 0 && snap.root != root) {
+			if snap.root != 0 {
+				log.Printf("ios lean %s: the simulator was booted again outside agemu; idle passes stop", name)
+			}
+			break
+		}
+		root = snap.root
+		if snap.firstApp != 0 && (firstApp == 0 || snap.firstApp < firstApp) {
+			firstApp = snap.firstApp
+		}
 		cur := map[int]daemonProc{}
-		for _, p := range procs {
+		nextQuiet := map[int]int{}
+		var stop []daemonProc
+		for _, p := range snap.daemons {
 			cur[p.pid] = p
 			if e, ok := endedAt[p.name]; ok && e == i-1 {
 				keep[p.name] = true // back by the next pass
 			}
-		}
-		var stop []daemonProc
-		for _, p := range procs {
 			q, seen := prev[p.pid]
-			if !seen || q.name != p.name || idleKeep[p.name] || keep[p.name] || stopped[p.name] >= idleMaxEnds ||
-				!idleExitable(p.flags) || !idleExitable(q.flags) || p.cpu-q.cpu >= idleCPU {
+			if seen && q.name == p.name && q.usage.start == p.usage.start && idleExitable(p.flags) && idleExitable(q.flags) &&
+				p.usage.cpu == q.usage.cpu {
+				nextQuiet[p.pid] = quiet[p.pid] + 1
+			}
+			if nextQuiet[p.pid] < idleQuietPasses || idleKeep[p.name] || keep[p.name] || stopped[p.name] >= idleMaxEnds ||
+				(firstApp != 0 && p.usage.start >= firstApp) {
 				continue
 			}
 			stop = append(stop, p)
 		}
+		prev, quiet = cur, nextQuiet
+		if len(stop) == 0 {
+			continue
+		}
+		if env.held() {
+			prev, quiet = map[int]daemonProc{}, map[int]int{}
+			continue
+		}
 		for _, p := range stop {
 			_ = env.signal(p.pid, syscall.SIGTERM)
 		}
-		if len(stop) > 0 {
-			env.sleep(idleKillAfter)
-		}
+		env.sleep(idleKillAfter)
 		pass := map[string]int{}
 		for _, p := range stop {
-			if f, err := env.dirty(p.pid); err == nil {
-				if !idleExitable(f) {
-					keep[p.name] = true // busy again: it stays
+			gone, killable := env.recheck(p)
+			if !gone {
+				if !killable {
+					keep[p.name] = true // busy again (or the device is held): it stays
 					continue
 				}
 				_ = env.signal(p.pid, syscall.SIGKILL)
 			}
 			endedAt[p.name] = i
-			delete(cur, p.pid)
+			delete(prev, p.pid)
 			pass[p.name]++
 			stopped[p.name]++
 		}
-		prev = cur
 		if len(pass) > 0 {
 			log.Printf("ios lean %s: ended %s that were idle (pass at +%.0f s)", name, countedNames(pass, "idle daemons"), at.Seconds())
 		}
@@ -221,31 +284,48 @@ func (b *Backend) stopIdleDaemons(d simDevice, gen int) {
 // background stop's).
 type deviceIdle struct{ deviceBackground }
 
-func (e *deviceIdle) daemons() ([]daemonProc, error) {
-	if e.b.isParked(e.d.UDID) {
-		return nil, nil
-	}
+func (e *deviceIdle) held() bool { return e.b.isParked(e.d.UDID) || e.b.appOpBusy(e.d.UDID) }
+
+func (e *deviceIdle) snapshot() (idleSnapshot, error) {
 	out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
 	if err != nil {
-		return nil, err
+		return idleSnapshot{}, err
 	}
-	procs, _ := simChildren(string(out), e.d.UDID)
-	cpuOut, err := exec.Command("ps", "-axo", "pid=,time=").Output()
-	if err != nil {
-		return nil, err
-	}
-	return runtimeDaemons(procs, parseCPUTimes(string(cpuOut)), procDirty), nil
+	root, procs, _ := simRootChildren(string(out), e.d.UDID)
+	return idleSnapshotOf(root, procs, procDirty, procUsageOf), nil
 }
 
-func (e *deviceIdle) dirty(pid int) (uint32, error)            { return procDirty(pid) }
+func (e *deviceIdle) recheck(p daemonProc) (gone, killable bool) {
+	u, err := procUsageOf(p.pid)
+	if err != nil || u.start != p.usage.start {
+		return true, false
+	}
+	f, err := procDirty(p.pid)
+	if err != nil {
+		return true, false
+	}
+	return false, idleExitable(f) && !e.held()
+}
+
 func (e *deviceIdle) signal(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
 func (e *deviceIdle) sleep(d time.Duration)                    { time.Sleep(d) }
 
-// runtimeDaemons keeps the processes that run an executable of the simulator runtime (not an
-// app's) and whose dirty-tracking flags can be read, with their CPU time.
-func runtimeDaemons(procs []simProc, cpu map[int]time.Duration, dirty func(int) (uint32, error)) []daemonProc {
-	var ds []daemonProc
+// appBundlePath marks the executables of installed apps (and their extensions) in a simulator.
+const appBundlePath = "/data/Containers/Bundle/Application/"
+
+// idleSnapshotOf builds a snapshot from launchd_sim's children: the processes that run an
+// executable of the simulator runtime (not an app's) and whose dirty-tracking flags and usage can
+// be read, and the earliest start of an app's process.
+func idleSnapshotOf(root int, procs []simProc, dirty func(int) (uint32, error), usage func(int) (procUsage, error)) idleSnapshot {
+	snap := idleSnapshot{root: root}
 	for _, p := range procs {
+		// An app's path has no spaces (the runtime's has), so its executable is the first field.
+		if f := strings.Fields(p.cmd); len(f) > 0 && strings.HasPrefix(f[0], "/") && strings.Contains(f[0], appBundlePath) {
+			if u, err := usage(p.pid); err == nil && (snap.firstApp == 0 || u.start < snap.firstApp) {
+				snap.firstApp = u.start
+			}
+			continue
+		}
 		i := strings.Index(p.cmd, runtimeRoot)
 		if i < 0 || !strings.HasPrefix(p.cmd, "/") || strings.Contains(p.cmd[:i], " /") {
 			continue
@@ -254,65 +334,15 @@ func runtimeDaemons(procs []simProc, cpu map[int]time.Duration, dirty func(int) 
 		if len(f) == 0 {
 			continue
 		}
-		c, ok := cpu[p.pid]
-		if !ok {
+		u, err := usage(p.pid)
+		if err != nil {
 			continue
 		}
 		flags, err := dirty(p.pid)
 		if err != nil {
 			continue
 		}
-		ds = append(ds, daemonProc{pid: p.pid, name: path.Base(f[0]), flags: flags, cpu: c})
+		snap.daemons = append(snap.daemons, daemonProc{pid: p.pid, name: path.Base(f[0]), flags: flags, usage: u})
 	}
-	return ds
-}
-
-// parseCPUTimes reads `ps -axo pid=,time=` (user+system CPU time as [[dd-]hh:]mm:ss.cc).
-func parseCPUTimes(out string) map[int]time.Duration {
-	m := map[int]time.Duration{}
-	for _, l := range strings.Split(out, "\n") {
-		f := strings.Fields(l)
-		if len(f) != 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(f[0])
-		if err != nil {
-			continue
-		}
-		if d, err := parsePsTime(f[1]); err == nil {
-			m[pid] = d
-		}
-	}
-	return m
-}
-
-func parsePsTime(s string) (time.Duration, error) {
-	var days int
-	if i := strings.Index(s, "-"); i >= 0 {
-		n, err := strconv.Atoi(s[:i])
-		if err != nil {
-			return 0, err
-		}
-		days, s = n, s[i+1:]
-	}
-	parts := strings.Split(s, ":")
-	if len(parts) < 2 || len(parts) > 3 {
-		return 0, fmt.Errorf("bad time %q", s)
-	}
-	sec, err := strconv.ParseFloat(parts[len(parts)-1], 64)
-	if err != nil {
-		return 0, err
-	}
-	total := sec
-	mul := 60.0
-	for i := len(parts) - 2; i >= 0; i-- {
-		n, err := strconv.Atoi(parts[i])
-		if err != nil {
-			return 0, err
-		}
-		total += float64(n) * mul
-		mul *= 60
-	}
-	total += float64(days) * 86400
-	return time.Duration(total * float64(time.Second)), nil
+	return snap
 }

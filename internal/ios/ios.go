@@ -80,7 +80,10 @@ type Backend struct {
 	// processes this daemon's park stopped (the only ones its resume continues).
 	parked, parking map[string]bool
 	stoppedPids     map[string]map[int]bool
-	parkScan        sync.Once
+	// appOps counts, per udid, the installs, launches and uninstalls in flight (idle.go holds its
+	// passes meanwhile).
+	appOps   map[string]int
+	parkScan sync.Once
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -95,7 +98,7 @@ func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
 		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, bootGen: map[string]int{},
 		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{},
-		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}}
+		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}, appOps: map[string]int{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -1011,6 +1014,7 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID)()
 	if !strings.HasSuffix(strings.TrimSuffix(path, "/"), ".app") {
 		return fmt.Errorf("install needs a simulator .app bundle, got %s", path)
 	}
@@ -1050,6 +1054,7 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID)()
 	// A device this daemon has not booted gets AGEMU_IOS_ANIMATIONS before its first launch.
 	b.animateDevice(ctx, d, false)
 	// Capture the app's startup lines: the stream starts before the launch. The first launch or
@@ -1141,4 +1146,25 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	defer b.expectExits(d.UDID, app)(0)
 	b.noteInput(d.UDID)
 	return b.call(ctx, "terminate", map[string]any{"udid": d.UDID, "bundleId": app}, nil)
+}
+
+// appOp marks an install, launch or uninstall on udid as in flight until the returned func runs.
+func (b *Backend) appOp(udid string) func() {
+	b.mu.Lock()
+	b.appOps[udid]++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		if b.appOps[udid]--; b.appOps[udid] <= 0 {
+			delete(b.appOps, udid)
+		}
+		b.mu.Unlock()
+	}
+}
+
+// appOpBusy reports whether an install, launch or uninstall on udid is in flight.
+func (b *Backend) appOpBusy(udid string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.appOps[udid] > 0
 }

@@ -334,6 +334,7 @@ func (b *Backend) Uninstall(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID)()
 	if _, err := b.userApp(ctx, d.UDID, app, "uninstall"); err != nil {
 		return err
 	}

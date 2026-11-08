@@ -448,12 +448,18 @@ type simProc struct {
 // simulator's launchd_sim started, and the device's data directory (from launchd_sim's
 // argument).
 func simChildren(ps, udid string) (children []simProc, data string) {
+	_, children, data = simRootChildren(ps, udid)
+	return children, data
+}
+
+// simRootChildren is simChildren that also returns launchd_sim's pid (0 when the simulator is not
+// running).
+func simRootChildren(ps, udid string) (root int, children []simProc, data string) {
 	type proc struct {
 		ppid int
 		cmd  string
 	}
 	procs := map[int]proc{}
-	root := 0
 	for _, line := range strings.Split(ps, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 3 {
@@ -477,14 +483,14 @@ func simChildren(ps, udid string) (children []simProc, data string) {
 		}
 	}
 	if root == 0 {
-		return nil, ""
+		return 0, nil, ""
 	}
 	for pid, p := range procs {
 		if p.ppid == root {
 			children = append(children, simProc{pid, p.cmd})
 		}
 	}
-	return children, data
+	return root, children, data
 }
 
 var launchArguments = regexp.MustCompile(`-LaunchArguments ([A-Za-z0-9+/=_-]+)`)

@@ -12,12 +12,12 @@ import (
 
 func TestIdleExitable(t *testing.T) {
 	for flags, want := range map[uint32]bool{
-		0x0: false, // not tracked (SpringBoard's backboardd, apps)
+		0x0: false, // not tracked (apps, backboardd)
 		0x1: false, // tracked, no idle exit (SpringBoard)
 		0x3: true,  // tracked, idle exit allowed, clean
 		0x7: false, // dirty: a transaction is open
 		0x5: false,
-		0xb: true, // launch-in-progress bit (0x8) is not looked at
+		0xb: false, // being launched (PROC_DIRTY_LAUNCH_IN_PROGRESS)
 	} {
 		if got := idleExitable(flags); got != want {
 			t.Errorf("idleExitable(%#x) = %v, want %v", flags, got, want)
@@ -25,29 +25,7 @@ func TestIdleExitable(t *testing.T) {
 	}
 }
 
-func TestParsePsTime(t *testing.T) {
-	for s, want := range map[string]time.Duration{
-		"0:00.00":       0,
-		"0:01.25":       1250 * time.Millisecond,
-		"12:03.50":      12*time.Minute + 3500*time.Millisecond,
-		"1:02:03.00":    time.Hour + 2*time.Minute + 3*time.Second,
-		"2-01:00:00.00": 49 * time.Hour,
-	} {
-		got, err := parsePsTime(s)
-		if err != nil || got.Round(time.Millisecond) != want {
-			t.Errorf("parsePsTime(%q) = %v, %v; want %v", s, got, err, want)
-		}
-	}
-	if _, err := parsePsTime("abc"); err == nil {
-		t.Error("parsePsTime(abc): no error")
-	}
-	m := parseCPUTimes("  101   0:01.50\n  102 1:00:00.00\nbad\n")
-	if m[101] != 1500*time.Millisecond || m[102] != time.Hour || len(m) != 2 {
-		t.Fatalf("parseCPUTimes = %v", m)
-	}
-}
-
-func TestRuntimeDaemons(t *testing.T) {
+func TestIdleSnapshotOf(t *testing.T) {
 	const udid = "ED6C55BD-83FB-49B9-93A2-54BA0AD521DD"
 	app := "/Users/me/Library/Developer/CoreSimulator/Devices/" + udid + "/data/Containers/Bundle/Application/0A1B/MyApp.app"
 	ps := fmt.Sprintf(`  100     1 launchd_sim /Users/me/Library/Developer/CoreSimulator/Devices/%[1]s/data/var/run/launchd_bootstrap.plist
@@ -57,110 +35,304 @@ func TestRuntimeDaemons(t *testing.T) {
   104   100 %[2]s/Applications/MobileSafari.app/Extensions/SafariLinkExtension.appex/SafariLinkExtension -LaunchArguments eyJ9
   105   100 /usr/bin/grep %[2]s/usr/libexec/securityd
   106   100 %[2]s/usr/libexec/gone
+  107   100 %[3]s/PlugIns/Widget.appex/Widget -arg x
+  108   100 %[2]s/usr/libexec/extensionkitservice %[3]s/PlugIns/Widget.appex
 `, udid, rtRoot, app)
-	procs, _ := simChildren(ps, udid)
-	cpu := map[int]time.Duration{101: time.Second, 102: 2 * time.Second, 103: 0, 104: 0, 105: 0}
+	root, procs, _ := simRootChildren(ps, udid)
+	if root != 100 {
+		t.Fatalf("root = %d", root)
+	}
+	starts := map[int]uint64{101: 10, 102: 20, 103: 300, 104: 30, 105: 40, 107: 250, 108: 260}
+	usage := func(pid int) (procUsage, error) {
+		s, ok := starts[pid]
+		if !ok {
+			return procUsage{}, syscall.ESRCH
+		}
+		return procUsage{cpu: uint64(pid) * 1000, start: s}, nil
+	}
 	dirty := func(pid int) (uint32, error) {
 		if pid == 104 {
 			return 0, syscall.ESRCH
 		}
 		return 0x3, nil
 	}
-	ds := runtimeDaemons(procs, cpu, dirty)
-	sort.Slice(ds, func(i, j int) bool { return ds[i].pid < ds[j].pid })
+	snap := idleSnapshotOf(root, procs, dirty, usage)
+	sort.Slice(snap.daemons, func(i, j int) bool { return snap.daemons[i].pid < snap.daemons[j].pid })
 	var got []string
-	for _, d := range ds {
-		got = append(got, fmt.Sprintf("%d %s %v", d.pid, d.name, d.cpu))
+	for _, d := range snap.daemons {
+		got = append(got, fmt.Sprintf("%d %s %d", d.pid, d.name, d.usage.start))
 	}
-	// Runtime executables only (not the app, not a process naming the path), with a CPU time
-	// (106 has none) and readable flags (104 exited).
-	if want := "[101 maild 1s 102 securityd 2s]"; fmt.Sprint(got) != want {
-		t.Fatalf("runtimeDaemons = %v, want %s", got, want)
+	// Runtime executables only (not the app or its extension, not a process naming the path),
+	// with usage (106 has none) and readable flags (104 exited); a runtime process whose argument
+	// names an app's extension is still a runtime process. firstApp is the earliest app process.
+	if want := "[101 maild 10 102 securityd 20 108 extensionkitservice 260]"; fmt.Sprint(got) != want {
+		t.Fatalf("daemons = %v, want %s", got, want)
+	}
+	if snap.firstApp != 250 || snap.root != 100 {
+		t.Fatalf("firstApp = %d, root = %d; want 250, 100", snap.firstApp, snap.root)
 	}
 }
 
-// fakeIdle replays a scripted process table per pass and records signals.
+// fakeIdle replays scripted snapshots, one per pass, and records signals.
 type fakeIdle struct {
-	passes  [][]daemonProc // what daemons() returns at each pass
-	pass    int
-	alive   map[int]bool // processes that are still running when dirty() is asked after SIGTERM
-	dirtyAt map[int]uint32
-	signals []string
-	stopAt  int // current() turns false at this pass (0: never)
+	passes   []idleSnapshot
+	pass     int          // passes started so far (waitUntil calls)
+	heldAt   map[int]bool // passes (1-based) at which the device is held
+	recheckF func(p daemonProc) (gone, killable bool)
+	signals  []string
+	stopAt   int // current() turns false at this pass (0: never)
 }
 
-func (f *fakeIdle) waitUntil(time.Duration) bool { return true }
+func (f *fakeIdle) waitUntil(time.Duration) bool { f.pass++; return true }
 func (f *fakeIdle) current() bool                { return f.stopAt == 0 || f.pass < f.stopAt }
-func (f *fakeIdle) daemons() ([]daemonProc, error) {
-	if f.pass >= len(f.passes) {
-		f.pass++
-		return nil, nil
+func (f *fakeIdle) held() bool                   { return f.heldAt[f.pass] }
+func (f *fakeIdle) snapshot() (idleSnapshot, error) {
+	if f.pass > len(f.passes) {
+		return idleSnapshot{root: 1}, nil
 	}
-	p := f.passes[f.pass]
-	f.pass++
-	return p, nil
+	return f.passes[f.pass-1], nil
 }
-func (f *fakeIdle) dirty(pid int) (uint32, error) {
-	if !f.alive[pid] {
-		return 0, syscall.ESRCH
+func (f *fakeIdle) recheck(p daemonProc) (bool, bool) {
+	if f.recheckF != nil {
+		return f.recheckF(p)
 	}
-	if fl, ok := f.dirtyAt[pid]; ok {
-		return fl, nil
-	}
-	return 0x3, nil
+	return true, false // exited on SIGTERM
 }
 func (f *fakeIdle) signal(pid int, sig syscall.Signal) error {
-	f.signals = append(f.signals, fmt.Sprintf("%d %v", pid, map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGKILL: "KILL"}[sig]))
+	f.signals = append(f.signals, fmt.Sprintf("%d@%d %v", pid, f.pass, map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGKILL: "KILL"}[sig]))
 	return nil
 }
 func (f *fakeIdle) sleep(time.Duration) {}
 
-func dp(pid int, name string, flags uint32, cpuMs int) daemonProc {
-	return daemonProc{pid: pid, name: name, flags: flags, cpu: time.Duration(cpuMs) * time.Millisecond}
+// dp is a daemon with flags, CPU time and start time 1 (before any app).
+func dp(pid int, name string, flags uint32, cpu uint64) daemonProc {
+	return daemonProc{pid: pid, name: name, flags: flags, usage: procUsage{cpu: cpu, start: 1}}
 }
 
-func TestIdlePasses(t *testing.T) {
-	f := &fakeIdle{
-		passes: [][]daemonProc{
-			// pass 1: everything is new; nothing is ended yet.
-			{dp(10, "maild", 3, 100), dp(11, "busyd", 3, 100), dp(12, "dirtyd", 7, 0), dp(13, "SpringBoard", 1, 0),
-				dp(14, "diagnosticd", 3, 0), dp(15, "survivor", 3, 0), dp(16, "relapsed", 3, 0)},
-			// pass 2: maild idle (10 ms), busyd used 300 ms, dirtyd clean now but was dirty, a new
-			// daemon (20) appears; survivor and relapsed are idle.
-			{dp(10, "maild", 3, 110), dp(11, "busyd", 3, 400), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0),
-				dp(14, "diagnosticd", 3, 0), dp(15, "survivor", 3, 0), dp(16, "relapsed", 3, 0), dp(20, "newd", 3, 0)},
-			// pass 3: relapsed was started again (new pid), survivor kept its pid (it became busy
-			// before SIGKILL); busyd idle now; dirtyd idle and clean; newd idle.
-			{dp(11, "busyd", 3, 405), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0),
-				dp(15, "survivor", 3, 0), dp(30, "relapsed", 3, 0), dp(20, "newd", 3, 0)},
-			// pass 4: relapsed again idle: it stays (it came back once).
-			{dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0), dp(15, "survivor", 3, 0), dp(30, "relapsed", 3, 0)},
-		},
-		// After SIGTERM: maild (10) ignores it and is still clean -> SIGKILL; survivor (15) ignores it
-		// and turned dirty -> no SIGKILL; relapsed (16) exits on SIGTERM.
-		alive:   map[int]bool{10: true, 15: true, 11: true, 12: false, 20: false},
-		dirtyAt: map[int]uint32{15: 7},
+func snaps(ps ...[]daemonProc) []idleSnapshot {
+	var s []idleSnapshot
+	for _, p := range ps {
+		s = append(s, idleSnapshot{root: 1, daemons: p})
 	}
+	return s
+}
+
+func TestIdlePassesNeedThreeQuietPasses(t *testing.T) {
+	f := &fakeIdle{passes: snaps(
+		[]daemonProc{dp(10, "maild", 3, 100), dp(11, "sleepd", 3, 100), dp(12, "dirtyd", 7, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0)},
+		// sleepd used one tick of CPU: not idle (even 1 tick counts); dirtyd turned clean.
+		[]daemonProc{dp(10, "maild", 3, 100), dp(11, "sleepd", 3, 101), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0)},
+		// maild: third quiet pass -> ended here.
+		[]daemonProc{dp(10, "maild", 3, 100), dp(11, "sleepd", 3, 101), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0)},
+		// sleepd and dirtyd: third quiet pass since their change -> ended.
+		[]daemonProc{dp(11, "sleepd", 3, 101), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0)},
+	)}
 	stopped := idlePasses(f, "test")
-	want := []string{
-		// pass 2
-		"10 TERM", "15 TERM", "16 TERM", "10 KILL",
-		// pass 3: busyd (idle since pass 2), dirtyd (clean at both 2 and 3), newd
-		"11 TERM", "12 TERM", "20 TERM", "11 KILL",
+	if want := "10@3 TERM,11@4 TERM,12@4 TERM"; strings.Join(f.signals, ",") != want {
+		t.Fatalf("signals = %v, want %s", f.signals, want)
 	}
-	if strings.Join(f.signals, ",") != strings.Join(want, ",") {
-		t.Fatalf("signals = %v,\nwant %v", f.signals, want)
-	}
-	if fmt.Sprint(stopped) != "map[busyd:1 dirtyd:1 maild:1 newd:1 relapsed:1]" {
+	if fmt.Sprint(stopped) != "map[dirtyd:1 maild:1 sleepd:1]" {
 		t.Fatalf("stopped = %v", stopped)
 	}
 }
 
+func TestIdlePassesPeriodicUse(t *testing.T) {
+	// An app calls the daemon every 60 s (every second interval) or every 45 s: each call costs
+	// CPU, so there are never 2 quiet intervals in a row and it is never ended.
+	var every60, every45 [][]daemonProc
+	cpu60, cpu45 := uint64(0), uint64(0)
+	for i := 0; i < 9; i++ {
+		if i%2 == 1 {
+			cpu60 += 5
+		}
+		if i%3 != 0 { // calls at +45 s, +90 s, +135 s, ... land in 2 of every 3 intervals
+			cpu45 += 5
+		}
+		every60 = append(every60, []daemonProc{dp(20, "fileproviderd-like", 3, cpu60)})
+		every45 = append(every45, []daemonProc{dp(21, "coreidvd-like", 3, cpu45)})
+	}
+	for _, ps := range [][][]daemonProc{every60, every45} {
+		f := &fakeIdle{passes: snaps(ps...)}
+		if s := idlePasses(f, "test"); len(s) != 0 {
+			t.Fatalf("ended %v, a daemon in periodic use", s)
+		}
+	}
+}
+
+func TestIdlePassesAppStartedAfter(t *testing.T) {
+	// A daemon started after the first app process of this boot is never ended, idle or not;
+	// one started before is.
+	early := daemonProc{pid: 30, name: "maild", flags: 3, usage: procUsage{cpu: 5, start: 100}}
+	late := daemonProc{pid: 31, name: "sleepd", flags: 3, usage: procUsage{cpu: 5, start: 500}}
+	var ss []idleSnapshot
+	for i := 0; i < 4; i++ {
+		s := idleSnapshot{root: 1, daemons: []daemonProc{early, late}}
+		if i >= 1 {
+			s.firstApp = 400 // seen from the second pass on
+		}
+		ss = append(ss, s)
+	}
+	f := &fakeIdle{passes: ss}
+	if s := idlePasses(f, "test"); fmt.Sprint(s) != "map[maild:1]" {
+		t.Fatalf("ended %v, want only maild", s)
+	}
+}
+
+func TestIdlePassesRecheck(t *testing.T) {
+	ps := []daemonProc{dp(40, "maild", 3, 0), dp(41, "sleepd", 3, 0), dp(42, "parsecd", 3, 0)}
+	f := &fakeIdle{passes: snaps(ps, ps, ps, ps, ps, ps), recheckF: func(p daemonProc) (bool, bool) {
+		switch p.name {
+		case "maild":
+			return false, true // ignored SIGTERM, still the same idle process: SIGKILL
+		case "sleepd":
+			return false, false // busy again, or the device got held: no SIGKILL, kept
+		}
+		return true, false // exited
+	}}
+	stopped := idlePasses(f, "test")
+	if want := "40@3 TERM,41@3 TERM,42@3 TERM,40@3 KILL"; strings.Join(f.signals, ",") != want {
+		t.Fatalf("signals = %v, want %s", f.signals, want)
+	}
+	if fmt.Sprint(stopped) != "map[maild:1 parsecd:1]" {
+		t.Fatalf("stopped = %v", stopped)
+	}
+}
+
+func TestIdlePassesHeld(t *testing.T) {
+	// A pass while agemu installs/launches an app or the device is parked does nothing and starts
+	// the count again: quiet at 1, 2, held at 3, quiet at 4, 5, 6 -> ended at 6.
+	ps := []daemonProc{dp(50, "maild", 3, 0)}
+	f := &fakeIdle{passes: snaps(ps, ps, ps, ps, ps, ps), heldAt: map[int]bool{3: true}}
+	idlePasses(f, "test")
+	if want := "50@6 TERM"; strings.Join(f.signals, ",") != want {
+		t.Fatalf("signals = %v, want %s", f.signals, want)
+	}
+}
+
+func TestIdlePassesStopOnOutsideBoot(t *testing.T) {
+	ps := []daemonProc{dp(60, "maild", 3, 0)}
+	s := snaps(ps, ps, ps)
+	s[2].root = 2 // launchd_sim changed: booted again outside agemu
+	f := &fakeIdle{passes: s}
+	if st := idlePasses(f, "test"); len(st) != 0 || len(f.signals) != 0 {
+		t.Fatalf("ended %v, signals %v after the simulator was booted again", st, f.signals)
+	}
+	s = snaps(ps, ps, ps)
+	s[2].root = 0 // shut down
+	f = &fakeIdle{passes: s}
+	if st := idlePasses(f, "test"); len(st) != 0 {
+		t.Fatalf("ended %v on a shut-down simulator", st)
+	}
+}
+
 func TestIdlePassesEndOnNewerBoot(t *testing.T) {
-	procs := []daemonProc{dp(10, "maild", 3, 0)}
-	f := &fakeIdle{passes: [][]daemonProc{procs, procs, procs}, stopAt: 1, alive: map[int]bool{}}
+	ps := []daemonProc{dp(10, "maild", 3, 0)}
+	f := &fakeIdle{passes: snaps(ps, ps, ps, ps), stopAt: 2}
 	if s := idlePasses(f, "test"); len(s) != 0 || len(f.signals) != 0 {
 		t.Fatalf("ended %v, signals %v after a newer boot", s, f.signals)
+	}
+}
+
+func TestIdlePassesEndAgainAfterALaterReturn(t *testing.T) {
+	// A daemon that a one-off job starts again after a pass without it may be ended again, up to
+	// idleMaxEnds times; one that is back by the next pass stays.
+	a := func(pid int) daemonProc { return dp(pid, "oneoff", 3, 0) }
+	c := func(pid int) daemonProc { return dp(pid, "churn", 3, 0) }
+	f := &fakeIdle{passes: snaps(
+		[]daemonProc{a(1), c(2)},
+		[]daemonProc{a(1), c(2)},
+		[]daemonProc{a(1), c(2)}, // pass 3: both ended
+		[]daemonProc{c(3)},       // churn back at once: kept from now on
+		[]daemonProc{a(4), c(3)},
+		[]daemonProc{a(4), c(3)},
+		[]daemonProc{a(4), c(3)}, // pass 7: oneoff ended again
+		[]daemonProc{},
+		[]daemonProc{a(5)},
+	)}
+	stopped := idlePasses(f, "test")
+	if want := "1@3 TERM,2@3 TERM,4@7 TERM"; strings.Join(f.signals, ",") != want {
+		t.Fatalf("signals = %v, want %s", f.signals, want)
+	}
+	if stopped["oneoff"] != 2 || stopped["churn"] != 1 {
+		t.Fatalf("stopped = %v", stopped)
+	}
+}
+
+func TestIdlePassesMaxEnds(t *testing.T) {
+	// Each end needs 3 passes; with an idleMaxEnds of 3 and 9 passes the third end is the last.
+	var ps [][]daemonProc
+	for pid := 1; pid <= 3; pid++ {
+		for k := 0; k < 3; k++ {
+			ps = append(ps, []daemonProc{dp(pid, "oneoff", 3, 0)})
+		}
+	}
+	f := &fakeIdle{passes: snaps(ps...)}
+	if s := idlePasses(f, "test"); s["oneoff"] > idleMaxEnds {
+		t.Fatalf("ended %d times, max %d", s["oneoff"], idleMaxEnds)
+	}
+}
+
+func TestIdleKeepEnv(t *testing.T) {
+	t.Setenv("AGEMU_IOS_IDLE_KEEP", " maild, ,parsecd")
+	ps := []daemonProc{dp(10, "maild", 3, 0), dp(11, "parsecd", 3, 0), dp(12, "sleepd", 3, 0)}
+	f := &fakeIdle{passes: snaps(ps, ps, ps)}
+	if s := idlePasses(f, "test"); fmt.Sprint(s) != "map[sleepd:1]" {
+		t.Fatalf("ended %v, want only sleepd", s)
+	}
+}
+
+func TestIdlePassesAppFacing(t *testing.T) {
+	ps := []daemonProc{dp(10, "contactsd", 3, 0), dp(11, "maild", 3, 0), dp(12, "weatherd", 3, 0), dp(13, "fileproviderd", 3, 0)}
+	run := func() map[string]int {
+		return idlePasses(&fakeIdle{passes: snaps(ps, ps, ps)}, "test")
+	}
+	t.Setenv("AGEMU_IOS_IDLE_EXIT", "")
+	if s := run(); fmt.Sprint(s) != "map[maild:1]" {
+		t.Fatalf("default: ended %v, want only maild (the others serve public APIs)", s)
+	}
+	t.Setenv("AGEMU_IOS_IDLE_EXIT", "all")
+	if s := run(); fmt.Sprint(s) != "map[contactsd:1 fileproviderd:1 maild:1 weatherd:1]" {
+		t.Fatalf("all: ended %v", s)
+	}
+	for _, v := range []string{"", "1", "all"} {
+		t.Setenv("AGEMU_IOS_IDLE_EXIT", v)
+		if !idleExitOn() {
+			t.Errorf("AGEMU_IOS_IDLE_EXIT=%q: off", v)
+		}
+	}
+	t.Setenv("AGEMU_IOS_IDLE_EXIT", "0")
+	if idleExitOn() {
+		t.Error("AGEMU_IOS_IDLE_EXIT=0: on")
+	}
+}
+
+func TestIdleKeepNeverEnded(t *testing.T) {
+	// The never-ended names stay never ended in the all mode too.
+	t.Setenv("AGEMU_IOS_IDLE_EXIT", "all")
+	var ps []daemonProc
+	pid := 100
+	for n := range idleKeep {
+		ps = append(ps, dp(pid, n, 3, 0))
+		pid++
+	}
+	if s := idlePasses(&fakeIdle{passes: snaps(ps, ps, ps)}, "test"); len(s) != 0 {
+		t.Fatalf("ended %v from idleKeep", s)
+	}
+}
+
+func TestAppOp(t *testing.T) {
+	b := &Backend{appOps: map[string]int{}}
+	if b.appOpBusy("U") {
+		t.Fatal("busy before any op")
+	}
+	done1, done2 := b.appOp("U"), b.appOp("U")
+	done1()
+	if !b.appOpBusy("U") {
+		t.Fatal("not busy with one op in flight")
+	}
+	done2()
+	if b.appOpBusy("U") || len(b.appOps) != 0 {
+		t.Fatalf("busy after both ops: %v", b.appOps)
 	}
 }
 
@@ -178,81 +350,24 @@ func TestProcDirtySelf(t *testing.T) {
 	}
 }
 
-func TestIdlePassesEndAgainAfterALaterReturn(t *testing.T) {
-	// A daemon that a one-off job starts again after a pass without it may be ended again, up to
-	// idleMaxEnds times; one that is back by the next pass stays.
-	a := func(pid int) daemonProc { return dp(pid, "oneoff", 3, 0) }
-	c := func(pid int) daemonProc { return dp(pid, "churn", 3, 0) }
-	f := &fakeIdle{
-		passes: [][]daemonProc{
-			{a(1), c(2)},
-			{a(1), c(2)}, // end oneoff 1, churn 2
-			{c(3)},       // churn back at once: stays from now on
-			{a(4), c(3)},
-			{a(4), c(3)}, // oneoff ended again (2nd)
-			{},
-			{a(5)},
-			{a(5)}, // 3rd
-			{},
-		},
-		alive: map[int]bool{},
+func TestProcUsageSelf(t *testing.T) {
+	u1, err := procUsageOf(os.Getpid())
+	if err != nil && strings.Contains(err.Error(), "needs macOS") {
+		t.Skip(err)
 	}
-	stopped := idlePasses(f, "test")
-	if want := "1 TERM,2 TERM,4 TERM,5 TERM"; strings.Join(f.signals, ",") != want {
-		t.Fatalf("signals = %v, want %s", f.signals, want)
+	if err != nil || u1.start == 0 || u1.cpu == 0 {
+		t.Fatalf("procUsageOf(self) = %+v, %v", u1, err)
 	}
-	if stopped["oneoff"] != 3 || stopped["churn"] != 1 {
-		t.Fatalf("stopped = %v", stopped)
+	x := 0
+	for i := 0; i < 20_000_000; i++ {
+		x += i
 	}
-	if idleMaxEnds != 3 {
-		t.Fatalf("idleMaxEnds = %d; the pass count of this test assumes 3", idleMaxEnds)
+	_ = x
+	u2, _ := procUsageOf(os.Getpid())
+	if u2.start != u1.start || u2.cpu <= u1.cpu {
+		t.Fatalf("second read %+v after %+v: start must stay, CPU must grow", u2, u1)
 	}
-}
-
-func TestIdlePassesMaxEnds(t *testing.T) {
-	var passes [][]daemonProc
-	for pid := 1; pid <= 5; pid++ {
-		passes = append(passes, []daemonProc{dp(pid, "oneoff", 3, 0)}, []daemonProc{dp(pid, "oneoff", 3, 0)}, nil)
-	}
-	f := &fakeIdle{passes: passes, alive: map[int]bool{}}
-	// The fake has 15 scripted passes; the real schedule has 9 (+60..+300 s), so only the count
-	// matters here: ended at most idleMaxEnds times.
-	if s := idlePasses(f, "test"); s["oneoff"] != idleMaxEnds {
-		t.Fatalf("ended %d times, want %d", s["oneoff"], idleMaxEnds)
-	}
-}
-
-func TestIdleKeepEnv(t *testing.T) {
-	t.Setenv("AGEMU_IOS_IDLE_KEEP", " maild, ,parsecd")
-	procs := []daemonProc{dp(10, "maild", 3, 0), dp(11, "parsecd", 3, 0), dp(12, "adprivacyd", 3, 0)}
-	f := &fakeIdle{passes: [][]daemonProc{procs, procs}, alive: map[int]bool{}}
-	if s := idlePasses(f, "test"); fmt.Sprint(s) != "map[adprivacyd:1]" {
-		t.Fatalf("ended %v, want only adprivacyd", s)
-	}
-}
-
-func TestIdlePassesAppFacing(t *testing.T) {
-	procs := []daemonProc{dp(10, "contactsd", 3, 0), dp(11, "adprivacyd", 3, 0)}
-	run := func() map[string]int {
-		f := &fakeIdle{passes: [][]daemonProc{procs, procs}, alive: map[int]bool{}}
-		return idlePasses(f, "test")
-	}
-	t.Setenv("AGEMU_IOS_IDLE_EXIT", "")
-	if s := run(); fmt.Sprint(s) != "map[adprivacyd:1]" {
-		t.Fatalf("default: ended %v, want only adprivacyd (contactsd serves Contacts)", s)
-	}
-	t.Setenv("AGEMU_IOS_IDLE_EXIT", "all")
-	if s := run(); fmt.Sprint(s) != "map[adprivacyd:1 contactsd:1]" {
-		t.Fatalf("all: ended %v", s)
-	}
-	for _, v := range []string{"", "1", "all"} {
-		t.Setenv("AGEMU_IOS_IDLE_EXIT", v)
-		if !idleExitOn() {
-			t.Errorf("AGEMU_IOS_IDLE_EXIT=%q: off", v)
-		}
-	}
-	t.Setenv("AGEMU_IOS_IDLE_EXIT", "0")
-	if idleExitOn() {
-		t.Error("AGEMU_IOS_IDLE_EXIT=0: on")
+	if _, err := procUsageOf(1 << 30); err == nil {
+		t.Fatal("procUsageOf of a pid that does not exist: no error")
 	}
 }
