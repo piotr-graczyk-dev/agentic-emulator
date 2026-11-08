@@ -1381,12 +1381,15 @@ writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu p
 **Auto-park** (`AGEMU_AUTO_PARK=<duration>`, off by default; 2026-11-08, agemu-lab, host load
 average 2.5-3.7, `.lab/r6/autopark`): the daemon parks a device it has served once it has had no
 call for that long, only while it is running (not booting, not in standby, not parked); see the
-README's Auto-park. With `AGEMU_AUTO_PARK=15s`:
+README's Auto-park. It sees only its own calls (not another daemon's, `adb`'s or a person's). Ids
+are compared in the AVD file's spelling, so `android:Agemu-Lab` shares agemu-lab's count, lock and
+park state on a case-insensitive disk. With `AGEMU_AUTO_PARK=15s`:
 - Parked 15.2-15.8 s after the last call (n=5); the first `ui` after it took 9-17 ms. The park
   itself took 0-1 ms.
 - 18 of 18 calls of every kind resumed the device and worked (a screenshot right after a resume
   327 ms, as after any resume); logs, crashes and park left it parked. No park during a 45 s
-  `wait`; 12 rounds of 6 calls at once at gaps around the threshold: 72 calls, no error, 5 parks.
+  `wait`; 12 rounds of 6 calls at once at gaps around the threshold: 72 calls, no error, 5 parks
+  (iOS: another 72, 4 parks).
 - The daemon killed with SIGKILL: the device stayed paused, the next daemon listed it `parked` and
   its first call resumed it (14 ms); with SIGTERM the daemon resumed it before exiting (0.14 s).
 - Emulator CPU running idle 10.4% of a core (10.2-10.4, n=4), auto-parked 1.5% (1.4-1.6, n=4),

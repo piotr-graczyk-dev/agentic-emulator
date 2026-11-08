@@ -533,13 +533,19 @@ baseline, its memory kept); a second `shutdown` powers the emulator off and free
 `AGEMU_AUTO_PARK=<duration>` (off by default; at least 10 s) makes the daemon park a device once it
 has had no call for that long; the next call resumes it as after `agemu park`, the first call
 taking the resume's time. Only devices this daemon has served a call on since it started are
-parked (never one booted by hand or driven by another tool), and only while they are booted and
-agemu's. A call counts from its start to its end, so a long `wait`, an install or a boot is never
-cut short; `logs` and `crashes` count too (an agent polling them keeps the device running) but
-still do not resume a parked device. A call that comes during the park waits for it (about 1 ms
-on Android, 80-90 ms on iOS) and then resumes the device. Stopping the daemon (SIGTERM, `pkill -x
-agemud`) resumes the devices it parked by itself; an agent's own parks stay. A daemon killed with
-SIGKILL leaves them parked, and the next one resumes them on the first call.
+parked, and only while they are booted and agemu's. The daemon sees only its own calls: a device
+it served that is then driven by another daemon (another `AGEMU_HOME`), by `simctl` or `adb`, in
+Simulator.app or by a person can be parked under them, and only a call through this daemon
+resumes it; with auto-park on, drive each device through one daemon. A call counts from its start
+to its end, so a long `wait`, an install, a boot or a profile switch is never cut short (while a
+profile switch runs, no device of its platform is parked, since it may boot any of them; the
+daemon resumes the devices of that platform it parked before the switch, and a simulator an
+agent parked is resumed when the switch picks it); `logs` and `crashes` count too (an agent
+polling them keeps the device running) but still do not resume a parked device. A call that
+comes during the park waits for it (0-1 ms on Android, 74-127 ms on iOS, median 93, n=47) and then
+resumes the device. Stopping the daemon (SIGTERM, `pkill -x agemud`) resumes the devices it parked
+by itself; an agent's own parks stay. A daemon killed with SIGKILL leaves them parked, and the
+next one resumes them on the first call.
 
 Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host load average
 2.5-8, `.lab/r6/autopark`):
@@ -548,8 +554,8 @@ Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host
 |---|---|---|
 | parked after the last call, `AGEMU_AUTO_PARK=15s` | 15.0-16.0 s (n=6) | 15.2-15.8 s (n=5) |
 | first call after it: `ui` | 66-94 ms (n=6) | 9-17 ms (n=5) |
-| device CPU, running idle / auto-parked | test app in front: 8.3% of a core (7.4-8.4, n=3) / 0; home screen: about 1.2% / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
-| saved per idle device-minute | 0.7-5.0 CPU-s (7.5 with r5-s2's Park screen: a 0.5 s timer and a TCP stream) | 5.3 CPU-s |
+| device CPU, running idle / auto-parked | home screen: 1.2% of a core (two simulators, 0.9-2.1%, 4 blocks) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
+| saved per idle device-minute | 0.7 CPU-s on the home screen; more with an app running (docs/IOS.md) | 5.3 CPU-s |
 
 - **It did not make an active device faster.** One simulator ran r5-s1's Settings and test-app
   flow while two idle simulators were parked or not (4 blocks of 5 flows per arm, alternated):
@@ -561,7 +567,7 @@ Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host
   its pid, SpringBoard's and its TCP connection to the host were kept in 8 of 8.
 - Every kind of call resumed the device and worked on both platforms (18 of 18 each); no park
   came during a 45 s `wait`; 6 clients calling at once at gaps around the threshold made 72 calls
-  without an error across 9 parks.
+  per platform (144 in all) without an error across 9 parks (4 iOS, 5 Android).
 - **It is opt-in** because it changes what an app under test sees without the agent asking (the
   clocks jump, timers fire late; Android's Bluetooth stack crashed once in 36 auto-park cycles),
   an app that works while its agent waits outside agemu longer than the threshold is frozen, and

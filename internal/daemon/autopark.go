@@ -18,7 +18,15 @@ package daemon
 // Races: the parker marks the device (gate) before it parks it, and a call that arrives
 // meanwhile waits for the park to finish (milliseconds) and then resumes the device through
 // wake, so no call ever acts on a device that is being stopped. A device whose call count is
-// not zero is never gated.
+// not zero is never gated. Device ids are canonical (Service.canonical), so two spellings of
+// one id share one count.
+//
+// A profile switch (set_profile) can act on another device than the one it names (iOS boots
+// the simulator of the profile's device type, which may be one this daemon parked): while one
+// is in flight the parker parks no device of that platform, and a switch waits for a park in
+// progress on that platform to finish. Before the switch the daemon resumes the devices of that
+// platform it parked itself (the target may be one of them), and the backend resumes a parked
+// target before it boots it (an agent's park).
 //
 // Shutdown: Close resumes the devices the parker parked (not those an agent parked), so a
 // daemon that exits leaves none of its own parks behind. A daemon killed with SIGKILL leaves
@@ -94,6 +102,12 @@ type devActivity struct {
 	auto bool
 }
 
+// platformOf returns the platform prefix of a device id.
+func platformOf(id string) api.Platform {
+	p, _, _ := strings.Cut(id, ":")
+	return api.Platform(p)
+}
+
 // autoParker is the running parker (Service.ap); nil when auto-park is off.
 type autoParker struct {
 	after, tick time.Duration
@@ -127,6 +141,8 @@ func (s *Service) beginCall(ctx context.Context, id, method string) error {
 	if s.ap == nil {
 		return nil
 	}
+	switching := method == "set_profile"
+	plat := platformOf(id)
 	for {
 		s.actMu.Lock()
 		a := s.activity[id]
@@ -134,7 +150,17 @@ func (s *Service) beginCall(ctx context.Context, id, method string) error {
 			a = &devActivity{}
 			s.activity[id] = a
 		}
-		if g := a.gate; g != nil {
+		g := a.gate
+		if g == nil && switching {
+			// A switch may act on any device of its platform: none may be being parked.
+			for other, oa := range s.activity {
+				if oa.gate != nil && platformOf(other) == plat {
+					g = oa.gate
+					break
+				}
+			}
+		}
+		if g != nil {
 			s.actMu.Unlock()
 			select {
 			case <-g:
@@ -142,6 +168,9 @@ func (s *Service) beginCall(ctx context.Context, id, method string) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+		}
+		if switching {
+			s.switching[plat]++
 		}
 		a.inflight++
 		a.last = time.Now()
@@ -154,11 +183,50 @@ func (s *Service) beginCall(ctx context.Context, id, method string) error {
 	}
 }
 
-func (s *Service) endCall(id string) {
+// resumeAutoParked resumes, before a profile switch on the platform, every device of it the
+// parker parked: the switch may boot any of them. Its caller already counts the switch, so no
+// new park starts on the platform meanwhile.
+func (s *Service) resumeAutoParked(ctx context.Context, plat api.Platform) error {
+	if s.ap == nil {
+		return nil
+	}
+	s.actMu.Lock()
+	var ids []string
+	for id, a := range s.activity {
+		if a.auto && platformOf(id) == plat {
+			ids = append(ids, id)
+			a.auto = false
+			a.last = time.Now()
+			a.handled = false
+		}
+	}
+	s.actMu.Unlock()
+	for _, id := range ids {
+		b, err := s.backendFor(id)
+		pk, ok := b.(backend.Parker)
+		if err != nil || !ok || !pk.Parked(id) {
+			continue
+		}
+		l := s.deviceLock(id)
+		l.Lock()
+		_, err = pk.Resume(ctx, id)
+		l.Unlock()
+		if err != nil {
+			return fmt.Errorf("resuming the auto-parked %s before the profile switch: %w", id, err)
+		}
+		log.Printf("auto-park %s: resumed before a profile switch", id)
+	}
+	return nil
+}
+
+func (s *Service) endCall(id, method string) {
 	if s.ap == nil {
 		return
 	}
 	s.actMu.Lock()
+	if method == "set_profile" {
+		s.switching[platformOf(id)]--
+	}
 	if a := s.activity[id]; a != nil {
 		a.inflight--
 		a.last = time.Now()
@@ -226,6 +294,10 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 	if a == nil || a.inflight != 0 || a.gate != nil || !a.last.Equal(last) {
 		s.actMu.Unlock()
 		return // a call came meanwhile: a new idle stretch
+	}
+	if s.switching[platformOf(id)] > 0 {
+		s.actMu.Unlock()
+		return // a profile switch may be acting on it; look again on the next tick
 	}
 	a.handled = true
 	if why != "" {

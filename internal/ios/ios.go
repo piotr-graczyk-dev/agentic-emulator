@@ -185,6 +185,16 @@ func udidOf(id string) (string, error) {
 	return u, nil
 }
 
+// CanonicalID spells a simulator's id as CoreSimulator does: the UDID in upper case. The helper
+// matches UDIDs in any case, so ios:<lower-case udid> names the same simulator.
+func (b *Backend) CanonicalID(id string) string {
+	u, err := udidOf(id)
+	if err != nil || len(u) != 36 {
+		return id
+	}
+	return string(api.IOS) + ":" + strings.ToUpper(u)
+}
+
 func managed(name string) bool { return strings.HasPrefix(name, NamePrefix) }
 
 func envOn(name string) bool {
@@ -692,6 +702,14 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 	b.mu.Lock()
 	b.lastUse[d.UDID] = time.Now()
 	b.mu.Unlock()
+	// The simulator switched to can be parked (by an agent, or by the daemon's auto-park while
+	// the agent used another one): continue it first, as the daemon does for the device a call
+	// names, or the boot would wait on its stopped processes.
+	if d.UDID != cur.UDID && b.isParked(d.UDID) {
+		if _, err := b.Resume(ctx, string(api.IOS)+":"+d.UDID); err != nil {
+			return api.Device{}, fmt.Errorf("resuming the parked %s before the switch: %w", d.Name, err)
+		}
+	}
 	ready, err := b.bootMakingRoom(ctx, d.UDID, d.StateCode == stateBooted)
 	if err != nil {
 		return api.Device{}, err

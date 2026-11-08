@@ -325,3 +325,18 @@ func TestParkLockIsOnePerSimulator(t *testing.T) {
 	}
 	other.Unlock()
 }
+
+func TestCanonicalIDUpperCasesTheUDID(t *testing.T) {
+	b := &Backend{}
+	for in, want := range map[string]string{
+		"ios:c29b3057-b568-4965-89c5-0134bbf2a1ea": "ios:C29B3057-B568-4965-89C5-0134BBF2A1EA",
+		"ios:C29B3057-B568-4965-89C5-0134BBF2A1EA": "ios:C29B3057-B568-4965-89C5-0134BBF2A1EA",
+		"ios:not-a-udid":    "ios:not-a-udid",
+		"android:agemu-lab": "android:agemu-lab",
+		"ios:":              "ios:",
+	} {
+		if got := b.CanonicalID(in); got != want {
+			t.Errorf("CanonicalID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

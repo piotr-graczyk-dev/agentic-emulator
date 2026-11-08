@@ -124,6 +124,15 @@ type Parker interface {
 	Resume(ctx context.Context, id string) (bool, error)
 }
 
+// IDNormalizer is implemented by backends whose device ids have more than one spelling that
+// names the same device (an iOS UDID in lower case; an AVD name in another case on a
+// case-insensitive disk). CanonicalID returns the one spelling the backend lists; the daemon
+// uses it for every call, so device locks, idle times and park state have one key per device.
+// An id it does not recognize is returned unchanged.
+type IDNormalizer interface {
+	CanonicalID(id string) string
+}
+
 // FrameWaiter is implemented by backends that can block until the screen shows a new frame.
 // The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
 // on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns

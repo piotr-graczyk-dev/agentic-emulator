@@ -30,6 +30,9 @@ type apBackend struct {
 	parkFor  time.Duration // how long a park takes
 	treeHold chan struct{} // when set, UITree blocks until it is closed
 	bad      []string      // calls that reached a stopped device
+	// canon, when set, makes the fake a backend.IDNormalizer (as the real iOS and Android
+	// backends are) with this spelling rule.
+	canon func(string) string
 }
 
 type apDev struct {
@@ -578,4 +581,216 @@ type switchBackend struct{ *apBackend }
 
 func (b *switchBackend) SetProfile(ctx context.Context, id string, p api.Profile) (api.Device, error) {
 	return api.Device{ID: "ios:agemu-ipad", Name: "agemu-ipad", Platform: api.IOS, State: "booted"}, nil
+}
+
+// apNormBackend is apBackend with a canonical id rule (backend.IDNormalizer).
+type apNormBackend struct{ *apBackend }
+
+func (b *apNormBackend) CanonicalID(id string) string { return b.canon(id) }
+
+// Two spellings of one simulator's id (the helper matches UDIDs in any case): a call in flight
+// under one spelling must hold off the park registered under the other, and a call under either
+// spelling must resume it. (The skeptic's repro, with the fake made an IDNormalizer as the real
+// backends are.)
+func TestAnotherSpellingOfTheIdCountsAsTheSameDevice(t *testing.T) {
+	ab := newAPBackend(api.IOS, "agemu-x")
+	ab.devs["ios:AGEMU-X"] = ab.devs["ios:agemu-x"] // the backend accepts both spellings
+	ab.canon = strings.ToLower                      // and lists ios:agemu-x
+	b := &apNormBackend{ab}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", "ios:agemu-x"); err != nil {
+		t.Fatal(err)
+	}
+	hold := make(chan struct{})
+	ab.mu.Lock()
+	ab.treeHold = hold
+	ab.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- apCall(s, "ui", "ios:AGEMU-X") }() // a long call under the other spelling
+	time.Sleep(200 * time.Millisecond)
+	ab.mu.Lock()
+	ab.treeHold = nil
+	ab.mu.Unlock()
+	close(hold)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if parks, _, bad := ab.counts(); len(bad) > 0 || parks != 0 {
+		t.Fatalf("parked %d times under a call made with another spelling: %v", parks, bad)
+	}
+	// Parked under one spelling, a call under the other resumes it first.
+	if !waitFor(time.Second, func() bool { return ab.Parked("ios:agemu-x") }) {
+		t.Fatal("not parked")
+	}
+	if err := apCall(s, "ui", "ios:AGEMU-X"); err != nil {
+		t.Fatal(err)
+	}
+	if ab.Parked("ios:agemu-x") {
+		t.Fatal("a call under the other spelling did not resume the device")
+	}
+	if _, _, bad := ab.counts(); len(bad) > 0 {
+		t.Fatal(bad)
+	}
+	s.actMu.Lock()
+	n := len(s.activity)
+	s.actMu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d activity entries for one device", n)
+	}
+}
+
+// switchingBackend models iOS's profile switch: it acts on the target simulator (boot, ready),
+// resuming it first if it is parked, as ios.Backend.SetProfile does; hold, when set, keeps the
+// switch running.
+type switchingBackend struct {
+	*apBackend
+	target string
+	hold   chan struct{}
+}
+
+func (b *switchingBackend) SetProfile(ctx context.Context, id string, p api.Profile) (api.Device, error) {
+	if b.Parked(b.target) {
+		if _, err := b.Resume(ctx, b.target); err != nil {
+			return api.Device{}, err
+		}
+	}
+	b.use(b.target, "set_profile boots the target")
+	if b.hold != nil {
+		<-b.hold
+	}
+	b.use(b.target, "set_profile readies the target")
+	return api.Device{ID: b.target, Name: strings.TrimPrefix(b.target, "ios:"), Platform: api.IOS, State: "booted"}, nil
+}
+
+// The skeptic's blocker: a profile switch lands on a simulator the parker parked while the agent
+// worked on another one. The switch resumes it, and nothing reaches it stopped.
+func TestAProfileSwitchOntoAnAutoParkedDeviceResumesIt(t *testing.T) {
+	b := &switchingBackend{apBackend: newAPBackend(api.IOS, "agemu-iphone", "agemu-ipad"), target: "ios:agemu-ipad"}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", "ios:agemu-ipad"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !b.Parked("ios:agemu-ipad") && time.Now().Before(deadline) {
+		if err := apCall(s, "ui", "ios:agemu-iphone"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !b.Parked("ios:agemu-ipad") {
+		t.Fatal("setup: the iPad was not auto-parked")
+	}
+	if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"ios:agemu-iphone","profile":"ipad-mini"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, bad := b.counts(); len(bad) > 0 {
+		t.Fatalf("the switch acted on a stopped device: %v", bad)
+	}
+	if b.Parked("ios:agemu-ipad") {
+		t.Fatal("the switch's target is still parked")
+	}
+	// The resume came from the switch, not from the parker: the close must not resume it again.
+	s.stopAutoPark()
+}
+
+// While a switch runs, no device of its platform is parked (the switch may be booting any of
+// them); after it, the idle ones are.
+func TestNoAutoParkOnThePlatformWhileAProfileSwitchRuns(t *testing.T) {
+	hold := make(chan struct{})
+	b := &switchingBackend{apBackend: newAPBackend(api.IOS, "agemu-iphone", "agemu-ipad", "agemu-se"), target: "ios:agemu-ipad", hold: hold}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	for _, d := range []string{"ios:agemu-ipad", "ios:agemu-se"} {
+		if err := apCall(s, "ui", d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"ios:agemu-iphone","profile":"ipad-mini"}`))
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond) // 10x the threshold
+	if parks, _, _ := b.counts(); parks != 0 {
+		t.Fatalf("parked %d devices while a profile switch ran", parks)
+	}
+	close(hold)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(time.Second, func() bool { return b.Parked("ios:agemu-se") && b.Parked("ios:agemu-ipad") }) {
+		t.Fatal("idle devices not parked after the switch")
+	}
+	if _, _, bad := b.counts(); len(bad) > 0 {
+		t.Fatal(bad)
+	}
+}
+
+// A switch that starts while another device of its platform is being parked waits for that park.
+func TestAProfileSwitchWaitsForAParkInProgress(t *testing.T) {
+	b := &switchingBackend{apBackend: newAPBackend(api.IOS, "agemu-iphone", "agemu-ipad"), target: "ios:agemu-ipad"}
+	b.parkFor = 150 * time.Millisecond
+	s := apService(t, 10*time.Millisecond, time.Millisecond, b)
+	if err := apCall(s, "ui", "ios:agemu-ipad"); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(time.Second, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.devs["ios:agemu-ipad"].stopping
+	}) {
+		t.Fatal("park did not start")
+	}
+	if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"ios:agemu-iphone","profile":"ipad-mini"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, bad := b.counts(); len(bad) > 0 {
+		t.Fatalf("the switch ran during a park: %v", bad)
+	}
+}
+
+func TestCallsWithoutAutoParkDoNotTrackActivity(t *testing.T) {
+	t.Setenv("AGEMU_AUTO_PARK", "")
+	b := newAPBackend(api.Android, "agemu-a")
+	s := NewService(t.TempDir(), b)
+	for _, m := range []string{"ui", "logs", "park", "resume"} {
+		if err := apCall(s, m, "android:agemu-a"); err != nil {
+			t.Fatal(m, err)
+		}
+	}
+	if len(s.activity) != 0 || len(s.switching) != 0 {
+		t.Fatalf("activity tracked with auto-park off: %v %v", s.activity, s.switching)
+	}
+}
+
+// noResumeSwitch acts on the switch's target without resuming it (a backend that does not handle
+// a parked target itself): the daemon must have resumed the devices it parked before the switch.
+type noResumeSwitch struct{ *apBackend }
+
+func (b *noResumeSwitch) SetProfile(ctx context.Context, id string, p api.Profile) (api.Device, error) {
+	b.use("ios:agemu-ipad", "set_profile readies the target")
+	return api.Device{ID: "ios:agemu-ipad", Name: "agemu-ipad", Platform: api.IOS, State: "booted"}, nil
+}
+
+func TestTheDaemonResumesItsParksOnThePlatformBeforeAProfileSwitch(t *testing.T) {
+	b := &noResumeSwitch{newAPBackend(api.IOS, "agemu-iphone", "agemu-ipad")}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", "ios:agemu-ipad"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !b.Parked("ios:agemu-ipad") && time.Now().Before(deadline) {
+		if err := apCall(s, "ui", "ios:agemu-iphone"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !b.Parked("ios:agemu-ipad") {
+		t.Fatal("setup: the iPad was not auto-parked")
+	}
+	if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"ios:agemu-iphone","profile":"ipad-mini"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, bad := b.counts(); len(bad) > 0 {
+		t.Fatalf("the switch acted on a parked device: %v", bad)
+	}
 }

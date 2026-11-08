@@ -97,10 +97,12 @@ type Service struct {
 	ap       *autoParker
 	actMu    sync.Mutex
 	activity map[string]*devActivity
+	// switching counts the profile switches in flight per platform (autopark.go).
+	switching map[api.Platform]int
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {
-	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}, activity: map[string]*devActivity{}}
+	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}, activity: map[string]*devActivity{}, switching: map[api.Platform]int{}}
 	for _, b := range bs {
 		s.backends[b.Platform()] = b
 	}
@@ -168,7 +170,7 @@ func (s *Service) listAll(ctx context.Context) ([]api.Device, error) {
 // into a full device id. Empty means "the only booted device".
 func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 	if strings.HasPrefix(ref, string(api.Android)+":") || strings.HasPrefix(ref, string(api.IOS)+":") {
-		return ref, nil
+		return s.canonical(ref), nil
 	}
 	devs, err := s.listAll(ctx)
 	if err != nil {
@@ -197,6 +199,20 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unknown device %q", ref)
+}
+
+// canonical returns the one spelling of a device id its backend lists (backend.IDNormalizer),
+// so that every key the daemon keeps per device (device lock, logs state, auto-park activity)
+// and every id it passes to a backend is the same for one device.
+func (s *Service) canonical(id string) string {
+	b, err := s.backendFor(id)
+	if err != nil {
+		return id
+	}
+	if n, ok := b.(backend.IDNormalizer); ok {
+		return n.CanonicalID(id)
+	}
+	return id
 }
 
 // Call dispatches one method. It drops the crash notice; Handle returns it.
@@ -253,7 +269,12 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.beginCall(ctx, id, method); err != nil {
 		return nil, nil, err
 	}
-	defer s.endCall(id)
+	defer s.endCall(id, method)
+	if method == "set_profile" {
+		if err := s.resumeAutoParked(ctx, b.Platform()); err != nil {
+			return nil, nil, err
+		}
+	}
 	// Arguments are checked before the device lock and the backend: a bad call fails at once.
 	if err := checkCapability(method, &p); err != nil {
 		return nil, nil, err

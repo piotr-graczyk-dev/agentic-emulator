@@ -53,7 +53,9 @@ other call on it, `logs` and `crashes` excepted, so backends never see a call fo
 device. With `AGEMU_AUTO_PARK` set, the daemon also counts each call on a device from
 its start to its end (`internal/daemon/autopark.go`) and parks a device it has served after that
 long without one; it marks the device first, so a call that starts during the park waits for it
-and then resumes the device as above.
+and then resumes the device as above. Device ids are made canonical first
+(`backend.IDNormalizer`: an iOS UDID upper case, an AVD name as its file is spelled), so every
+per-device key in the daemon has one spelling per device.
 
 ## Conventions
 
