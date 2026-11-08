@@ -174,6 +174,9 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	if _, err := os.Stat(filepath.Join(avdHome(), name+".ini")); err == nil {
 		return avdInfo{}, fmt.Errorf("AVD %s already exists", name)
 	}
+	if _, err := coresSetting(); err != nil {
+		return avdInfo{}, err
+	}
 	avdmanager := sdkTool("cmdline-tools", "latest", "bin", "avdmanager")
 	cmd := exec.CommandContext(ctx, avdmanager, "create", "avd", "-n", name, "-k", img)
 	cmd.Stdin = strings.NewReader("no\n") // "Do you wish to create a custom hardware profile?"
@@ -186,6 +189,15 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	}
 	// The SDK leaves an empty sdcard image behind for hw.sdCard=yes; we disable the SD card.
 	_ = os.Remove(filepath.Join(a.Dir, "sdcard.img"))
+	set := avdConfig(name, prof)
+	if err := patchINI(filepath.Join(a.Dir, "config.ini"), set, []string{"disk.dataPartition.path"}); err != nil {
+		return avdInfo{}, err
+	}
+	return loadAVD(name)
+}
+
+// avdConfig is what createAVD writes into a new AVD's config.ini on top of avdmanager's defaults.
+func avdConfig(name string, prof api.Profile) map[string]string {
 	set := map[string]string{
 		"AvdId": name, "avd.ini.displayname": name, "avd.id": name, "avd.name": name,
 		"hw.lcd.width": strconv.Itoa(prof.Width), "hw.lcd.height": strconv.Itoa(prof.Height),
@@ -204,10 +216,34 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 		"firstboot.saveToLocalSnapshot": "no", "fastboot.forceFastBoot": "no",
 		"agemu.profile": prof.Name,
 	}
-	if err := patchINI(filepath.Join(a.Dir, "config.ini"), set, []string{"disk.dataPartition.path"}); err != nil {
-		return avdInfo{}, err
+	// vCPUs, like the RAM, are set when the AVD is created: the baseline snapshot holds the
+	// guest's CPUs, so changing hw.cpu.ncore later makes the next boot retake the baseline
+	// (configMismatch). Unset, avdmanager's default stays (4 for the default image). See
+	// docs/ANDROID.md, "Guest RAM, vCPUs and display size".
+	if n, err := coresSetting(); err == nil && n > 0 {
+		set["hw.cpu.ncore"] = strconv.Itoa(n)
 	}
-	return loadAVD(name)
+	return set
+}
+
+// maxCores is the most vCPUs the emulator's arm64 machine (mach-virt) accepts. With more, emulator
+// 37.1 refuses to start the guest ("Number of SMP CPUs requested (16) exceeds max CPUs supported by
+// machine 'mach-virt' (8)") and its process hangs instead of exiting.
+const maxCores = 8
+
+// coresSetting reads AGEMU_ANDROID_CORES: 0 when unset (avdmanager's default stays), an error
+// for a value the emulator cannot boot, so that create refuses it instead of making an AVD
+// that never boots.
+func coresSetting() (int, error) {
+	v := strings.TrimSpace(os.Getenv("AGEMU_ANDROID_CORES"))
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > maxCores {
+		return 0, fmt.Errorf("AGEMU_ANDROID_CORES=%q: the emulator supports 1 to %d vCPUs", v, maxCores)
+	}
+	return n, nil
 }
 
 // patchINI rewrites key=value pairs in place, keeping order; drop lists keys to delete.

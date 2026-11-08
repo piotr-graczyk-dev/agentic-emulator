@@ -676,7 +676,12 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			// The baseline was taken with another -gpu mode (AGEMU_ANDROID_GPU changed, or an
 			// agemu upgrade changed the default). The emulator refuses it before touching the
 			// guest, which keeps cold-booting (-no-snapshot-load); the baseline is retaken below.
-			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it", d.name, baselineSnapshot, err)
+			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
+			loadBaseline, retake = false, true
+		case err != nil && configMismatch(err):
+			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
+			// taken. Refused the same way, before the guest is touched; retaken below.
+			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
