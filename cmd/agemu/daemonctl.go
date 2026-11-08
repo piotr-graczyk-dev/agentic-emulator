@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,18 +15,49 @@ import (
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
 )
 
-// runningDaemon pings the daemon that runs now, without starting one. ok is false when none
-// answers.
-func runningDaemon() (p daemon.Ping, ok bool) {
+type daemonState int
+
+const (
+	daemonAbsent daemonState = iota // nothing listens on the socket
+	daemonUp                        // it answered ping
+	daemonHung                      // it accepts connections but did not answer in pingTimeout
+)
+
+// pingTimeout bounds the health check, so doctor, version, stop and MCP start-up cannot hang
+// on a daemon that stopped answering.
+const pingTimeout = 3 * time.Second
+
+// probeDaemon pings the daemon that runs now, without starting one.
+func probeDaemon() (daemon.Ping, daemonState) {
+	var p daemon.Ping
 	cl, ok := client.DialRunning()
 	if !ok {
-		return p, false
+		return p, daemonAbsent
 	}
 	defer cl.Close()
+	_ = cl.SetDeadline(time.Now().Add(pingTimeout))
 	if _, err := cl.Call("ping", nil, &p); err != nil {
-		return p, false
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return p, daemonHung
+		}
+		return p, daemonAbsent // it closed the connection: shutting down
 	}
-	return p, true
+	return p, daemonUp
+}
+
+// runningDaemon is probeDaemon for callers that only need a daemon that answers.
+func runningDaemon() (daemon.Ping, bool) {
+	p, s := probeDaemon()
+	return p, s == daemonUp
+}
+
+// hungMessage describes a daemon that does not answer.
+func hungMessage() string {
+	who := "agemud"
+	if pid := lockPID(); pid != 0 {
+		who = fmt.Sprintf("agemud (pid %d)", pid)
+	}
+	return fmt.Sprintf("%s accepts connections but did not answer within %v", who, pingTimeout)
 }
 
 // staleReason says why the running daemon is not the agemud this agemu would start now, or ""
@@ -52,6 +84,11 @@ func staleness(p daemon.Ping) (reason string, autoRestart bool) {
 		want = r
 	}
 	if p.Exe == want {
+		// An upgrade in place: a rebuild has a newer modification time, but npm and tar keep
+		// the package's own (npm's is from 1985), so compare versions too.
+		if versionOlder(p.Version, daemon.Version) {
+			return fmt.Sprintf("it is version %s, this agemu is %s", p.Version, daemon.Version), true
+		}
 		if st, err := os.Stat(want); err == nil && st.ModTime().After(p.Started) {
 			return "agemud was rebuilt or reinstalled after the daemon started", true
 		}
@@ -84,9 +121,13 @@ func daemonCommand(args []string) error {
 		// Replace this process so signals reach the daemon directly.
 		return syscall.Exec(path, []string{path}, os.Environ())
 	case "status":
-		p, ok := runningDaemon()
-		if !ok {
+		p, state := probeDaemon()
+		switch state {
+		case daemonAbsent:
 			fmt.Println("agemud is not running (the next agemu command starts it)")
+			return nil
+		case daemonHung:
+			fmt.Printf("%s; run `agemu daemon restart`\n  log: %s\n", hungMessage(), client.LogPath())
 			return nil
 		}
 		fmt.Printf("agemud %s running, pid %d, since %s\n", p.Version, p.PID, p.Started.Local().Format(time.DateTime))
@@ -114,7 +155,7 @@ func daemonCommand(args []string) error {
 	case "restart":
 		// --if-running: only restart a daemon that runs (make install uses it).
 		if parse(args[1:]).flags["if-running"] == "true" {
-			if _, ok := runningDaemon(); !ok {
+			if _, state := probeDaemon(); state == daemonAbsent {
 				return nil
 			}
 		}
@@ -140,40 +181,104 @@ func startDaemon() error {
 	return nil
 }
 
-// stopDaemon stops the running daemon and waits until its socket is gone. Devices are not
-// touched: emulators and simulators keep running and the next daemon finds them again.
+// stopDaemon stops the running daemon, also one that no longer answers, and waits until it has
+// exited. Devices are not touched: emulators and simulators keep running and the next daemon
+// finds them again.
 func stopDaemon() (bool, error) {
-	p, ok := runningDaemon()
-	if !ok {
+	p, state := probeDaemon()
+	switch state {
+	case daemonAbsent:
 		return false, nil
+	case daemonHung:
+		pid := lockPID()
+		if pid == 0 {
+			return false, fmt.Errorf("%s, and %s does not name its pid; stop it with `pkill -x agemud`", hungMessage(), daemon.LockPath())
+		}
+		return true, stopPID(pid)
 	}
-	if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return false, fmt.Errorf("stopping agemud (pid %d): %w", p.PID, err)
+	return true, stopPID(p.PID)
+}
+
+// stopGrace is how long a daemon gets to exit after SIGTERM before it is killed.
+var stopGrace = 20 * time.Second
+
+// stopPID stops the daemon with this pid and no other: when another session has already
+// replaced it, the lock file names the new daemon and there is nothing to do.
+func stopPID(pid int) error {
+	if lp := lockPID(); lp != 0 && lp != pid {
+		return nil
 	}
-	gone := func(d time.Duration) bool {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return fmt.Errorf("stopping agemud (pid %d): %w", pid, err)
+	}
+	wait := func(d time.Duration) bool {
 		for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
-			cl, ok := client.DialRunning()
-			if !ok {
+			if daemonGone(pid) {
 				return true
 			}
-			cl.Close()
 		}
 		return false
 	}
-	if gone(20 * time.Second) {
-		return true, nil
+	if wait(stopGrace) {
+		return nil
 	}
-	_ = syscall.Kill(p.PID, syscall.SIGKILL)
-	if gone(3 * time.Second) {
-		return true, nil
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	if wait(3 * time.Second) {
+		return nil
 	}
-	return false, fmt.Errorf("agemud (pid %d) did not stop", p.PID)
+	return fmt.Errorf("agemud (pid %d) did not stop", pid)
+}
+
+// daemonGone reports whether the daemon with this pid has exited. The pid alone does not say:
+// a daemon started by an agemu that still runs (an MCP session) stays a zombie after it exits.
+// Its flock is released at exit, though, and a new daemon writes its own pid to the lock file.
+func daemonGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	if lp := lockPID(); lp != 0 && lp != pid {
+		return true
+	}
+	return !lockHeld()
+}
+
+// lockPID is the pid the running daemon wrote to its lock file, or 0 (no daemon, or one that
+// predates writing it).
+func lockPID() int {
+	b, err := os.ReadFile(daemon.LockPath())
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return pid
+}
+
+// lockHeld reports whether a daemon holds the lock file's flock.
+func lockHeld() bool {
+	f, err := os.Open(daemon.LockPath())
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 // versionCommand prints agemu's version and the running daemon's.
 func versionCommand() {
 	fmt.Printf("agemu  %s\n", daemon.Version)
-	if p, ok := runningDaemon(); ok {
+	p, state := probeDaemon()
+	if state == daemonHung {
+		fmt.Printf("agemud: %s; run `agemu daemon restart`\n", hungMessage())
+		return
+	}
+	if state == daemonUp {
 		v, note := p.Version, ""
 		if v == "" {
 			v = "(older build)"
@@ -201,41 +306,107 @@ func restartIfOutdated() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "agemu: restarting agemud %s (pid %d) on %s\n", p.Version, p.PID, daemon.Version)
-	if _, err := stopDaemon(); err != nil {
+	// Only the daemon checked above: another session may already have started its successor.
+	if err := stopPID(p.PID); err != nil {
 		fmt.Fprintln(os.Stderr, "agemu:", err)
 	}
 }
 
-// versionOlder reports whether release version a is older than b ("v0.1.0", "0.2.0" or git
-// describe's "v0.1.0-3-gabc1234"). Anything else (dev builds, bare commits) compares as not older.
+// versionOlder reports whether version a is older than b, in semver order: "v0.2.0-rc.1" <
+// "v0.2.0" < "v0.2.0-3-gabc1234" (git describe: commits after the tag) < "v0.2.1". Versions
+// that are not semver (dev builds, bare commits) compare as not older.
 func versionOlder(a, b string) bool {
-	pa, oka := parseVersion(a)
-	pb, okb := parseVersion(b)
-	if !oka || !okb {
-		return false
-	}
-	for i := range pa {
-		if pa[i] != pb[i] {
-			return pa[i] < pb[i]
-		}
-	}
-	return false
+	va, oka := parseVersion(a)
+	vb, okb := parseVersion(b)
+	return oka && okb && compareVersions(va, vb) < 0
 }
 
-func parseVersion(v string) ([3]int, bool) {
-	var out [3]int
-	v = strings.TrimPrefix(v, "v")
-	v, _, _ = strings.Cut(v, "-")
-	parts := strings.Split(v, ".")
+type version struct {
+	core [3]int
+	pre  []string // prerelease identifiers ("rc", "1")
+	post bool     // git describe: commits after the tag, or a dirty tree
+}
+
+var describeSuffix = regexp.MustCompile(`-[0-9]+-g[0-9a-f]+(-dirty)?$|-dirty$`)
+
+func parseVersion(s string) (version, bool) {
+	var v version
+	s = strings.TrimPrefix(s, "v")
+	s, _, _ = strings.Cut(s, "+") // build metadata does not order
+	if loc := describeSuffix.FindStringIndex(s); loc != nil {
+		s, v.post = s[:loc[0]], true
+	}
+	core, pre, hasPre := strings.Cut(s, "-")
+	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
-		return out, false
+		return v, false
 	}
-	for i, s := range parts {
-		n, err := strconv.Atoi(s)
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
 		if err != nil || n < 0 {
-			return out, false
+			return v, false
 		}
-		out[i] = n
+		v.core[i] = n
 	}
-	return out, true
+	if hasPre {
+		if pre == "" {
+			return v, false
+		}
+		v.pre = strings.Split(pre, ".")
+	}
+	return v, true
+}
+
+func compareVersions(a, b version) int {
+	for i := range a.core {
+		if a.core[i] != b.core[i] {
+			return cmpInt(a.core[i], b.core[i])
+		}
+	}
+	switch {
+	case len(a.pre) == 0 && len(b.pre) > 0:
+		return 1
+	case len(a.pre) > 0 && len(b.pre) == 0:
+		return -1
+	}
+	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
+		if c := comparePre(a.pre[i], b.pre[i]); c != 0 {
+			return c
+		}
+	}
+	if c := cmpInt(len(a.pre), len(b.pre)); c != 0 {
+		return c
+	}
+	switch {
+	case a.post && !b.post:
+		return 1
+	case !a.post && b.post:
+		return -1
+	}
+	return 0
+}
+
+// comparePre orders one prerelease identifier: numbers numerically and before words.
+func comparePre(a, b string) int {
+	na, ea := strconv.Atoi(a)
+	nb, eb := strconv.Atoi(b)
+	switch {
+	case ea == nil && eb == nil:
+		return cmpInt(na, nb)
+	case ea == nil:
+		return -1
+	case eb == nil:
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }

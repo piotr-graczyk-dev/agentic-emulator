@@ -286,7 +286,8 @@ npm install -g agentic-emulator
 curl -fsSL https://raw.githubusercontent.com/piotr-graczyk-dev/agentic-emulator/main/install.sh | sh
 ```
 
-Then the first device:
+If `install.sh` says `~/.local/bin` is not on `PATH`, run the line it prints first. Then the
+first device:
 
 ```sh
 agemu create --platform ios --name iphone && agemu boot agemu-iphone
@@ -339,12 +340,13 @@ prints.
 | Installed with | Update | Uninstall |
 |---|---|---|
 | `npx` | nothing to do: each session runs the latest release | `claude mcp remove agemu` |
-| `npm install -g` | `npm install -g agentic-emulator@latest` | `agemu daemon stop && npm uninstall -g agentic-emulator` |
+| `npm install -g` | `npm install -g agentic-emulator@latest`, then `agemu daemon restart` | `agemu daemon stop && npm uninstall -g agentic-emulator` |
 | `install.sh` | run it again | `agemu daemon stop && rm ~/.local/bin/{agemu,agemud,agemu-ios-helper}` |
 | source | `git pull && make install` | `make uninstall` |
 
-An update restarts a running daemon on the new build; MCP sessions reconnect by themselves and
-devices keep running. Uninstalling leaves the devices you created: `agemu-*` AVDs
+`install.sh` and `make install` restart a running daemon on the new build; after an npm update,
+the next MCP session does it, or `agemu daemon restart` at once. MCP sessions reconnect by
+themselves and devices keep running. Uninstalling leaves the devices you created: `agemu-*` AVDs
 (`avdmanager delete avd -n agemu-pixel`) and `agemu-*` simulators (`xcrun simctl delete <udid>`),
 and the state in `~/.agemu`.
 

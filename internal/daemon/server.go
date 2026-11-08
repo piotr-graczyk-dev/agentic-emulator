@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -69,6 +70,10 @@ type Ping struct {
 	Version string    `json:"version"`
 	Exe     string    `json:"exe,omitempty"`
 	Started time.Time `json:"started"`
+	// Platforms the daemon was built with (a noios or noandroid build lacks one).
+	Platforms []api.Platform `json:"platforms,omitempty"`
+	// AndroidSDK is the SDK the daemon uses, from the environment it started in.
+	AndroidSDK string `json:"androidSdk,omitempty"`
 }
 
 // The daemon's own binary and start time, reported by ping.
@@ -97,6 +102,9 @@ func Home() string {
 
 func SocketPath() string { return filepath.Join(Home(), "agemu.sock") }
 
+// LockPath is the file the running daemon holds an exclusive flock on; it contains its pid.
+func LockPath() string { return filepath.Join(Home(), "agemud.lock") }
+
 // Serve listens on the unix socket until ctx is cancelled.
 func Serve(ctx context.Context, svc *Service) error {
 	if err := os.MkdirAll(Home(), 0o755); err != nil {
@@ -104,7 +112,7 @@ func Serve(ctx context.Context, svc *Service) error {
 	}
 	// Two agemu processes can both find no socket and each start a daemon. The second must
 	// not unlink the first one's socket, or two daemons would drive the same devices.
-	lock, err := os.OpenFile(filepath.Join(Home(), "agemud.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := os.OpenFile(LockPath(), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
@@ -112,6 +120,11 @@ func Serve(ctx context.Context, svc *Service) error {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return errors.New("another agemud already runs for " + Home())
 	}
+	// The lock file names the daemon that holds it, so `agemu daemon stop` can stop one that
+	// accepts connections but no longer answers. Emptied again on a clean exit.
+	_ = lock.Truncate(0)
+	_, _ = lock.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	defer lock.Truncate(0)
 	sock := SocketPath()
 	if c, err := net.DialTimeout("unix", sock, 200*time.Millisecond); err == nil {
 		c.Close()

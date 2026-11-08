@@ -130,6 +130,9 @@ func startDaemon() error {
 
 func (c *Client) Close() error { return c.conn.Close() }
 
+// SetDeadline bounds every call from now on (zero: no bound).
+func (c *Client) SetDeadline(t time.Time) error { return c.conn.SetDeadline(t) }
+
 // reconnect replaces a connection the daemon closed with a new one (starting the daemon again
 // if needed).
 func (c *Client) reconnect() error {

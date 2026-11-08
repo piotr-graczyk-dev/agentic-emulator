@@ -1,8 +1,13 @@
 package main
 
 import (
+	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,11 +32,18 @@ func TestNewestIOSRuntime(t *testing.T) {
 	raw := `{"runtimes":[
 		{"name":"iOS 18.6","version":"18.6","platform":"iOS","identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-6","isAvailable":true},
 		{"name":"iOS 26.5","version":"26.5","platform":"iOS","identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-5","isAvailable":true},
+		{"name":"iOS 26.9","version":"26.9","platform":"iOS","identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-9","isAvailable":true},
+		{"name":"iOS 26.10","version":"26.10","platform":"iOS","identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-10","isAvailable":true},
 		{"name":"iOS 27.0","version":"27.0","platform":"iOS","identifier":"com.apple.CoreSimulator.SimRuntime.iOS-27-0","isAvailable":false},
 		{"name":"watchOS 26.5","version":"26.5","platform":"watchOS","identifier":"com.apple.CoreSimulator.SimRuntime.watchOS-26-5","isAvailable":true}
 	]}`
-	if got := newestIOSRuntime(raw); got != "iOS 26.5" {
-		t.Errorf("newest = %q, want iOS 26.5", got)
+	if got := newestIOSRuntime(raw); got != "iOS 26.10" {
+		t.Errorf("newest = %q, want iOS 26.10", got)
+	}
+	if !iosRuntimeAvailable(raw, "com.apple.CoreSimulator.SimRuntime.iOS-26-5") ||
+		iosRuntimeAvailable(raw, "com.apple.CoreSimulator.SimRuntime.iOS-27-0") ||
+		iosRuntimeAvailable(raw, "com.apple.CoreSimulator.SimRuntime.iOS-18-0") {
+		t.Error("iosRuntimeAvailable: want installed-and-available only")
 	}
 	if got := newestIOSRuntime(`{"runtimes":[]}`); got != "" {
 		t.Errorf("no runtimes: %q", got)
@@ -76,6 +88,15 @@ func TestVersionOlder(t *testing.T) {
 		{"v0.2.0", "v0.1.0", false},
 		{"v0.1.0", "v0.1.0", false},
 		{"v0.1.0-3-gabc1234", "v0.1.1", true},
+		{"v0.1.0", "v0.1.0-3-gabc1234", true},  // commits after the tag are newer
+		{"v0.1.0-3-gabc1234", "v0.1.0", false}, //
+		{"v0.2.0-rc.1", "v0.2.0", true},        // a prerelease precedes its release
+		{"v0.2.0", "v0.2.0-rc.1", false},       //
+		{"v0.2.0-rc.1", "v0.2.0-rc.2", true},   //
+		{"v0.2.0-rc.2", "v0.2.0-rc.10", true},  // numeric identifiers compare as numbers
+		{"v0.2.0-alpha", "v0.2.0-beta", true},  //
+		{"v0.2.0-rc.1", "v0.2.0-rc.1-2-gabc", true},
+		{"v0.1.0-dirty", "v0.1.0", false},
 		{"31d48a9-dirty", "v0.1.0", false},
 		{"dev", "v0.1.0", false},
 	} {
@@ -112,5 +133,114 @@ func TestStalenessAcrossInstallations(t *testing.T) {
 		if (reason != "") != c.stale || restart != c.restart {
 			t.Errorf("daemon %s: reason %q, restart %v; want stale %v, restart %v", c.running, reason, restart, c.stale, c.restart)
 		}
+	}
+	// npm upgrades in place and gives files the 1985 mtime it stores: only the version tells.
+	real, _ := filepath.EvalSymlinks(agemud)
+	npm := time.Date(1985, 10, 26, 8, 15, 0, 0, time.UTC)
+	_ = os.Chtimes(agemud, npm, npm)
+	inPlace := daemon.Ping{PID: 1, Exe: real, Started: time.Now().Add(-time.Hour), Version: "v0.1.0"}
+	if reason, restart := staleness(inPlace); reason == "" || !restart {
+		t.Errorf("in-place upgrade with an old mtime: reason %q, restart %v", reason, restart)
+	}
+	inPlace.Version = daemon.Version
+	if reason, _ := staleness(inPlace); reason != "" {
+		t.Errorf("same version in place reported stale: %q", reason)
+	}
+}
+
+func TestParseJavaVersion(t *testing.T) {
+	for out, want := range map[string]int{
+		`openjdk version "17.0.10" 2024-01-16 LTS`:                        17,
+		`openjdk version "21" 2023-09-19`:                                 21,
+		`java version "1.8.0_402"`:                                        8,
+		"Picked up JAVA_TOOL_OPTIONS: -Xmx1g\nopenjdk version \"11.0.2\"": 11,
+	} {
+		if got, err := parseJavaVersion(out); err != nil || got != want {
+			t.Errorf("parseJavaVersion(%q) = %d, %v; want %d", out, got, err, want)
+		}
+	}
+	if _, err := parseJavaVersion("command not found"); err == nil {
+		t.Error("garbage parsed")
+	}
+}
+
+// fakeHungDaemon is what the test binary runs as when TestStopAHungDaemon starts it: a daemon
+// that holds the lock, names itself in it and accepts connections, but never answers.
+func fakeHungDaemon() {
+	lock, err := os.OpenFile(daemon.LockPath(), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		os.Exit(3)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		os.Exit(4)
+	}
+	_, _ = lock.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	ln, err := net.Listen("unix", daemon.SocketPath())
+	if err != nil {
+		os.Exit(5)
+	}
+	signal.Ignore(syscall.SIGTERM) // stuck: only SIGKILL ends it
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			os.Exit(6)
+		}
+		defer c.Close() // read nothing, answer nothing
+	}
+}
+
+func TestMain(m *testing.M) {
+	if os.Getenv("AGEMU_TEST_FAKE_HUNG_DAEMON") == "1" {
+		fakeHungDaemon()
+	}
+	os.Exit(m.Run())
+}
+
+func TestStopAHungDaemon(t *testing.T) {
+	defer func(g time.Duration) { stopGrace = g }(stopGrace)
+	stopGrace = 500 * time.Millisecond              // the fake ignores SIGTERM: it gets SIGKILL after this
+	home, err := os.MkdirTemp("/tmp", "agemu-hung") // unix socket paths are limited to 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(home)
+	t.Setenv("AGEMU_HOME", home)
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), "AGEMU_TEST_FAKE_HUNG_DAEMON=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// No cmd.Wait: like an MCP session that started the daemon, the parent leaves it a zombie.
+	for end := time.Now().Add(5 * time.Second); lockPID() != cmd.Process.Pid; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("fake daemon did not start")
+		}
+	}
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if c, err := net.Dial("unix", daemon.SocketPath()); err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("fake daemon does not listen")
+		}
+	}
+
+	start := time.Now()
+	if _, state := probeDaemon(); state != daemonHung {
+		t.Fatalf("state = %v, want daemonHung", state)
+	}
+	if d := time.Since(start); d > pingTimeout+time.Second {
+		t.Fatalf("probe took %v", d)
+	}
+	stopped, err := stopDaemon()
+	if err != nil || !stopped {
+		t.Fatalf("stopDaemon = %v, %v", stopped, err)
+	}
+	if !daemonGone(cmd.Process.Pid) {
+		t.Fatal("the daemon is not gone")
+	}
+	if _, state := probeDaemon(); state != daemonAbsent {
+		t.Fatalf("after stop: state = %v", state)
 	}
 }

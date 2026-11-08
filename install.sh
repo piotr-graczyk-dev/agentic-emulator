@@ -37,10 +37,16 @@ curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "no SHA256SUMS in rele
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 
 mkdir -p "$prefix/bin"
+# Copy all three next to their targets first, then move them into place: a failed copy leaves the
+# installed binaries untouched, and a move replaces a file instead of rewriting it (macOS kills a
+# signed binary rewritten in place).
+staged=""
 for b in agemu agemud agemu-ios-helper; do
-	# Replace, never overwrite in place: macOS kills a signed binary rewritten in place.
-	rm -f "$prefix/bin/$b"
-	cp "$tmp/$name/$b" "$prefix/bin/$b"
+	cp "$tmp/$name/$b" "$prefix/bin/.$b.new" || { rm -f $staged "$prefix/bin/.$b.new"; die "could not write to $prefix/bin"; }
+	staged="$staged $prefix/bin/.$b.new"
+done
+for b in agemu agemud agemu-ios-helper; do
+	mv -f "$prefix/bin/.$b.new" "$prefix/bin/$b" || die "could not replace $prefix/bin/$b"
 done
 echo "Installed agemu, agemud and agemu-ios-helper $version to $prefix/bin"
 "$prefix/bin/agemu" daemon restart --if-running

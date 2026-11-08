@@ -23,18 +23,20 @@ test:
 	go test ./...
 
 # The three binaries must stay together: agemu starts the agemud next to it, and agemud the
-# helper next to itself. Replace, never overwrite in place: macOS SIGKILLs a signed binary
-# rewritten in place.
+# helper next to itself. All three are copied before any is replaced, so a failed copy leaves
+# the installation as it was, and moved into place, never rewritten: macOS SIGKILLs a signed
+# binary rewritten in place.
 install: build
 	@mkdir -p "$(PREFIX)/bin"
-	@for b in $(INSTALL_BINS); do rm -f "$(PREFIX)/bin/$$b"; cp "$(BIN)/$$b" "$(PREFIX)/bin/$$b"; done
+	@for b in $(INSTALL_BINS); do cp "$(BIN)/$$b" "$(PREFIX)/bin/.$$b.new" || exit 1; done
+	@for b in $(INSTALL_BINS); do mv -f "$(PREFIX)/bin/.$$b.new" "$(PREFIX)/bin/$$b" || exit 1; done
 	@echo "installed $(INSTALL_BINS) $(VERSION) to $(PREFIX)/bin"
 	@"$(PREFIX)/bin/agemu" daemon restart --if-running
 	@echo
 	@"$(PREFIX)/bin/agemu" doctor || true
 
 uninstall:
-	@-"$(PREFIX)/bin/agemu" daemon stop 2>/dev/null
+	@if [ -x "$(PREFIX)/bin/agemu" ]; then "$(PREFIX)/bin/agemu" daemon stop; fi
 	@for b in $(INSTALL_BINS); do rm -f "$(PREFIX)/bin/$$b"; done
 	@echo "removed $(INSTALL_BINS) from $(PREFIX)/bin (devices and ~/.agemu are kept)"
 
