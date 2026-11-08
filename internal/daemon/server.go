@@ -57,6 +57,35 @@ func errorCode(err error) string {
 	return ""
 }
 
+// Version is the build's version, set with -ldflags "-X .../internal/daemon.Version=..." by
+// make; agemu and agemud each carry their own.
+var Version = "dev"
+
+// Ping is the result of the ping method: enough for agemu to tell whether the running daemon
+// is the agemud binary it would start now (doctor, daemon status).
+type Ping struct {
+	OK      bool      `json:"ok"`
+	PID     int       `json:"pid"`
+	Version string    `json:"version"`
+	Exe     string    `json:"exe,omitempty"`
+	Started time.Time `json:"started"`
+}
+
+// The daemon's own binary and start time, reported by ping.
+var (
+	started = time.Now()
+	exePath = func() string {
+		p, err := os.Executable()
+		if err != nil {
+			return ""
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}()
+)
+
 // Home returns the agemu state directory ($AGEMU_HOME or ~/.agemu).
 func Home() string {
 	if h := os.Getenv("AGEMU_HOME"); h != "" {

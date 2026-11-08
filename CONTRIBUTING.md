@@ -5,25 +5,23 @@ Thanks for helping. Bug reports, measurements on other Macs and pull requests ar
 ## Reporting a bug
 
 [Open an issue](https://github.com/piotr-graczyk-dev/agentic-emulator/issues/new/choose) with
-the commit you built (`git rev-parse --short HEAD`), your macOS, Xcode and Android SDK versions,
-the commands or MCP calls that failed, and the relevant lines of `~/.agemu/daemon.log`. A
+the output of `agemu version` and `agemu doctor --json`, the commands or MCP calls that failed, and the relevant lines of `~/.agemu/daemon.log`. A
 security problem goes to [SECURITY.md](SECURITY.md) instead.
 
 ## Building
 
 You need an Apple Silicon Mac, Go (the version in `go.mod`), Xcode or the Command Line Tools
 for the Swift helper, and for each platform you work on its SDK: Xcode with an iOS Simulator
-runtime, or the Android SDK ([Install](README.md#install) lists the pieces).
+runtime, or the Android SDK (`agemu doctor` lists what is missing).
 
 ```sh
 make build     # bin/agemu, bin/agemud, bin/agemu-ios-helper, bin/agemu-bench
 make test      # go vet + unit tests; no devices needed
 ```
 
-A daemon that is already running keeps serving the old build after `make build`: stop it with
-`pkill -x agemud` (devices keep running; the next command starts the new one), or use a
-separate state directory with `AGEMU_HOME=$(mktemp -d)`, which also keeps your work away from a
-daemon other sessions use.
+A daemon that is already running keeps serving the old build after `make build`: run
+`bin/agemu daemon restart` (devices keep running), or use a separate state directory with
+`AGEMU_HOME=$(mktemp -d)`, which also keeps your work away from a daemon other sessions use.
 
 `make android-build` and the `noios` / `noandroid` build tags compile one platform out. The
 on-device Android agent's jar (`internal/android/assets/agemu-agent.jar`) is committed;
@@ -55,6 +53,21 @@ The scripts only create and boot `agemu-*` devices, but they reset them: the iOS
   by how much.
 - A new CLI command or MCP tool needs its entry in `agemu help`, the README and, for test
   capabilities, [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
+
+## Releasing (maintainers)
+
+Push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The
+[release workflow](.github/workflows/release.yml) builds on Apple Silicon, runs the tests and a
+smoke test, publishes a GitHub release with `agemu-<version>-darwin-arm64.tar.gz` and
+`SHA256SUMS` (which `install.sh` downloads), and publishes the npm package `agentic-emulator`
+with provenance. A tag with a suffix (`v0.2.0-rc.1`) is a GitHub prerelease and npm's `next`
+tag. Running the workflow by hand packages a version without publishing it.
+
+`scripts/package.sh <version>` builds the same files locally from `bin/`
+(`make build VERSION=<version>` first). The npm package needs the repository secret `NPM_TOKEN`
+(a granular token with publish rights) until npm trusted publishing is configured for
+`agentic-emulator`, after which the secret can go. After changing `go.mod`, regenerate
+`THIRD_PARTY_NOTICES.md` with `scripts/third-party-notices.sh > THIRD_PARTY_NOTICES.md`.
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE).
 Please follow the [code of conduct](CODE_OF_CONDUCT.md).

@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
@@ -84,6 +83,13 @@ Actions (tap, swipe, type, key, launch, open, push) also wait for their effect i
 Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform,
 4 failed while the app launched last through agemu was down after a crash (agemu crashes).
 
+Setup:
+  doctor [--platform ios|android] [--json]  check Xcode, the Android SDK and agemu itself;
+                                            prints the commands that fix what is missing
+  version                                   agemu's version and the running daemon's
+  daemon status|start|stop|restart          the shared background daemon (stop/restart leave
+                                            devices running; restart after an upgrade)
+
 Servers:
   daemon                                    run the daemon in the foreground
   mcp                                       MCP server on stdio (for agent harnesses)
@@ -100,14 +106,25 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
-	case "daemon":
-		path, err := client.DaemonPath()
-		if err != nil {
-			log.Fatal(err)
+	case "daemon", "doctor", "version", "--version":
+		var err error
+		switch cmd {
+		case "daemon":
+			err = daemonCommand(args)
+		case "doctor":
+			err = doctorCommand(args)
+		default:
+			versionCommand()
 		}
-		// Replace this process so signals reach the daemon directly.
-		log.Fatal(syscall.Exec(path, []string{path}, os.Environ()))
+		if err != nil {
+			if err != errDoctor {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
+			os.Exit(1)
+		}
+		return
 	case "mcp":
+		restartIfOutdated()
 		if err := mcp.Serve(os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)
 		}

@@ -1,0 +1,72 @@
+name: release
+
+# Pushing a tag vX.Y.Z builds the binaries on Apple Silicon, publishes a GitHub release with the
+# tarball install.sh downloads, and publishes the npm package agentic-emulator. A tag with a
+# suffix (v0.2.0-rc.1) is a prerelease on GitHub and goes to npm's "next" tag.
+# Run it by hand (Actions > release > Run workflow) for a dry run: it builds and packages, and
+# uploads the files as an artifact without publishing anything.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to package, e.g. v0.1.0-rc.1 (dry run: nothing is published)"
+        required: true
+
+permissions:
+  contents: write # the GitHub release
+  id-token: write # npm provenance and trusted publishing
+
+jobs:
+  release:
+    runs-on: macos-15 # Apple Silicon
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+      PUBLISH: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: build
+        run: make build VERSION="$VERSION"
+      - name: smoke test
+        run: |
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-release.XXXX)"
+          bin/agemu version | grep -qx "agemu  $VERSION"
+          bin/agemu profiles --platform ios | grep -q iphone-17-pro
+          bin/agemu doctor > /dev/null || [ $? -eq 1 ]
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | bin/agemu mcp | grep -q '"name":"screenshot"'
+          bin/agemu daemon stop
+      - name: package
+        run: scripts/package.sh "$VERSION" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agemu-${{ env.VERSION }}
+          path: dist/
+      - name: GitHub release
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""; case "$VERSION" in *-*) pre="--prerelease";; esac
+          gh release create "$VERSION" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS \
+            --title "$VERSION" --generate-notes $pre
+      - name: npm publish
+        if: env.PUBLISH == 'true'
+        env:
+          # A granular npm token with publish rights, until npm trusted publishing is set up for
+          # the package (then the token can be removed: npm authenticates the workflow itself).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm install -g npm@11 # trusted publishing needs npm 11.5+
+          tag="latest"; case "$VERSION" in *-*) tag="next";; esac
+          npm publish dist/agentic-emulator-*.tgz --access public --provenance --tag "$tag"

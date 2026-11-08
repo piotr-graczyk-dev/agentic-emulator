@@ -212,7 +212,7 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	}
 	switch method {
 	case "ping":
-		return map[string]any{"ok": true, "pid": os.Getpid()}, nil, nil
+		return Ping{OK: true, PID: os.Getpid(), Version: Version, Exe: exePath, Started: started}, nil, nil
 	case "devices":
 		res, err = s.listAll(ctx)
 		return res, nil, err
