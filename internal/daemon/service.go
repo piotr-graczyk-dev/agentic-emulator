@@ -93,17 +93,26 @@ type Service struct {
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 	states   map[string]*devState // logs, crashes and the crash notice (logs.go)
+	// ap is the auto-parker (autopark.go; nil when off); activity counts each device's calls for it.
+	ap       *autoParker
+	actMu    sync.Mutex
+	activity map[string]*devActivity
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {
-	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}}
+	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}, activity: map[string]*devActivity{}}
 	for _, b := range bs {
 		s.backends[b.Platform()] = b
+	}
+	if d := autoParkFromEnv(); d > 0 {
+		s.startAutoPark(d, autoParkTick(d))
 	}
 	return s
 }
 
+// Close stops the auto-parker and resumes the devices it parked, then closes the backends.
 func (s *Service) Close() {
+	s.stopAutoPark()
 	for _, b := range s.backends {
 		_ = b.Close()
 	}
@@ -239,6 +248,12 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err != nil {
 		return nil, nil, err
 	}
+	// The call counts as activity on the device until it returns (autopark.go): no auto-park
+	// while it runs, and a park in progress finishes before the wake below.
+	if err := s.beginCall(ctx, id, method); err != nil {
+		return nil, nil, err
+	}
+	defer s.endCall(id)
 	// Arguments are checked before the device lock and the backend: a bad call fails at once.
 	if err := checkCapability(method, &p); err != nil {
 		return nil, nil, err
@@ -251,6 +266,9 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	}
 
 	res, err = s.onDevice(ctx, b, id, method, p)
+	if d, isDev := res.(api.Device); isDev && err == nil && d.ID != id {
+		s.touch(d.ID) // an iOS profile switch moves to another simulator
+	}
 	switch method {
 	case "boot", "shutdown", "reset", "crashes", "park": // they end the watch or report crashes themselves; a parked app reports nothing
 		return res, nil, err

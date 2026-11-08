@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -151,9 +152,35 @@ func continueTree(list func() (string, error), udid string, kill signaller, only
 
 func sysKill(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
 
-// Park stops a booted simulator in place (see the comment at the top of this file).
+// parkLock returns the simulator's lock that keeps a park and a shutdown apart: a boot that
+// shuts down the least recently used simulator to make room can pick the one the daemon's
+// auto-park is stopping at that moment, and a launchd_sim stopped during its shutdown would
+// hold the shutdown (and the boot) for a minute.
+func (b *Backend) parkLock(udid string) *sync.Mutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.parkLocks == nil {
+		b.parkLocks = map[string]*sync.Mutex{}
+	}
+	l, ok := b.parkLocks[udid]
+	if !ok {
+		l = &sync.Mutex{}
+		b.parkLocks[udid] = l
+	}
+	return l
+}
+
+// Park stops a booted simulator in place (see the comment at the top of this file). It does
+// not count as a use of the device: a parked simulator stays the least recently used one.
 func (b *Backend) Park(ctx context.Context, id string) error {
-	d, err := b.target(ctx, id)
+	udid, err := udidOf(id)
+	if err != nil {
+		return err
+	}
+	pl := b.parkLock(udid)
+	pl.Lock()
+	defer pl.Unlock()
+	d, err := b.lookup(ctx, id)
 	if err != nil {
 		return err
 	}

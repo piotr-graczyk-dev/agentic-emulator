@@ -310,3 +310,18 @@ func TestBackgroundPassesMoveByTheParkedTime(t *testing.T) {
 		t.Fatalf("the later passes moved by %v; want about the parked time", moved)
 	}
 }
+
+func TestParkLockIsOnePerSimulator(t *testing.T) {
+	b := &Backend{}
+	a1, a2, other := b.parkLock("A"), b.parkLock("A"), b.parkLock("B")
+	if a1 != a2 || a1 == other {
+		t.Fatal("parkLock must return the same lock for a simulator and another for the next")
+	}
+	// A shutdown of B is not held by a park of A.
+	a1.Lock()
+	defer a1.Unlock()
+	if !other.TryLock() {
+		t.Fatal("B's lock is held by A's park")
+	}
+	other.Unlock()
+}

@@ -81,6 +81,8 @@ type Backend struct {
 	parked, parking map[string]bool
 	stoppedPids     map[string]map[int]bool
 	parkScan        sync.Once
+	// parkLocks serializes, per simulator, a park with a shutdown (park.go, parkLock).
+	parkLocks map[string]*sync.Mutex
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -192,6 +194,19 @@ func envOn(name string) bool {
 
 // target resolves a device id and refuses non-agemu simulators unless explicitly allowed.
 func (b *Backend) target(ctx context.Context, id string) (simDevice, error) {
+	d, err := b.lookup(ctx, id)
+	if err != nil {
+		return simDevice{}, err
+	}
+	b.mu.Lock()
+	b.lastUse[d.UDID] = time.Now()
+	b.mu.Unlock()
+	return d, nil
+}
+
+// lookup is target without counting the call as a use of the device (park: a parked device is
+// an idle one, the first to shut down for another boot).
+func (b *Backend) lookup(ctx context.Context, id string) (simDevice, error) {
 	udid, err := udidOf(id)
 	if err != nil {
 		return simDevice{}, err
@@ -203,9 +218,6 @@ func (b *Backend) target(ctx context.Context, id string) (simDevice, error) {
 	if !managed(d.Name) && !envOn("AGEMU_IOS_ALLOW_FOREIGN") {
 		return simDevice{}, fmt.Errorf("refusing to act on simulator %q (%s): agemu only drives simulators named %s* (set AGEMU_IOS_ALLOW_FOREIGN=1 to override)", d.Name, d.UDID, NamePrefix)
 	}
-	b.mu.Lock()
-	b.lastUse[d.UDID] = time.Now()
-	b.mu.Unlock()
 	return d, nil
 }
 
@@ -588,6 +600,11 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 }
 
 func (b *Backend) shutdown(ctx context.Context, udid string) error {
+	// A park of the same simulator (the daemon's auto-park of an eviction victim) finishes
+	// first, or waits until the shutdown is done and then finds the simulator shut down.
+	pl := b.parkLock(udid)
+	pl.Lock()
+	defer pl.Unlock()
 	// A parked simulator (an eviction victim, say) is continued first: its stopped launchd_sim
 	// cannot take part in the shutdown.
 	if _, _, err := b.unpark(udid); err != nil {
