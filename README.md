@@ -346,8 +346,10 @@ own devices, what an app under test does not use.
 agemu turns off 49 launchd jobs (widgets, Siri, photo analysis, asset downloads, Continuity, ...),
 stops the wallpaper gallery after a cold boot (all but the lock screen's wallpaper), stops what iOS
 starts in the background after boot and then keeps idle (the Calendar app, App Intents extensions,
-device management services; a Calendar that is in front at a pass is never stopped), and from a
-simulator's second boot keeps the gallery from starting at all (PosterBoard's keynote mode).
+device management services; a Calendar that is in front at a pass is never stopped), ends the
+on-demand daemons that then stay idle and clean and serve no app API, as a phone's jetsam would
+(launchd starts them again at the next request), and from a simulator's second boot keeps the
+gallery from starting at all (PosterBoard's keynote mode).
 `AGEMU_IOS_LEAN=0` keeps the full system. What a lean simulator does not do (home screen widgets,
 Siri, Shortcuts actions, refreshed wallpaper suggestions, ...):
 [docs/IOS.md](docs/IOS.md#lean-simulators).
@@ -375,6 +377,8 @@ system:
 | background work stopped once idle: memory 4 min after agent-ready | 2.09 GB | 1.85 GB | 6 pairs; iOS had opened Calendar in all 12 boots, about 0.15 GB otherwise (estimated) |
 | gallery kept from starting, second boot on: simulator CPU in the first minute after agent-ready | 67.9 CPU-s | 41.4 CPU-s (-39%) | 6 pairs; a device's first boot is unchanged |
 | the same: memory 2 min after agent-ready | 1.86 GB | 1.75 GB | 6 pairs |
+| idle daemons that serve no app API ended after boot (default): memory 4 min after agent-ready | 1.77 GB | 1.46 GB (-17%) | 4 pairs (and 1.78 → 1.48 GB in 4 more); with AgemuTestApp open 1.84 → 1.56 GB; agent flow 11.5 → 10.5 s |
+| the same with `AGEMU_IOS_IDLE_EXIT=all` (app-facing daemons too; their first call then waits up to 2-3 s) | 1.76 GB | 0.99 GB (-44%) | 8 pairs; with AgemuTestApp open 1.84 → 1.17 GB |
 
 On the lean device a probe app's notifications, Contacts, EventKit, MapKit, Apple Pay sheet,
 StoreKit, WatchConnectivity and keyboards behaved as expected (not compared with the full system).
@@ -470,6 +474,8 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 |---|---|---|
 | `AGEMU_HOME` | `~/.agemu` | State directory and the daemon's socket. |
 | `AGEMU_IOS_LEAN` | on | `0`: the full Simulator (jobs back from the next boot, keynote mode removed). |
+| `AGEMU_IOS_IDLE_EXIT` | on | Lean simulators end the on-demand daemons that stay idle after boot, except those behind app APIs. `all`: those too (an app's first call to one then waits for its restart, up to 2-3 s); `0`: none. |
+| `AGEMU_IOS_IDLE_KEEP` | unset | Comma-separated daemon names (executable file names) that are never ended as idle. |
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: keep the Google apps (applies when a baseline is taken). |
 | `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |

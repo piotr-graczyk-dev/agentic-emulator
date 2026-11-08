@@ -89,8 +89,8 @@ func leanOn() bool {
 // launchctl runs per job; 36 s on a busy host), and the device works meanwhile. A device is
 // checked once per daemon and again after every cold boot; a request that arrives while the
 // device is being reconciled runs once that finishes. After a cold boot of a lean device the
-// wallpaper gallery and what iOS starts in the background are stopped too, each on its own
-// schedule (a newer boot restarts them), and PosterBoard's gallery is kept from starting at later
+// wallpaper gallery, what iOS starts in the background and the daemons that then stay idle
+// (idle.go) are stopped too, each on its own schedule (a newer boot restarts them), and PosterBoard's gallery is kept from starting at later
 // boots (see posterboard.go; galleryBefore is its newest update entry before this boot). Failures
 // are logged and leave the device unchecked, so the next boot tries again: a device that is not
 // lean still works.
@@ -116,6 +116,13 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 			defer b.bgWG.Done()
 			b.stopBackgroundApps(d, gen)
 		}()
+		if idleExitOn() {
+			b.bgWG.Add(1)
+			go func() {
+				defer b.bgWG.Done()
+				b.stopIdleDaemons(d, gen)
+			}()
+		}
 	}
 	if state, checked := b.lean[d.UDID]; checked && state == on && !cold {
 		return
