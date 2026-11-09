@@ -8,10 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -397,17 +395,21 @@ func androidChecks(d daemonInfo) doctorSection {
 		s.add(c)
 	}
 
-	java := toolchain.JavaHome()
-	switch major, err := javaMajor(java); {
+	java, _ := toolchain.Java()
+	major, err := 0, error(nil)
+	if java != "" {
+		major, err = toolchain.JavaMajor(java)
+	}
+	switch {
 	case java == "":
 		s.add(check{Name: "Java", Status: statusFail, Detail: "no Java runtime; the SDK's avdmanager and sdkmanager need Java 17+",
 			Fix: []string{"brew install --cask temurin"}})
 	case err != nil:
 		s.add(check{Name: "Java", Status: statusFail, Detail: "the Java runtime at " + tilde(java) + " does not run: " + firstLine(err.Error()),
-			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME, or point it at the new JDK"}})
-	case major < 17:
-		s.add(check{Name: "Java", Status: statusFail, Detail: fmt.Sprintf("Java %d at %s; avdmanager needs 17+", major, tilde(java)),
-			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME, or point it at the new JDK"}})
+			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
+	case major < toolchain.MinJava:
+		s.add(check{Name: "Java", Status: statusFail, Detail: fmt.Sprintf("Java %d at %s; avdmanager needs %d+", major, tilde(java), toolchain.MinJava),
+			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
 	default:
 		s.add(check{Name: "Java", Status: statusOK, Detail: fmt.Sprintf("Java %d, %s", major, tilde(java))})
 	}
@@ -571,35 +573,6 @@ func isExecutable(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
 }
-
-// javaMajor runs the Java runtime at javaHome and returns its major version (8 for "1.8.0").
-func javaMajor(javaHome string) (int, error) {
-	if javaHome == "" {
-		return 0, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, filepath.Join(javaHome, "bin", "java"), "-version").CombinedOutput()
-	if err != nil {
-		return 0, err
-	}
-	return parseJavaVersion(string(out))
-}
-
-// parseJavaVersion reads the major version from `java -version` output.
-func parseJavaVersion(out string) (int, error) {
-	m := javaVersionRe.FindStringSubmatch(out)
-	if m == nil {
-		return 0, fmt.Errorf("unrecognised java -version output: %s", firstLine(out))
-	}
-	major, _ := strconv.Atoi(m[1])
-	if major == 1 && m[2] != "" { // 1.8.0_402 is Java 8
-		major, _ = strconv.Atoi(m[2])
-	}
-	return major, nil
-}
-
-var javaVersionRe = regexp.MustCompile(`version "(\d+)(?:\.(\d+))?`)
 
 func firstLine(s string) string { l, _, _ := strings.Cut(s, "\n"); return l }
 

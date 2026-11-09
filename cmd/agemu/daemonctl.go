@@ -235,6 +235,9 @@ func warnPreparing() {
 // stopPID stops the daemon with this pid and no other: when another session has already
 // replaced it, the lock file names the new daemon and there is nothing to do.
 func stopPID(pid int) error {
+	if pid <= 0 { // kill(0) or kill(-n) would signal process groups
+		return fmt.Errorf("agemud reported an invalid pid %d", pid)
+	}
 	if lp := lockPID(); lp != 0 && lp != pid {
 		return nil
 	}
@@ -283,6 +286,9 @@ func lockPID() int {
 		return 0
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if pid <= 0 { // kill(0) or kill(-n) would signal process groups
+		return 0
+	}
 	return pid
 }
 

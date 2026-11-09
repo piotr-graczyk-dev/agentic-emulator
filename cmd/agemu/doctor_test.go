@@ -149,22 +149,6 @@ func TestStalenessAcrossInstallations(t *testing.T) {
 	}
 }
 
-func TestParseJavaVersion(t *testing.T) {
-	for out, want := range map[string]int{
-		`openjdk version "17.0.10" 2024-01-16 LTS`:                        17,
-		`openjdk version "21" 2023-09-19`:                                 21,
-		`java version "1.8.0_402"`:                                        8,
-		"Picked up JAVA_TOOL_OPTIONS: -Xmx1g\nopenjdk version \"11.0.2\"": 11,
-	} {
-		if got, err := parseJavaVersion(out); err != nil || got != want {
-			t.Errorf("parseJavaVersion(%q) = %d, %v; want %d", out, got, err, want)
-		}
-	}
-	if _, err := parseJavaVersion("command not found"); err == nil {
-		t.Error("garbage parsed")
-	}
-}
-
 // fakeHungDaemon is what the test binary runs as when TestStopAHungDaemon starts it: a daemon
 // that holds the lock, names itself in it and accepts connections, but never answers.
 func fakeHungDaemon() {
