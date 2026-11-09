@@ -46,7 +46,12 @@ func leanOn() bool {
 func (d *device) disableLeanPackages(ctx context.Context, serial string) {
 	n := 0
 	for _, p := range leanPackages {
-		out, err := adbShellOK(ctx, serial, "pm disable-user --user 0 "+p)
+		c, cancel := context.WithTimeout(ctx, stepTimeout)
+		out, err := adbShellOK(c, serial, "pm disable-user --user 0 "+p)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && strings.Contains(out, "disabled-user") {
 			n++
 		}
@@ -58,6 +63,14 @@ func (d *device) disableLeanPackages(ctx context.Context, serial string) {
 // ("Snapshot load failure: different renderer configured").
 func rendererMismatch(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "different renderer")
+}
+
+// configMismatch reports the emulator refusing a snapshot taken with another AVD hardware
+// configuration ("Snapshot load failure: different AVD configuration"), e.g. after hw.ramSize or
+// hw.cpu.ncore was changed in the AVD's config.ini. Without a retake every boot failed until the
+// snapshot was deleted by hand (seen on emulator 37.1 for both keys, 2026-11-08).
+func configMismatch(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "different AVD configuration")
 }
 
 // animationsOff: AGEMU_ANDROID_ANIMATIONS=0 sets the system's window, transition and animator

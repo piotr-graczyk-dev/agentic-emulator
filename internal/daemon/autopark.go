@@ -6,7 +6,8 @@ package daemon
 // Which devices: only those this daemon has served a call on since it started (a device booted
 // by hand, or driven by another daemon or a person, is never parked by it), and only while
 // they are booted and agemu's (Android: a managed AVD; iOS: a simulator named agemu-*),
-// not booting, not in standby, not parked already.
+// not booting, not preparing a baseline (backend.Preparer; this covers a first-boot repair,
+// which is a preparation too), not in standby, not parked already.
 //
 // When: a call counts from its start to its end, so nothing is parked while a call on the
 // device is in flight (a long wait, an install, a boot, a reset, a profile switch, an MCP
@@ -286,6 +287,11 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 		why = "its backend cannot park"
 	case pk.Parked(id):
 		why = "parked already"
+	case preparingNow(b, id) != nil:
+		// Its boot is preparing a baseline (a first boot, a first-boot repair, a retake): it is
+		// listed as preparing too, but the backend's own state is read from memory and needs no
+		// List. The boot holds the device until it is done; it is never parked meanwhile.
+		why = "it is preparing its baseline"
 	default:
 		why = s.notParkable(ctx, b, id)
 	}
@@ -320,7 +326,11 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 		locked = true
 		pctx, cancel := context.WithTimeout(ctx, autoParkTimeout)
 		start := time.Now()
-		if err := pk.Park(pctx, id); err != nil {
+		if err := preparingNow(b, id); err != nil {
+			// A boot became a preparation since the check above (a boot the parker cannot see,
+			// from a call without a device lock): leave it.
+			log.Printf("auto-park %s: not parked: %v", id, err)
+		} else if err := pk.Park(pctx, id); err != nil {
 			log.Printf("auto-park %s: %v", id, err)
 		} else {
 			parked = true

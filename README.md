@@ -288,6 +288,11 @@ claude mcp add agemu -- /path/to/bin/agemu mcp
 `permission`, `location`, `clipboard`, `appearance`, `apps`, `uninstall`, `clear_app_data`, `push`;
 and `logs`, `crashes`.
 
+The server handles tool calls concurrently, so `devices` answers while another call runs. A new
+Android device's first `boot` returns state `preparing` at once: the baseline takes 7-8 minutes, at most 20,
+once. The agent then polls `devices` until the device is `booted`, so no tool call outlasts a 60 s
+client timeout.
+
 ## Test capabilities
 
 ```sh
@@ -432,6 +437,28 @@ launch rows are
   (1.36 s on 2026-11-06); that was not measured again. agemu always sets the emulator's
   `ANDROID_SNAPSHOT_COMPRESS`; `AGEMU_ANDROID_SNAPSHOT_COMPRESS=0` keeps the baseline raw. See
   [docs/ANDROID.md](docs/ANDROID.md#caveats) (Disk).
+- **Quiet baseline** (vs: **prev**, the baseline saved 20 s after boot). A snapshot restores the work
+  the guest had pending, so it ran again after every reset and boot: Play Store jobs and app
+  updates, the app freezer's compactions, Play services' flag push. agemu now saves the baseline
+  once the guest has been up 7 minutes and its last minute was quiet (CPU and network). Emulator CPU
+  in the 2 minutes after a reset, old baseline against quiet:
+  - a new device's first boot: 154 -> 17.1 CPU-s (n=4, 6);
+  - a retake of an older device: 54.0 -> 11.5 (n=8 each, interleaved);
+  - a baseline saved late on a very busy host: 14-18 -> about 11 (n=3, not interleaved).
+
+  Resets, boots and the agent step were not slower. There is no memory saving: `phys_footprint` read
+  0.9-1.1 GB lower, but the emulator's region footprint was the same on both (3.0-3.2 GB).
+
+  The cost is the first boot of a new device (or a retake): 430-455 s measured,
+  never more than 20 minutes (a hard bound: the boot then fails and the next one prepares again). It does not block clients:
+  - the device shows state `preparing` with its phase;
+  - MCP `boot` and `agemu boot --no-wait` return at once;
+  - `agemu boot` waits with progress on stderr;
+  - other calls on the device fail at once (CLI exit status 5).
+
+  Existing devices keep their baseline until it is retaken. A baseline days old replays somewhat more
+  (+6.6 CPU-s per restore at 3 days, wall-clock work). `AGEMU_ANDROID_BASELINE_UPTIME_S=0` saves at
+  once. See [docs/ANDROID.md](docs/ANDROID.md#quiet-baseline-2026-11-08).
 - **Frame stream idle stop** (vs: **prev**, f4286db). After 30 s without calls agemu stops its frame
   stream if the screen is still posting frames, and the next call restarts it. With an app that
   keeps animating, emulator plus daemon CPU fell from 57.5% to 39.9% of a core (n=7 per arm). The
@@ -480,6 +507,8 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: keep the Google apps (applies when a baseline is taken). |
 | `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |
+| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; a first boot then takes 7-8 min (at most 20), during which the device is `preparing`; `0`: save at once (applies when a baseline is taken). |
+| `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not boot an AVD whose first boot was interrupted before it ever completed with `-wipe-data` (two interruptions about 10 s in leave it unbootable otherwise). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Seconds without calls before the frame stream of a changing screen stops; `0`: never. |
 | `AGEMU_ANDROID_ANIMATIONS` | normal | `0`: system animations off. |
 | `AGEMU_IOS_ANIMATIONS` | normal | `0`: UIKit and SwiftUI animations ×0.05 (or a factor from 0.05 to 1). |
@@ -539,7 +568,8 @@ baseline, its memory kept); a second `shutdown` powers the emulator off and free
 `AGEMU_AUTO_PARK=<duration>` (off by default; at least 10 s) makes the daemon park a device once it
 has had no call for that long; the next call resumes it as after `agemu park`, the first call
 taking the resume's time. Only devices this daemon has served a call on since it started are
-parked, and only while they are booted and agemu's. The daemon sees only its own calls: a device
+parked, and only while they are booted and agemu's (never while a boot runs or a baseline is being
+prepared, a first-boot repair included). The daemon sees only its own calls: a device
 it served that is then driven by another daemon (another `AGEMU_HOME`), by `simctl` or `adb`, in
 Simulator.app or by a person is parked under them once this daemon's own calls stop, and their
 calls then fail until a call through this daemon resumes it (a second daemon calling `ui` every

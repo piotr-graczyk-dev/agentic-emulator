@@ -133,6 +133,22 @@ type IDNormalizer interface {
 	CanonicalID(id string) string
 }
 
+// Preparer is implemented by backends whose boot can take a baseline snapshot in the background
+// (Android: a new device or a retake takes several minutes). Preparing reports, from memory, the
+// preparation in progress, or nil; the daemon calls it before every call on a device, so it must
+// not touch the device. While a device is preparing, the daemon answers every call on it but
+// boot, shutdown, logs and crashes at once with an *api.PreparingError; boot returns the current
+// state (or waits, without NoWait), and shutdown cancels the preparation.
+//
+// AwaitDecision is Preparing for a call that arrives while a boot is still deciding whether it
+// prepares a baseline (a retake is known only after a failed snapshot load): it waits, bounded,
+// until the boot has decided or finished, so the call fails fast instead of queueing behind a
+// preparation of several minutes.
+type Preparer interface {
+	Preparing(id string) *api.Preparing
+	AwaitDecision(ctx context.Context, id string) *api.Preparing
+}
+
 // FrameWaiter is implemented by backends that can block until the screen shows a new frame.
 // The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
 // on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns

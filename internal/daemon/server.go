@@ -28,7 +28,7 @@ type Response struct {
 	ID     int64           `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
-	// Code classifies Error for programs: CodeNotImplemented, CodeAppCrashed, or empty.
+	// Code classifies Error for programs: CodeNotImplemented, CodeAppCrashed, CodePreparing, or empty.
 	Code string `json:"code,omitempty"`
 	// AppCrash tells the agent that the app it launched through agemu crashed, stopped
 	// responding or was killed by the system: in the first result after it, and in every
@@ -46,6 +46,10 @@ const CodeNotImplemented = "not_implemented"
 // the agent launched was down after a crash (the response's AppCrash says which).
 const CodeAppCrashed = "app_crashed"
 
+// CodePreparing marks an error that matches api.ErrPreparing: the device is preparing its
+// baseline snapshot (first boot or retake); poll `devices` or call `boot` again.
+const CodePreparing = "preparing"
+
 // errorCode returns the Response code for err. Not implemented wins: retrying cannot help.
 func errorCode(err error) string {
 	if errors.Is(err, api.ErrNotImplemented) {
@@ -53,6 +57,9 @@ func errorCode(err error) string {
 	}
 	if errors.Is(err, api.ErrAppCrashed) {
 		return CodeAppCrashed
+	}
+	if errors.Is(err, api.ErrPreparing) {
+		return CodePreparing
 	}
 	return ""
 }
