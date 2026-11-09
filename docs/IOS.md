@@ -1142,7 +1142,8 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    it idle-exitable and its CPU time, read in the kernel's own units, did not change at all between
    them: serving an app's call costs CPU, so a daemon that an app calls more often than once a
    minute is never ended. An interval shorter than 15 s (a pass that ran late, followed at once by
-   the next) does not count toward the 3. Only daemons that started before a cut-off may be ended at all; the
+   the next) does not count toward the 3, and the quiet observations must span at least 58 s from
+   the first to the last. Only daemons that started before a cut-off may be ended at all; the
    cut-off is the earliest of the first agemu call of this boot that can start app work (`install`,
    `launch`, `open`, `push`, `clear_app_data`, which reinstalls the app), and the earliest app process a pass saw: an installed app's or its
    extension's, or the frontmost app's when that is not SpringBoard (a system app such as Safari or

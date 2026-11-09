@@ -95,12 +95,13 @@ func recordBooted(a avdInfo) (bool, error) {
 
 // firstBootUnfinished decides, before a power-off of a marked AVD, whether its guest is shown not to
 // have finished its first boot, which keeps the AVD eligible for the repair. Only the emulator
-// itself saying so counts (getStatus booted=false), and only when adb does not say the guest has
-// booted. When the emulator cannot be asked, the boot is not shown unfinished: the AVD is
-// recorded as booted and never wiped automatically (a guest whose first boot was interrupted
-// keeps an emulator that answers; the guest is what crash-loops).
-func firstBootUnfinished(emuKnown, emuBooted, adbBooted bool) bool {
-	return emuKnown && !emuBooted && !adbBooted
+// saying so (getStatus booted=false) counts, and only while the VM is paused, so that the guest
+// cannot finish booting before the power-off and make the answer stale. When the VM could not be
+// paused or the emulator not asked, the boot is not shown unfinished: the AVD is recorded as
+// booted and never wiped automatically (a guest whose first boot was interrupted keeps an
+// emulator that answers; the guest is what crash-loops).
+func firstBootUnfinished(paused, known, booted bool) bool {
+	return paused && known && !booted
 }
 
 // recordBootedIfMarked records a completed boot of the AVD named name if it still has the

@@ -648,3 +648,39 @@ func TestAShortIntervalDoesNotCountAsIdle(t *testing.T) {
 		t.Fatal("not ended after two full idle intervals")
 	}
 }
+
+// The passes act only on the boot they were scheduled for: a simulator booted again outside agemu
+// (another launchd_sim, also before the first pass) or an unknown boot stops them.
+func TestIdleBootCheck(t *testing.T) {
+	if idleBootCheck(100, 100) != nil || idleBootCheck(100, 0) != nil {
+		t.Fatal("the same boot (or a stopped simulator, left to idlePasses) must not stop the passes here")
+	}
+	if idleBootCheck(100, 200) == nil {
+		t.Fatal("another launchd_sim (booted again outside agemu) must stop the passes")
+	}
+	if idleBootCheck(0, 200) == nil {
+		t.Fatal("an unknown boot must stop the passes")
+	}
+}
+
+// Two counted intervals that add up to less than a minute (+75, +90 and +120 s: 15 s, then 30 s)
+// do not end a daemon: it must have been seen idle for idleQuietSpan from the first observation of
+// the run to the last.
+func TestTwoIntervalsUnderAMinuteDoNotEndADaemon(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	p := dp(10, "periodicd", 3, 5)
+	at := func(d time.Duration) idleSnapshot {
+		return idleSnapshot{root: 1, daemons: []daemonProc{p}, taken: t0.Add(d)}
+	}
+	f := &fakeIdle{passes: []idleSnapshot{at(75 * time.Second), at(90 * time.Second), at(120 * time.Second)}, stopAt: 4}
+	idlePasses(f, "test")
+	if len(f.signals) != 0 {
+		t.Fatalf("ended after 45 s of observed quiet: %v", f.signals)
+	}
+	// The next pass (+150 s) completes a span of 75 s: ended then.
+	f = &fakeIdle{passes: []idleSnapshot{at(75 * time.Second), at(90 * time.Second), at(120 * time.Second), at(150 * time.Second)}, stopAt: 5}
+	idlePasses(f, "test")
+	if len(f.signals) == 0 {
+		t.Fatal("not ended after a quiet span of 75 s")
+	}
+}

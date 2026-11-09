@@ -357,3 +357,31 @@ func TestABlockingBootReturnsTheStateAfterThePreparation(t *testing.T) {
 		t.Fatalf("a finished blocking boot returned %+v", dev)
 	}
 }
+
+// A cold boot asked while a warm boot of the device is in progress is refused, not answered by
+// that warm boot; a warm boot joins a cold one (a cold boot is a boot).
+func TestAColdBootDoesNotJoinAWarmOne(t *testing.T) {
+	f := newFakeBoot(true)
+	b := testBackend(f)
+	if _, err := b.Boot(context.Background(), testID, api.BootOptions{NoWait: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Boot(context.Background(), testID, api.BootOptions{Cold: true, NoWait: true}); err == nil || !strings.Contains(err.Error(), "boot --cold again") {
+		t.Fatalf("a cold boot during a warm one: %v", err)
+	}
+	close(f.release)
+	d, _ := b.devFor(testID)
+	for i := 0; i < 200 && d.preparing() != nil; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	f2 := newFakeBoot(true)
+	b2 := testBackend(f2)
+	if _, err := b2.Boot(context.Background(), testID, api.BootOptions{Cold: true, NoWait: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b2.Boot(context.Background(), testID, api.BootOptions{NoWait: true}); err != nil {
+		t.Fatalf("a warm boot during a cold one should join it: %v", err)
+	}
+	close(f2.release)
+}

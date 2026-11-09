@@ -165,6 +165,11 @@ type idleSnapshot struct {
 // show no CPU over a few seconds.
 const idleMinInterval = idlePassEvery / 2
 
+// idleQuietSpan is how long a daemon must have been seen idle, from the first to the last of its
+// quiet observations, before it is ended: the 3 passes 30 s apart (idleQuietPasses intervals),
+// less a little for the time a snapshot itself takes.
+const idleQuietSpan = time.Duration(idleQuietPasses)*idlePassEvery - 2*time.Second
+
 // idleEnv is what the passes observe and act on: one cold boot of a device (deviceIdle), or a fake
 // in tests.
 type idleEnv interface {
@@ -214,7 +219,8 @@ func idlePasses(env idleEnv, name string) map[string]int {
 	}
 	prev := map[int]daemonProc{}
 	var prevTaken time.Time
-	quiet := map[int]int{} // pid -> idle intervals in a row
+	quiet := map[int]int{}           // pid -> idle intervals in a row
+	quietFrom := map[int]time.Time{} // pid -> the first observation of that quiet run
 	root := 0
 	var cut int64
 	i := 0
@@ -223,7 +229,7 @@ func idlePasses(env idleEnv, name string) map[string]int {
 			break
 		}
 		if env.held() {
-			prev, quiet = map[int]daemonProc{}, map[int]int{}
+			prev, quiet, quietFrom = map[int]daemonProc{}, map[int]int{}, map[int]time.Time{}
 			continue
 		}
 		snap, err := env.snapshot()
@@ -248,6 +254,7 @@ func idlePasses(env idleEnv, name string) map[string]int {
 		counts := snap.taken.IsZero() || prevTaken.IsZero() || snap.taken.Sub(prevTaken) >= idleMinInterval
 		cur := map[int]daemonProc{}
 		nextQuiet := map[int]int{}
+		nextFrom := map[int]time.Time{}
 		var stop []daemonProc
 		for _, p := range snap.daemons {
 			cur[p.pid] = p
@@ -261,14 +268,19 @@ func idlePasses(env idleEnv, name string) map[string]int {
 				if counts {
 					nextQuiet[p.pid]++
 				}
+				nextFrom[p.pid] = quietFrom[p.pid]
+				if quiet[p.pid] == 0 {
+					nextFrom[p.pid] = prevTaken // the run starts at the previous observation
+				}
 			}
-			if nextQuiet[p.pid] < idleQuietPasses || idleKeep[p.name] || keep[p.name] || stopped[p.name] >= idleMaxEnds ||
+			short := !snap.taken.IsZero() && !nextFrom[p.pid].IsZero() && snap.taken.Sub(nextFrom[p.pid]) < idleQuietSpan
+			if nextQuiet[p.pid] < idleQuietPasses || short || idleKeep[p.name] || keep[p.name] || stopped[p.name] >= idleMaxEnds ||
 				(cut != 0 && p.usage.start >= cut) {
 				continue
 			}
 			stop = append(stop, p)
 		}
-		prev, quiet, prevTaken = cur, nextQuiet, snap.taken
+		prev, quiet, quietFrom, prevTaken = cur, nextQuiet, nextFrom, snap.taken
 		if len(stop) == 0 {
 			continue
 		}
@@ -279,7 +291,7 @@ func idlePasses(env idleEnv, name string) map[string]int {
 			if ok {
 				release()
 			}
-			prev, quiet = map[int]daemonProc{}, map[int]int{}
+			prev, quiet, quietFrom = map[int]daemonProc{}, map[int]int{}, map[int]time.Time{}
 			continue
 		}
 		pass := map[string]int{}
@@ -307,14 +319,35 @@ func idlePasses(env idleEnv, name string) map[string]int {
 
 // stopIdleDaemons runs idlePasses after a cold boot. A newer cold boot of the device (gen) or the
 // backend closing ends it.
-func (b *Backend) stopIdleDaemons(d simDevice, gen int) {
+func (b *Backend) stopIdleDaemons(d simDevice, gen, root int) {
 	e := newDeviceIdle(b, d, gen)
-	// The boot the passes belong to is this one: a later launchd_sim (the simulator booted again
-	// outside agemu before the first pass) ends them (snapshot).
-	if out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output(); err == nil {
-		e.root, _, _ = simRootChildren(string(out), d.UDID)
-	}
+	// The boot the passes belong to (its launchd_sim, read before they were scheduled): another
+	// launchd_sim (the simulator booted again outside agemu) ends them (snapshot).
+	e.root = root
 	idlePasses(e, d.Name)
+}
+
+// idleBootCheck: the passes act only on the boot they were scheduled for (start, its launchd_sim);
+// an unknown start, or another launchd_sim now, stops them. now 0 (not running) is left to
+// idlePasses, which stops too.
+func idleBootCheck(start, now int) error {
+	switch {
+	case start == 0:
+		return fmt.Errorf("the boot the idle passes belong to is not known; they stop")
+	case now != 0 && now != start:
+		return fmt.Errorf("the simulator was booted again outside agemu (launchd_sim %d, the passes started for %d); idle passes stop", now, start)
+	}
+	return nil
+}
+
+// simRoot is the simulator's launchd_sim pid, 0 when it is not found.
+func simRoot(udid string) int {
+	out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return 0
+	}
+	root, _, _ := simRootChildren(string(out), udid)
+	return root
 }
 
 func newDeviceIdle(b *Backend, d simDevice, gen int) *deviceIdle {
@@ -348,8 +381,8 @@ func (e *deviceIdle) snapshot() (idleSnapshot, error) {
 		return idleSnapshot{}, err
 	}
 	root, procs, _ := simRootChildren(string(out), e.d.UDID)
-	if e.root != 0 && root != 0 && root != e.root {
-		return idleSnapshot{}, fmt.Errorf("the simulator was booted again outside agemu (launchd_sim %d, the passes started for %d); idle passes stop", root, e.root)
+	if err := idleBootCheck(e.root, root); err != nil {
+		return idleSnapshot{}, err
 	}
 	snap := idleSnapshotOf(root, procs, front, procDirty, procUsageOf)
 	snap.taken = time.Now()

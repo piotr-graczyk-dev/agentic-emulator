@@ -758,9 +758,10 @@ A boot that takes a baseline does not block clients:
     `agemu-first-boot-incomplete` into the AVD folder. When a boot completes, it writes
     `agemu-booted` first and then removes the marker. It does the same when the device's agent first
     answers (a guest that finished booting while no daemon watched it), and before every power-off of
-    a marked AVD it asks the emulator (gRPC `getStatus`, which reports the guest's boot completion)
-    and adb whether the guest has booted. Only the emulator answering that it has not (and adb not
-    saying it has) keeps the AVD eligible for the repair; if neither can be asked, agemu records the
+    a marked AVD it pauses the VM and asks the emulator (gRPC `getStatus`, which reports the guest's
+    boot completion) whether the guest has booted. Only the emulator answering, with the VM paused,
+    that it has not keeps the AVD eligible for the repair (paused, the guest cannot finish booting
+    before the power-off); if the VM cannot be paused or the emulator not asked, agemu records the
     boot, so a guest that may hold data is never wiped automatically. A boot that finds the marker, no `agemu-booted`
     and no baseline adds `-wipe-data`, logs it, and shows it in `devices` as the preparation's
     `note`.

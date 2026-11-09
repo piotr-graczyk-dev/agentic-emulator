@@ -98,6 +98,12 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 	if !managed(d.Name) {
 		return
 	}
+	// The boot the idle passes belong to, read before they are scheduled (idle.go): without it
+	// (no launchd_sim found) they do not run, so they can never act on another boot.
+	idleRoot := 0
+	if cold && leanOn() && idleExitOn() {
+		idleRoot = simRoot(d.UDID)
+	}
 	on := leanOn()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -117,11 +123,13 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 			defer b.bgWG.Done()
 			b.stopBackgroundApps(d, gen)
 		}()
-		if idleExitOn() {
+		if idleExitOn() && idleRoot == 0 {
+			log.Printf("ios lean %s: idle passes skipped: could not find the simulator's launchd_sim", d.Name)
+		} else if idleExitOn() {
 			b.bgWG.Add(1)
 			go func() {
 				defer b.bgWG.Done()
-				b.stopIdleDaemons(d, gen)
+				b.stopIdleDaemons(d, gen, idleRoot)
 			}()
 		}
 	}

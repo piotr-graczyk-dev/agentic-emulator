@@ -12,6 +12,7 @@ package android
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,7 @@ type prepState struct {
 	phase   atomic.Value // string
 	note    atomic.Value // string
 	saved   atomic.Bool  // the baseline snapshot was saved
+	cold    bool         // the boot was asked to be cold (set before it is published)
 	dev     api.Device
 	err     error
 }
@@ -208,12 +210,17 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if p == nil {
 		pctx, cancel := context.WithCancel(b.background())
 		p = newPrep(cancel)
+		p.cold = opts.Cold
 		d.prep = p
 		d.prepErr = ""
 		d.mu.Unlock()
 		go b.runBoot(pctx, d, id, opts, p)
 	} else {
 		d.mu.Unlock()
+		if opts.Cold && !p.cold {
+			// Joining would answer a cold boot with the warm boot in progress: refuse instead.
+			return api.Device{}, fmt.Errorf("android:%s is already booting (not cold); call boot --cold again once that boot is done", d.name)
+		}
 	}
 	return b.awaitBoot(ctx, id, p, opts.NoWait)
 }
