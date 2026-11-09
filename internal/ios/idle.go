@@ -121,18 +121,23 @@ const (
 	idlePassEvery   = 30 * time.Second
 	idleLastPass    = 5 * time.Minute
 	idleQuietPasses = 2
-	// idleKillAfter: a daemon that is still running this long after SIGTERM and still clean is
-	// sent SIGKILL, as launchd does for a pressured exit (most do not end on SIGTERM).
-	idleKillAfter = 3 * time.Second
+	// idleKillAfter: a daemon that is still running this long after SIGTERM, still clean and
+	// has used no CPU since idleTermSettle after the SIGTERM (a daemon that handles SIGTERM uses
+	// some at once) is sent SIGKILL, as launchd does for a pressured exit (most do not end on
+	// SIGTERM).
+	idleKillAfter  = 3 * time.Second
+	idleTermSettle = 300 * time.Millisecond
 	// idleMaxEnds bounds how often one daemon is ended in a boot.
 	idleMaxEnds = 3
 )
 
-// procUsage is what the kernel's resource accounting (proc_pid_rusage) says about a process: its
-// user+system CPU time and its start time, both in mach units. Two reads of the same process have
-// the same start; a reused pid does not.
+// procUsage is what the kernel says about a process: its user+system CPU time in mach units
+// (proc_pid_rusage) and its start time in microseconds since 1970 (proc_pidinfo), comparable with
+// the time of an agemu call. Two reads of the same process have the same start; a reused pid does
+// not.
 type procUsage struct {
-	cpu, start uint64
+	cpu   uint64
+	start int64
 }
 
 // daemonProc is one process of the simulator that idlePasses looks at.
@@ -150,8 +155,12 @@ type idleSnapshot struct {
 	// daemons are the simulator runtime's processes that launchd_sim started.
 	daemons []daemonProc
 	// firstApp is the start time of the earliest running process of an installed app (its
-	// executable or one of its extensions); 0 when none runs.
-	firstApp uint64
+	// executable or one of its extensions) or of the frontmost app if that is not SpringBoard (a
+	// system app such as Safari or Settings); 0 when there is none.
+	firstApp int64
+	// appWork is when the first agemu call of this boot that can start app work (install,
+	// launch, open, push) began, in the same units; 0 when there was none.
+	appWork int64
 }
 
 // idleEnv is what the passes observe and act on: one cold boot of a device (deviceIdle), or a fake
@@ -163,8 +172,11 @@ type idleEnv interface {
 	// parked or being parked. A pass then does nothing.
 	held() bool
 	snapshot() (idleSnapshot, error)
+	// usage reads a process's CPU and start time.
+	usage(pid int) (procUsage, error)
 	// recheck reads p again: gone when it has exited (or its pid now names another process),
-	// killable when it is the same process, still idle-exitable and the device is not held.
+	// killable when it is the same process, still idle-exitable, has used no CPU since the pass
+	// and the device is not held.
 	recheck(p daemonProc) (gone, killable bool)
 	signal(pid int, sig syscall.Signal) error
 	sleep(d time.Duration)
@@ -173,9 +185,11 @@ type idleEnv interface {
 // idlePasses runs the passes and returns how many processes it ended, by name.
 //
 // A daemon is ended when it has been idle for idleQuietPasses intervals in a row (same process,
-// idle-exitable at each pass, CPU time unchanged), it started before the first process of an app
-// in this boot (a daemon an app started, or that iOS started after the app was launched, may serve
-// that app and is left alone), and its name is not kept. Ending is SIGTERM, then SIGKILL after
+// idle-exitable at each pass, CPU time unchanged), it started before the cut-off, and its name is
+// not kept. The cut-off is the earliest of: the first agemu call of the boot that can start app
+// work (install, launch, open, push) and the earliest app process a pass saw (a user app's, or
+// the frontmost app's, system apps included). A daemon an install, a launch or an app started,
+// or that iOS started after them, may serve that app and is left alone. Ending is SIGTERM, then SIGKILL after
 // idleKillAfter if recheck finds the same process still idle-exitable. A name is left alone for
 // the rest of the boot when ending it did not hold: it was running again at the next pass
 // (something asks for it all the time, so ending it only costs a relaunch), or it became busy
@@ -196,7 +210,7 @@ func idlePasses(env idleEnv, name string) map[string]int {
 	prev := map[int]daemonProc{}
 	quiet := map[int]int{} // pid -> idle intervals in a row
 	root := 0
-	var firstApp uint64
+	var cut int64
 	i := 0
 	for at := idleFirstPass; at <= idleLastPass; at, i = at+idlePassEvery, i+1 {
 		if !env.waitUntil(at) || !env.current() {
@@ -218,8 +232,10 @@ func idlePasses(env idleEnv, name string) map[string]int {
 			break
 		}
 		root = snap.root
-		if snap.firstApp != 0 && (firstApp == 0 || snap.firstApp < firstApp) {
-			firstApp = snap.firstApp
+		for _, t := range []int64{snap.firstApp, snap.appWork} {
+			if t != 0 && (cut == 0 || t < cut) {
+				cut = t
+			}
 		}
 		cur := map[int]daemonProc{}
 		nextQuiet := map[int]int{}
@@ -235,7 +251,7 @@ func idlePasses(env idleEnv, name string) map[string]int {
 				nextQuiet[p.pid] = quiet[p.pid] + 1
 			}
 			if nextQuiet[p.pid] < idleQuietPasses || idleKeep[p.name] || keep[p.name] || stopped[p.name] >= idleMaxEnds ||
-				(firstApp != 0 && p.usage.start >= firstApp) {
+				(cut != 0 && p.usage.start >= cut) {
 				continue
 			}
 			stop = append(stop, p)
@@ -251,7 +267,13 @@ func idlePasses(env idleEnv, name string) map[string]int {
 		for _, p := range stop {
 			_ = env.signal(p.pid, syscall.SIGTERM)
 		}
-		env.sleep(idleKillAfter)
+		env.sleep(idleTermSettle)
+		for k, p := range stop {
+			if u, err := env.usage(p.pid); err == nil && u.start == p.usage.start {
+				stop[k].usage = u // the CPU baseline for the recheck, after a SIGTERM handler ran
+			}
+		}
+		env.sleep(idleKillAfter - idleTermSettle)
 		pass := map[string]int{}
 		for _, p := range stop {
 			gone, killable := env.recheck(p)
@@ -287,12 +309,18 @@ type deviceIdle struct{ deviceBackground }
 func (e *deviceIdle) held() bool { return e.b.isParked(e.d.UDID) || e.b.appOpBusy(e.d.UDID) }
 
 func (e *deviceIdle) snapshot() (idleSnapshot, error) {
+	// The frontmost app first: an app launched just before the process list is then in it.
+	front, _ := e.frontmostPid()
 	out, err := exec.Command("ps", "-axwwo", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return idleSnapshot{}, err
 	}
 	root, procs, _ := simRootChildren(string(out), e.d.UDID)
-	return idleSnapshotOf(root, procs, procDirty, procUsageOf), nil
+	snap := idleSnapshotOf(root, procs, front, procDirty, procUsageOf)
+	if t := e.b.appWorkSince(e.d.UDID); !t.IsZero() {
+		snap.appWork = t.UnixMicro()
+	}
+	return snap, nil
 }
 
 func (e *deviceIdle) recheck(p daemonProc) (gone, killable bool) {
@@ -304,34 +332,49 @@ func (e *deviceIdle) recheck(p daemonProc) (gone, killable bool) {
 	if err != nil {
 		return true, false
 	}
-	return false, idleExitable(f) && !e.held()
+	return false, idleExitable(f) && u.cpu == p.usage.cpu && !e.held()
 }
 
 func (e *deviceIdle) signal(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
-func (e *deviceIdle) sleep(d time.Duration)                    { time.Sleep(d) }
+func (e *deviceIdle) usage(pid int) (procUsage, error)         { return procUsageOf(pid) }
+
+// sleep returns early when the backend closes (the SIGKILL then still runs on a recheck, which
+// stays correct).
+func (e *deviceIdle) sleep(d time.Duration) {
+	select {
+	case <-e.b.bg.Done():
+	case <-time.After(d):
+	}
+}
 
 // appBundlePath marks the executables of installed apps (and their extensions) in a simulator.
 const appBundlePath = "/data/Containers/Bundle/Application/"
 
 // idleSnapshotOf builds a snapshot from launchd_sim's children: the processes that run an
 // executable of the simulator runtime (not an app's) and whose dirty-tracking flags and usage can
-// be read, and the earliest start of an app's process.
-func idleSnapshotOf(root int, procs []simProc, dirty func(int) (uint32, error), usage func(int) (procUsage, error)) idleSnapshot {
+// be read, and the earliest start of an app's process: an installed app's (or its extension's) and
+// the frontmost process's (front, a pid) unless that is SpringBoard.
+func idleSnapshotOf(root int, procs []simProc, front int, dirty func(int) (uint32, error), usage func(int) (procUsage, error)) idleSnapshot {
 	snap := idleSnapshot{root: root}
+	app := func(pid int) {
+		if u, err := usage(pid); err == nil && (snap.firstApp == 0 || u.start < snap.firstApp) {
+			snap.firstApp = u.start
+		}
+	}
 	for _, p := range procs {
-		// An app's path has no spaces (the runtime's has), so its executable is the first field.
-		if f := strings.Fields(p.cmd); len(f) > 0 && strings.HasPrefix(f[0], "/") && strings.Contains(f[0], appBundlePath) {
-			if u, err := usage(p.pid); err == nil && (snap.firstApp == 0 || u.start < snap.firstApp) {
-				snap.firstApp = u.start
-			}
+		// An installed app's executable: the app path comes before any runtime path (a runtime
+		// process that only names an app in its arguments starts with the runtime's path). Either
+		// path may contain spaces.
+		if a := strings.Index(p.cmd, appBundlePath); strings.HasPrefix(p.cmd, "/") && a >= 0 &&
+			!strings.Contains(p.cmd[:a], runtimeRoot) {
+			app(p.pid)
 			continue
 		}
-		i := strings.Index(p.cmd, runtimeRoot)
-		if i < 0 || !strings.HasPrefix(p.cmd, "/") || strings.Contains(p.cmd[:i], " /") {
-			continue
+		if p.pid == front && front != 0 && runtimeExe(p.cmd) != "SpringBoard" {
+			app(p.pid) // a system app in front (it is still checked as a daemon below: not idle-exitable)
 		}
-		f := strings.Fields(p.cmd[i+len(runtimeRoot):])
-		if len(f) == 0 {
+		name := runtimeExe(p.cmd)
+		if name == "" {
 			continue
 		}
 		u, err := usage(p.pid)
@@ -342,7 +385,22 @@ func idleSnapshotOf(root int, procs []simProc, dirty func(int) (uint32, error), 
 		if err != nil {
 			continue
 		}
-		snap.daemons = append(snap.daemons, daemonProc{pid: p.pid, name: path.Base(f[0]), flags: flags, usage: u})
+		snap.daemons = append(snap.daemons, daemonProc{pid: p.pid, name: name, flags: flags, usage: u})
 	}
 	return snap
+}
+
+// runtimeExe is the file name of a process's executable when that is in the simulator runtime
+// (whose path has spaces), "" for any other process or one that only names the runtime's path in
+// its arguments.
+func runtimeExe(cmd string) string {
+	i := strings.Index(cmd, runtimeRoot)
+	if i < 0 || !strings.HasPrefix(cmd, "/") || strings.Contains(cmd[:i], " /") {
+		return ""
+	}
+	f := strings.Fields(cmd[i+len(runtimeRoot):])
+	if len(f) == 0 {
+		return ""
+	}
+	return path.Base(f[0])
 }

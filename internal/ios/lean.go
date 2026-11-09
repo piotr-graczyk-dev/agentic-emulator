@@ -105,6 +105,7 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 		return
 	}
 	if on && cold {
+		delete(b.appWork, d.UDID) // a new boot: its cut-off starts unset
 		b.bootGen[d.UDID]++
 		gen := b.bootGen[d.UDID]
 		b.bgWG.Add(2)

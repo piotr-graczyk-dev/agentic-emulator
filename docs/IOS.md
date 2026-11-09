@@ -1068,18 +1068,25 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    agemu looks every 30 s from 1 to 5 minutes after the device is ready. A daemon of the simulator
    runtime is ended when 3 passes in a row (60 s) found it idle-exitable and its CPU time, read in
    the kernel's own units, did not change at all between them: serving an app's call costs CPU, so
-   a daemon that an app calls more often than once a minute is never ended. A daemon that started
-   after the first process of an installed app in this boot (one the app started, or that iOS
-   started after the app was launched) is never ended either. Ending is SIGTERM, then SIGKILL 3 s
-   later if the same process (its start time) is still idle-exitable (most daemons do not end on
-   SIGTERM; launchd also uses SIGKILL for a pressured exit). A pass does nothing, and the count
-   starts again, while agemu installs, launches or uninstalls an app on the device or the device is
-   parked or being parked. A daemon that is running again at the next pass, or that turned busy
-   before the SIGKILL, is left alone for the rest of the boot; one that comes back later (device
-   management's on-reboot task at +120..200 s starts about 20 of them again) may be ended again
-   once it is idle, at most 3 times per boot. The passes belong to the boot agemu made: when the
-   simulator's launchd_sim changes (it was shut down and booted again outside agemu, by `simctl` or
-   Xcode, within those 5 minutes) or is gone, they stop. The daemon log lists what each pass ended.
+   a daemon that an app calls more often than once a minute is never ended. Only daemons that
+   started before a cut-off may be ended at all; the cut-off is the earliest of the first agemu
+   call of this boot that can start app work (`install`, `launch`, `open`, `push`), and the
+   earliest app process a pass saw: an installed app's or its extension's, or the frontmost app's
+   when that is not SpringBoard (a system app such as Safari or Settings, also one opened from its
+   icon). So nothing an install, a launch, an opened URL or an app brought up, or that iOS started
+   after them, is ended. (An app opened from its icon and closed again between two passes leaves no
+   mark; the daemons it started can then be ended once idle.) Ending is SIGTERM, then SIGKILL 3 s
+   later if the same process (its start time) is still idle-exitable and has used no CPU since 0.3
+   s after the SIGTERM (most daemons do not end on SIGTERM; launchd also uses SIGKILL for a
+   pressured exit). A pass does nothing, and the count starts again, while an agemu call acts on
+   the device's apps (install, launch, open, push, uninstall, terminate, clear-data, reset,
+   permissions, location) or the device is parked or being parked. A daemon that is running again
+   at the next pass, or that turned busy before the SIGKILL, is left alone for the rest of the
+   boot; one that comes back later (device management's on-reboot task at +120..200 s starts about
+   20 of them again) may be ended again once it is idle, at most 3 times per boot. The passes
+   belong to the boot agemu made: when the simulator's launchd_sim changes (it was shut down and
+   booted again outside agemu, by `simctl` or Xcode, within those 5 minutes) or is gone, they stop.
+   The daemon log lists what each pass ended.
 
    Which daemons: by default all idle daemons except the never-ended ones and the `appFacing` list
    in `idle.go`, the daemons found to serve a public API an app can call (Contacts, EventKit,

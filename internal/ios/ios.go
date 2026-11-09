@@ -80,9 +80,13 @@ type Backend struct {
 	// processes this daemon's park stopped (the only ones its resume continues).
 	parked, parking map[string]bool
 	stoppedPids     map[string]map[int]bool
-	// appOps counts, per udid, the installs, launches and uninstalls in flight (idle.go holds its
-	// passes meanwhile).
+	// appOps counts, per udid, the agemu calls in flight that act on apps or app-facing state
+	// (install, launch, open, push, uninstall, terminate, clear-data, reset, permissions,
+	// location; idle.go holds its passes meanwhile); appWork is, per udid, when the first call that
+	// can start app work (install, launch, open, push) began in the current boot (idle.go's
+	// cut-off).
 	appOps   map[string]int
+	appWork  map[string]time.Time
 	parkScan sync.Once
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
@@ -98,7 +102,7 @@ func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
 		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, bootGen: map[string]int{},
 		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{},
-		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}, appOps: map[string]int{}}
+		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}, appOps: map[string]int{}, appWork: map[string]time.Time{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -1014,7 +1018,7 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 	if err != nil {
 		return err
 	}
-	defer b.appOp(d.UDID)()
+	defer b.appOp(d.UDID, true)()
 	if !strings.HasSuffix(strings.TrimSuffix(path, "/"), ".app") {
 		return fmt.Errorf("install needs a simulator .app bundle, got %s", path)
 	}
@@ -1054,7 +1058,7 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	if err != nil {
 		return err
 	}
-	defer b.appOp(d.UDID)()
+	defer b.appOp(d.UDID, true)()
 	// A device this daemon has not booted gets AGEMU_IOS_ANIMATIONS before its first launch.
 	b.animateDevice(ctx, d, false)
 	// Capture the app's startup lines: the stream starts before the launch. The first launch or
@@ -1143,15 +1147,21 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	defer b.expectExits(d.UDID, app)(0)
 	b.noteInput(d.UDID)
 	return b.call(ctx, "terminate", map[string]any{"udid": d.UDID, "bundleId": app}, nil)
 }
 
-// appOp marks an install, launch or uninstall on udid as in flight until the returned func runs.
-func (b *Backend) appOp(udid string) func() {
+// appOp marks an agemu call on udid that acts on apps as in flight until the returned func runs.
+// work: the call can start app work (install, launch, open, push); the first one of a boot sets
+// the idle stop's cut-off (appWorkSince).
+func (b *Backend) appOp(udid string, work bool) func() {
 	b.mu.Lock()
 	b.appOps[udid]++
+	if _, ok := b.appWork[udid]; work && !ok {
+		b.appWork[udid] = time.Now()
+	}
 	b.mu.Unlock()
 	return func() {
 		b.mu.Lock()
@@ -1162,9 +1172,17 @@ func (b *Backend) appOp(udid string) func() {
 	}
 }
 
-// appOpBusy reports whether an install, launch or uninstall on udid is in flight.
+// appOpBusy reports whether an agemu call that acts on apps is in flight on udid.
 func (b *Backend) appOpBusy(udid string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.appOps[udid] > 0
+}
+
+// appWorkSince is when the first install, launch, open or push of the current boot began on
+// udid (zero: none yet).
+func (b *Backend) appWorkSince(udid string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.appWork[udid]
 }

@@ -347,8 +347,9 @@ agemu turns off 49 launchd jobs (widgets, Siri, photo analysis, asset downloads,
 stops the wallpaper gallery after a cold boot (all but the lock screen's wallpaper), stops what iOS
 starts in the background after boot and then keeps idle (the Calendar app, App Intents extensions,
 device management services; a Calendar that is in front at a pass is never stopped), ends the
-on-demand daemons that then stay idle and clean, as a phone's jetsam would (launchd starts them
-again at the next request; daemons found behind public app APIs are kept), and from a
+on-demand daemons that then stay idle and clean, the way a phone's jetsam does under memory
+pressure (launchd starts them again at the next request; daemons found behind public app APIs, and
+any started once an app is installed, launched or opened, are kept), and from a
 simulator's second boot keeps the gallery from starting at all (PosterBoard's keynote mode).
 `AGEMU_IOS_LEAN=0` keeps the full system. What a lean simulator does not do (home screen widgets,
 Siri, Shortcuts actions, refreshed wallpaper suggestions, ...):

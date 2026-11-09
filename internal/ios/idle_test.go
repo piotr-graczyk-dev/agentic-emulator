@@ -42,7 +42,7 @@ func TestIdleSnapshotOf(t *testing.T) {
 	if root != 100 {
 		t.Fatalf("root = %d", root)
 	}
-	starts := map[int]uint64{101: 10, 102: 20, 103: 300, 104: 30, 105: 40, 107: 250, 108: 260}
+	starts := map[int]int64{101: 10, 102: 20, 103: 300, 104: 30, 105: 40, 107: 250, 108: 260}
 	usage := func(pid int) (procUsage, error) {
 		s, ok := starts[pid]
 		if !ok {
@@ -56,7 +56,7 @@ func TestIdleSnapshotOf(t *testing.T) {
 		}
 		return 0x3, nil
 	}
-	snap := idleSnapshotOf(root, procs, dirty, usage)
+	snap := idleSnapshotOf(root, procs, 0, dirty, usage)
 	sort.Slice(snap.daemons, func(i, j int) bool { return snap.daemons[i].pid < snap.daemons[j].pid })
 	var got []string
 	for _, d := range snap.daemons {
@@ -79,6 +79,7 @@ type fakeIdle struct {
 	pass     int          // passes started so far (waitUntil calls)
 	heldAt   map[int]bool // passes (1-based) at which the device is held
 	recheckF func(p daemonProc) (gone, killable bool)
+	usageF   func(pid int) (procUsage, error)
 	signals  []string
 	stopAt   int // current() turns false at this pass (0: never)
 }
@@ -97,6 +98,12 @@ func (f *fakeIdle) recheck(p daemonProc) (bool, bool) {
 		return f.recheckF(p)
 	}
 	return true, false // exited on SIGTERM
+}
+func (f *fakeIdle) usage(pid int) (procUsage, error) {
+	if f.usageF != nil {
+		return f.usageF(pid)
+	}
+	return procUsage{}, syscall.ESRCH // exited: the recheck decides
 }
 func (f *fakeIdle) signal(pid int, sig syscall.Signal) error {
 	f.signals = append(f.signals, fmt.Sprintf("%d@%d %v", pid, f.pass, map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGKILL: "KILL"}[sig]))
@@ -321,18 +328,28 @@ func TestIdleKeepNeverEnded(t *testing.T) {
 }
 
 func TestAppOp(t *testing.T) {
-	b := &Backend{appOps: map[string]int{}}
-	if b.appOpBusy("U") {
-		t.Fatal("busy before any op")
+	b := &Backend{appOps: map[string]int{}, appWork: map[string]time.Time{}}
+	if b.appOpBusy("U") || !b.appWorkSince("U").IsZero() {
+		t.Fatal("busy or marked before any op")
 	}
-	done1, done2 := b.appOp("U"), b.appOp("U")
+	hold := b.appOp("U", false) // reset, permission, location: holds, sets no cut-off
+	if !b.appOpBusy("U") || !b.appWorkSince("U").IsZero() {
+		t.Fatal("a holding op must hold and not set the cut-off")
+	}
+	t0 := time.Now()
+	done1, done2 := b.appOp("U", true), b.appOp("U", true)
+	first := b.appWorkSince("U")
+	if first.Before(t0) || first.After(time.Now()) {
+		t.Fatalf("cut-off %v not set by the first work op", first)
+	}
 	done1()
+	hold()
 	if !b.appOpBusy("U") {
 		t.Fatal("not busy with one op in flight")
 	}
 	done2()
-	if b.appOpBusy("U") || len(b.appOps) != 0 {
-		t.Fatalf("busy after both ops: %v", b.appOps)
+	if b.appOpBusy("U") || len(b.appOps) != 0 || !b.appWorkSince("U").Equal(first) {
+		t.Fatalf("after all ops: busy %v, ops %v, cut-off %v (must stay %v)", b.appOpBusy("U"), b.appOps, b.appWorkSince("U"), first)
 	}
 }
 
@@ -369,5 +386,76 @@ func TestProcUsageSelf(t *testing.T) {
 	}
 	if _, err := procUsageOf(1 << 30); err == nil {
 		t.Fatal("procUsageOf of a pid that does not exist: no error")
+	}
+}
+
+func TestIdleSnapshotFrontmostAndSpaces(t *testing.T) {
+	// A device folder with a space; Safari (a system app) in front; SpringBoard in front does not
+	// count as an app.
+	const udid = "ED6C55BD-83FB-49B9-93A2-54BA0AD521DD"
+	dev := "/Users/me/My Sims/" + udid
+	ps := fmt.Sprintf(`  100     1 launchd_sim %[1]s/data/var/run/launchd_bootstrap.plist
+  101   100 %[2]s/System/Library/CoreServices/SpringBoard.app/SpringBoard
+  102   100 %[2]s/Applications/MobileSafari.app/MobileSafari
+  103   100 %[1]s/data/Containers/Bundle/Application/0A1B/My App.app/My App -flag
+  104   100 %[2]s/usr/libexec/com.apple.Safari.History
+`, dev, rtRoot)
+	root, procs, _ := simRootChildren(ps, udid)
+	starts := map[int]int64{101: 5, 102: 70, 103: 90, 104: 71}
+	usage := func(pid int) (procUsage, error) { return procUsage{start: starts[pid]}, nil }
+	dirty := func(int) (uint32, error) { return 0x3, nil }
+	if s := idleSnapshotOf(root, procs, 102, dirty, usage); s.firstApp != 70 {
+		t.Fatalf("Safari in front: firstApp = %d, want 70", s.firstApp)
+	}
+	if s := idleSnapshotOf(root, procs, 101, dirty, usage); s.firstApp != 90 {
+		t.Fatalf("SpringBoard in front: firstApp = %d, want 90 (the installed app in a folder with spaces)", s.firstApp)
+	}
+	var names []string
+	for _, d := range idleSnapshotOf(root, procs, 0, dirty, usage).daemons {
+		names = append(names, d.name)
+	}
+	sort.Strings(names)
+	if fmt.Sprint(names) != "[MobileSafari SpringBoard com.apple.Safari.History]" {
+		t.Fatalf("daemons = %v (the installed app must not be one)", names)
+	}
+}
+
+func TestIdlePassesCutAtFirstAppWork(t *testing.T) {
+	// The first install/launch/open/push of the boot sets the cut-off even before any app process
+	// exists (an install starts daemons first) and after the app has exited again: daemons started
+	// after it are never ended; one started before is.
+	before := daemonProc{pid: 70, name: "maild", flags: 3, usage: procUsage{cpu: 5, start: 100}}
+	byInstall := daemonProc{pid: 71, name: "privacyaccountingd", flags: 3, usage: procUsage{cpu: 5, start: 210}}
+	var ss []idleSnapshot
+	for i := 0; i < 4; i++ {
+		ss = append(ss, idleSnapshot{root: 1, daemons: []daemonProc{before, byInstall}, appWork: 200})
+	}
+	if s := idlePasses(&fakeIdle{passes: ss}, "test"); fmt.Sprint(s) != "map[maild:1]" {
+		t.Fatalf("ended %v, want only maild", s)
+	}
+	// The earliest of the two marks wins, and a mark seen once stays.
+	ss = nil
+	for i := 0; i < 4; i++ {
+		s := idleSnapshot{root: 1, daemons: []daemonProc{before, byInstall}}
+		if i == 0 {
+			s.firstApp = 90 // an app ran at the first pass only, then exited
+		}
+		ss = append(ss, s)
+	}
+	if s := idlePasses(&fakeIdle{passes: ss}, "test"); len(s) != 0 {
+		t.Fatalf("ended %v after an app that ran before both started", s)
+	}
+}
+
+func TestIdlePassesKillBaselineAfterTerm(t *testing.T) {
+	// The recheck sees the usage read idleTermSettle after the SIGTERM, not the pass's.
+	ps := []daemonProc{dp(80, "maild", 3, 10)}
+	var seen uint64
+	f := &fakeIdle{passes: snaps(ps, ps, ps),
+		usageF:   func(pid int) (procUsage, error) { return procUsage{cpu: 12, start: 1}, nil }, // the handler ran
+		recheckF: func(p daemonProc) (bool, bool) { seen = p.usage.cpu; return false, true }}
+	idlePasses(f, "test")
+	if seen != 12 || strings.Join(f.signals, ",") != "80@3 TERM,80@3 KILL" {
+		t.Fatalf("recheck saw cpu %d, signals %v", seen, f.signals)
 	}
 }

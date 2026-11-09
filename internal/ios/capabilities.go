@@ -41,6 +41,7 @@ func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer b.appOp(d.UDID, true)()
 	b.noteInput(d.UDID)
 	if err := b.call(ctx, "openurl", map[string]any{"udid": d.UDID, "url": url}, nil); err != nil {
 		return "", err
@@ -188,6 +189,7 @@ func (b *Backend) SetPermissions(ctx context.Context, id, app string, action api
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	info, err := b.appInfo(ctx, d.UDID, app)
 	if err != nil {
 		return err
@@ -215,6 +217,7 @@ func (b *Backend) SetLocation(ctx context.Context, id string, lat, lon float64) 
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	return b.call(ctx, "location", map[string]any{"udid": d.UDID, "latitude": lat, "longitude": lon}, nil)
 }
 
@@ -224,6 +227,7 @@ func (b *Backend) ClearLocation(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	return b.call(ctx, "location", map[string]any{"udid": d.UDID, "clear": true}, nil)
 }
 
@@ -334,7 +338,7 @@ func (b *Backend) Uninstall(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
-	defer b.appOp(d.UDID)()
+	defer b.appOp(d.UDID, false)()
 	if _, err := b.userApp(ctx, d.UDID, app, "uninstall"); err != nil {
 		return err
 	}
@@ -376,6 +380,7 @@ func (b *Backend) ClearAppData(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	start := time.Now()
 	info, err := b.userApp(ctx, d.UDID, app, "clear-data")
 	if err != nil {
@@ -440,6 +445,7 @@ func (b *Backend) Push(ctx context.Context, id, app string, payload []byte) erro
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, true)()
 	if _, err := b.appInfo(ctx, d.UDID, app); err != nil {
 		return err
 	}
