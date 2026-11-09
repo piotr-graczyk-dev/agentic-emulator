@@ -161,6 +161,9 @@ type Preparing struct {
 	// MaxS is the longest the preparation can take, in seconds (its bound).
 	MaxS float64 `json:"maxS,omitempty"`
 	Hint string  `json:"hint,omitempty"`
+	// Note says something unusual about this preparation (e.g. an interrupted first boot being
+	// repaired with -wipe-data).
+	Note string `json:"note,omitempty"`
 }
 
 // ErrPreparing matches (errors.Is) the error of a call on a device that is preparing its baseline,

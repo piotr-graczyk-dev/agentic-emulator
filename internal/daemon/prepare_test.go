@@ -151,3 +151,12 @@ func TestPreparingCodeSurvivesTheSocket(t *testing.T) {
 		t.Fatalf("response %+v", resp)
 	}
 }
+
+func TestAnImplicitDeviceCallDuringAPreparationSaysSo(t *testing.T) {
+	pb := &prepBackend{preparing: true}
+	s := NewService(t.TempDir(), pb)
+	_, err := s.Call(context.Background(), "ui", json.RawMessage(`{}`)) // no device: the only one is preparing
+	if !errors.Is(err, api.ErrPreparing) {
+		t.Fatalf("got %v, want the preparing error", err)
+	}
+}

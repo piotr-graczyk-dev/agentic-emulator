@@ -44,6 +44,8 @@ type prepState struct {
 	// returned before the boot finished). Calls on it then fail at once.
 	visible atomic.Bool
 	phase   atomic.Value // string
+	note    atomic.Value // string
+	saved   atomic.Bool  // the baseline snapshot was saved
 	dev     api.Device
 	err     error
 }
@@ -51,6 +53,7 @@ type prepState struct {
 func newPrep(cancel context.CancelFunc) *prepState {
 	p := &prepState{start: time.Now(), cancel: cancel, done: make(chan struct{}), needed: make(chan struct{})}
 	p.phase.Store(phaseStarting)
+	p.note.Store("")
 	return p
 }
 
@@ -68,6 +71,28 @@ func (p *prepState) info() *api.Preparing {
 		ElapsedS: float64(time.Since(p.start).Round(time.Second) / time.Second),
 		MaxS:     prepMax().Seconds(),
 		Hint:     "the device's first boot (or a retake) builds its baseline snapshot once; poll `devices` until it is booted, or call `boot` again",
+		Note:     p.note.Load().(string),
+	}
+}
+
+// setNote records a note on the device's boot in progress (shown in `devices`).
+func (d *device) setNote(s string) {
+	d.mu.Lock()
+	p := d.prep
+	d.mu.Unlock()
+	if p != nil {
+		p.note.Store(s)
+	}
+}
+
+// markSaved records that the device's boot in progress has saved its baseline: from then on a
+// cancellation or a failure of the steps after the save does not make it a failed preparation.
+func (d *device) markSaved() {
+	d.mu.Lock()
+	p := d.prep
+	d.mu.Unlock()
+	if p != nil {
+		p.saved.Store(true)
 	}
 }
 
@@ -202,6 +227,15 @@ func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.Bo
 	}
 	dev, err := boot(ctx, d, id, opts)
 	p.cancel()
+	if err != nil && p.saved.Load() {
+		// The baseline is saved; only the steps after it failed (a shutdown or the bound
+		// cancelled them). The preparation is done: the next boot loads the baseline.
+		logf("%s: the baseline was saved; the boot was then interrupted (%v): the next boot loads the baseline", d.name, err)
+		if cur, derr := b.device(id); derr == nil {
+			dev = cur
+		}
+		err = nil
+	}
 	d.mu.Lock()
 	p.dev, p.err = dev, err
 	if d.prep == p {
@@ -271,25 +305,31 @@ func (b *Backend) awaitBoot(ctx context.Context, id string, p *prepState, noWait
 
 // cancelPrep cancels the device's boot in progress, if any, and waits for it to stop (a save in
 // progress is let finish: an interrupted save could leave a broken snapshot).
-func (d *device) cancelPrep(why string) error {
+// It reports whether a preparation (a visible one) was cancelled before its baseline was saved:
+// the caller then powers the emulator off instead of entering standby, which needs a booted guest.
+func (d *device) cancelPrep(why string) (bool, error) {
 	d.mu.Lock()
 	p := d.prep
 	d.mu.Unlock()
 	if p == nil {
-		return nil
+		return false, nil
 	}
 	logf("%s: %s: cancelling the boot in progress (%s, %v so far)", d.name, why, p.phase.Load(), time.Since(p.start).Round(time.Second))
 	p.cancel()
 	select {
 	case <-p.done:
 	case <-time.After(2 * time.Minute):
-		return errPrepStuck
+		return false, errPrepStuck
+	}
+	if p.saved.Load() {
+		logf("%s: %s came after the baseline was saved: the next boot loads it", d.name, why)
+		return false, nil
 	}
 	d.mu.Lock()
 	d.prepErr = "cancelled by " + why
 	d.retook = false // a later boot may retake again
 	d.mu.Unlock()
-	return nil
+	return p.visible.Load(), nil
 }
 
 type prepStuckError struct{}

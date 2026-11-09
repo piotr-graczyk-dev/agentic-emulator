@@ -53,6 +53,7 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
 | `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline steps (stylus, lean apps, keyboard). |
 | `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Before saving the baseline, wait until the guest has been up this long and has been quiet for a minute (CPU and network), so work it still had pending does not run again after every reset; see Quiet baseline. `0`: save right after the baseline steps (agemu before 2026-11-08). Applies when a baseline is taken. |
+| `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not repair an AVD whose first boot was interrupted before it ever completed (agemu otherwise boots it once with `-wipe-data`; see Quiet baseline). |
 | `AGEMU_ANDROID_BASELINE_ZERO_MB` | `0` | Opt-in: zero-fill this many MB of free guest memory just before the baseline is saved (capped 128 MB below MemAvailable). `ram.bin` gets smaller; the restored guest has a smaller page cache. See Quiet baseline. |
 | `AGEMU_ANDROID_STREAM` | `1` | `0`: no frame stream; every screenshot reads the framebuffer (`getScreenshot`). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Close the frame stream after this many seconds without a call to the device, if the screen is still posting frames then (at least one per 3 s over the last 10 s); the next call reopens it. `0`: keep it open. See Screenshots. |
@@ -733,24 +734,42 @@ A boot that takes a baseline does not block clients:
   whether it must take a baseline (a retake is known only after a failed snapshot load) waits for
   that, at most 40 s, then fails the same way or goes ahead.
 - **A second `boot`** returns the state, or without `noWait` waits for the end.
-- **`shutdown`** cancels the preparation in every phase and powers off; an emulator that was just
-  starting is stopped too. Measured: `boot --no-wait`, then `shutdown` 0, 0.5, 2 and 10 s later
+- **`shutdown`** cancels the preparation in every phase and powers off (not standby: a half-booted
+  guest has no agent); an emulator that was just starting is stopped too. A shutdown after the
+  baseline was saved is not a failed preparation: the device goes to standby on it, and the next
+  boot loads it. Measured: `boot --no-wait`, then `shutdown` 0, 0.5, 2 and 10 s later
   (twice each) returned in 0.08-4.3 s with no emulator left. A save in progress finishes first: a
   `shutdown` sent during `saving` returned after 6.4 s, and the saved baseline loaded at the next
   boot (5.1 s).
 - **A preparation that fails by itself** (the guest never finishes booting, the 20-minute bound)
   powers the emulator off. `devices` then shows the device shut down with the reason in
   `prepareError`.
-- **Repeated interruptions of a new AVD's first boot.** One of three new AVDs no longer booted
-  (adb stayed offline) after its very first boot was interrupted eight times in a row. A single
-  interruption, while the emulator was starting or 12 s into the cold boot, did no harm (2 of 2).
-  Which interruption damaged it is not known. If a new AVD never finishes booting, delete it and
-  create it again.
+- **Interrupted first boots are repaired.** When the very first cold boot of a new AVD is
+  interrupted about 10 s in, twice in a row, the guest's `/data` is left broken: system_server
+  crash-loops (zygote restarted 279 times in 3 minutes) and adbd never starts. Every later boot then
+  fails with "device offline".
+  - **Measured:** 4 of 4 with agemu's `shutdown`, a gRPC power-off or SIGTERM, and with agemu before
+    2026-11-08 after a daemon kill. One interruption at 10, 20 or 40 s, two at 20 s, and 8 kills in
+    the first 0.3-2.5 s did no harm.
+  - **The cure:** one boot with `-wipe-data`.
+  - **How agemu applies it:** before the first launch of an AVD that no emulator has ever started (no
+    `userdata-qemu.img.qcow2`, no baseline, no completed boot), agemu writes
+    `agemu-first-boot-incomplete` into the AVD folder. When a boot completes, it writes
+    `agemu-booted` first and then removes the marker. A boot that finds the marker, no `agemu-booted`
+    and no baseline adds `-wipe-data`, logs it, and shows it in `devices` as the preparation's
+    `note`.
+  - **Nothing can be lost:** that guest never finished booting, so nothing was ever installed in it.
+    An AVD that completed a boot, or that an older agemu or another tool has started, is never marked
+    and never wiped.
+  - **Opt-out:** `AGEMU_ANDROID_FIRSTBOOT_REPAIR=0` turns the repair off.
 - **CLI.** `agemu boot` waits by polling `devices` and prints the phase on stderr; `--no-wait`
   returns at once.
 - **MCP.** The server handles tool calls concurrently, so `devices` answers while another call runs.
   Calls on the same device run in the order they arrived. A call without a device argument (the only
-  booted device) waits for earlier device calls, and later ones wait for it. Naming one device in two
+  booted device) waits for earlier device calls, and later ones wait for it: queued behind a long
+  call on one device (a `wait_for` with a long timeout), it holds back calls on other devices
+  until it has run. Agents that drive several devices should pass `device` on every call.
+  `notifications/cancelled` is ignored: a cancelled call still runs. Naming one device in two
   ways ("android:x" and "x") counts as the same device.
 - **A daemon stopped or restarted mid-preparation** leaves the emulator running without a baseline.
   `devices` then shows it `booted` with `noBaseline: true` and a `prepareError` saying to call

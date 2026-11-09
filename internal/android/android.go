@@ -588,7 +588,7 @@ func logDir() string {
 
 // emulatorArgs builds the command line. Snapshot handling: agemu keeps one named snapshot
 // (the baseline) and never auto-saves (-no-snapshot-save), so snapshots do not pile up.
-func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
+func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []string {
 	ram := a.intCfg("hw.ramSize")
 	if ram <= 0 {
 		ram = envInt("AGEMU_ANDROID_RAM_MB", defaultRAMMB)
@@ -608,6 +608,9 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 		args = append(args, "-snapshot", baselineSnapshot)
 	} else {
 		args = append(args, "-no-snapshot-load")
+	}
+	if wipe {
+		args = append(args, "-wipe-data") // firstboot.go: only an AVD whose first boot never completed
 	}
 	// Extra emulator flags, e.g. "-show-kernel". Not "-feature ...": the emulator deletes a
 	// snapshot saved with another feature set, and with OnDemandSnapshotLoad both loads tried on
@@ -663,6 +666,7 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 		// An emulator runs but there is no baseline: a previous daemon stopped (or was
 		// restarted) while it prepared one. Start over: power it off and prepare it again.
 		logf("%s: boot: the emulator runs without %s (a previous daemon stopped while preparing it?); powering it off and preparing it again", d.name, baselineSnapshot)
+		d.recordIfBooted(ctx, a)
 		if err := d.shutdown(ctx); err != nil {
 			return api.Device{}, err
 		}
@@ -704,8 +708,22 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 	if !a.hasBaseline() {
 		d.markNeeded()
 	}
+	wipe := false
+	if !loadBaseline {
+		if needsWipe(a) && !firstBootRepair() {
+			logf("%s: boot: the AVD's first boot was interrupted before it ever completed; AGEMU_ANDROID_FIRSTBOOT_REPAIR=0, so it is not wiped (if it never finishes booting, unset it)", d.name)
+		} else if needsWipe(a) {
+			wipe = true
+			logf("%s: boot: REPAIRING AN INTERRUPTED FIRST BOOT: the AVD's first cold boot was interrupted before it ever completed (%s is there, no completed boot, no baseline); booting it with -wipe-data (nothing was ever installed in it)", d.name, firstBootMarker)
+			d.setNote("an interrupted first boot is being repaired: the AVD's user data, which never finished its first boot, is wiped (-wipe-data)")
+		} else if marked, err := markFirstBoot(a); err != nil {
+			logf("%s: could not write %s: %v", d.name, firstBootMarker, err)
+		} else if marked {
+			logf("%s: boot: first boot of this AVD (%s written; removed when the boot completes)", d.name, firstBootMarker)
+		}
+	}
 	t0 := time.Now()
-	if err := d.launch(ctx, a, loadBaseline); err != nil {
+	if err := d.launch(ctx, a, loadBaseline, wipe); err != nil {
 		return api.Device{}, err
 	}
 	t1 := time.Now()
@@ -722,6 +740,7 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
 			d.markNeeded()
+			d.setPhase(phaseColdBoot)
 			d.dropUnusableBaseline(ctx, e)
 		case err != nil && configMismatch(err):
 			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
@@ -729,6 +748,7 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
 			d.markNeeded()
+			d.setPhase(phaseColdBoot)
 			d.dropUnusableBaseline(ctx, e)
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
@@ -746,6 +766,11 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 		return api.Device{}, err
 	}
 	logf("%s: boot: emulator gRPC up %v, then guest ready %v later", d.name, t1.Sub(t0).Round(time.Millisecond), time.Since(t1).Round(time.Millisecond))
+	if removed, rerr := recordBooted(a); rerr != nil {
+		logf("%s: could not record the completed boot: %v", d.name, rerr)
+	} else if removed {
+		logf("%s: boot: the AVD's first boot completed (%s removed)", d.name, firstBootMarker)
+	}
 	_, ag, err := d.connRaw(ctx)
 	if err != nil {
 		return api.Device{}, err
@@ -812,7 +837,9 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 // leaves an emulator without a baseline, which the next boot recognises and prepares again,
 // instead of an emulator whose old snapshot every reset fails to load.
 func (d *device) dropUnusableBaseline(ctx context.Context, e *emuClient) {
-	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Not cancelled with the boot: a shutdown right after the decision must not leave the
+	// refused baseline behind (it would then try standby on it).
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if err := e.deleteSnapshot(dctx, baselineSnapshot); err != nil {
 		logf("%s: could not delete the unusable %s (%v); the retake replaces it", d.name, baselineSnapshot, err)
@@ -834,7 +861,7 @@ func (d *device) refreshDisplay(ctx context.Context) (displayInfo, error) {
 }
 
 // launch starts the emulator detached from the daemon and waits for its gRPC endpoint.
-func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error {
+func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool) error {
 	p, err := allocPorts()
 	if err != nil {
 		return err
@@ -848,7 +875,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	}
 	defer lf.Close()
 	d.clearPark() // a new emulator process starts running
-	args := emulatorArgs(d.name, p, a, loadBaseline)
+	args := emulatorArgs(d.name, p, a, loadBaseline, wipe)
 	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.Env = emulatorEnv(os.Environ())
@@ -914,16 +941,34 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 }
 
 // killProcGroup stops an emulator agemu started (its own session, so its process group is its
-// pid): SIGTERM, then SIGKILL after 10 s.
+// pid): SIGTERM, then SIGKILL after 20 s.
 func killProcGroup(pid int) {
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second) // the emulator's own graceful exit window
 	for groupAlive(pid) {
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(-pid, syscall.SIGKILL)
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// recordIfBooted records a completed boot of a running emulator whose guest has booted (asked
+// over adb, bounded), before agemu powers it off.
+func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
+	d.mu.Lock()
+	serial := d.run.serial()
+	d.mu.Unlock()
+	if r, ok := findRunning(d.name); ok {
+		serial = r.serial()
+	}
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if out, err := adbShellOK(c, serial, "getprop sys.boot_completed"); err == nil && strings.TrimSpace(out) == "1" {
+		if _, err := recordBooted(a); err != nil {
+			logf("%s: could not record the completed boot: %v", d.name, err)
+		}
 	}
 }
 
@@ -1119,6 +1164,7 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if err := e.saveSnapshot(sctx, baselineSnapshot); err != nil {
 		return err
 	}
+	d.markSaved()
 	logf("%s: saved %s in %v", d.name, baselineSnapshot, time.Since(t).Round(time.Millisecond))
 	a.Close()
 	return nil
@@ -1204,12 +1250,18 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := d.cancelPrep("shutdown"); err != nil {
+	cancelled, err := d.cancelPrep("shutdown")
+	if err != nil {
 		return err
 	}
 	d.life.Lock()
-	d.stopUnregistered()
 	defer d.life.Unlock()
+	d.stopUnregistered()
+	if cancelled {
+		// The guest of a cancelled preparation is half booted: standby (which needs a live
+		// agent) would wait for it; power it off.
+		return d.shutdown(ctx)
+	}
 	if !standbyEnabled() {
 		return d.shutdown(ctx)
 	}

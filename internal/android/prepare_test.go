@@ -133,8 +133,9 @@ func TestCancelPrep(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, _ := b.devFor(testID)
-	if err := d.cancelPrep("shutdown"); err != nil {
-		t.Fatal(err)
+	cancelled, err := d.cancelPrep("shutdown")
+	if err != nil || !cancelled {
+		t.Fatalf("cancelPrep = %v %v; a visible preparation before its save was cancelled", cancelled, err)
 	}
 	if b.Preparing(testID) != nil {
 		t.Fatal("still preparing after cancel")
@@ -268,5 +269,60 @@ func TestDevicesFlagsARunningDeviceWithoutABaseline(t *testing.T) {
 	// Not running: nothing to flag.
 	if dev := b.describe(avdInfo{Name: "agemu-test-off", Dir: t.TempDir(), Config: map[string]string{}}, nil); dev.NoBaseline {
 		t.Fatalf("powered off: %+v", dev)
+	}
+}
+
+// savingBoot marks the baseline saved, then waits to be cancelled (the steps after the save).
+func savingBoot(saved chan struct{}) func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+	return func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+		d.markNeeded()
+		d.markSaved()
+		close(saved)
+		<-ctx.Done()
+		return api.Device{}, ctx.Err()
+	}
+}
+
+func TestAShutdownAfterTheSaveIsNoFailure(t *testing.T) {
+	saved := make(chan struct{})
+	b := New()
+	b.bootHook = savingBoot(saved)
+	res := make(chan error, 1)
+	go func() {
+		_, err := b.Boot(context.Background(), testID, api.BootOptions{})
+		res <- err
+	}()
+	<-saved
+	d, _ := b.devFor(testID)
+	cancelled, err := d.cancelPrep("shutdown")
+	if err != nil || cancelled {
+		t.Fatalf("cancelPrep = %v %v; after the save it is no cancelled preparation (standby may use the baseline)", cancelled, err)
+	}
+	if err := <-res; err != nil {
+		t.Fatalf("the waiting boot got %v; the baseline was saved", err)
+	}
+	d.mu.Lock()
+	perr := d.prepErr
+	d.mu.Unlock()
+	if perr != "" {
+		t.Fatalf("prepareError %q after a saved baseline", perr)
+	}
+}
+
+func TestANoteIsShownWhilePreparing(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	b := New()
+	b.bootHook = func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+		d.markNeeded()
+		d.setNote("an interrupted first boot is being repaired")
+		<-release
+		return api.Device{ID: id, State: "booted"}, nil
+	}
+	if _, err := b.Boot(context.Background(), testID, api.BootOptions{NoWait: true}); err != nil {
+		t.Fatal(err)
+	}
+	if p := b.Preparing(testID); p == nil || !strings.Contains(p.Note, "repaired") {
+		t.Fatalf("Preparing = %+v", p)
 	}
 }

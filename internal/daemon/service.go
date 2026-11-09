@@ -178,6 +178,20 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 		case 1:
 			return booted[0], nil
 		case 0:
+			// A device that is preparing its baseline is the one meant: the call then fails with
+			// the preparing error (poll devices) instead of "no booted device".
+			var preparing []string
+			for _, d := range devs {
+				if d.State == api.StatePreparing {
+					preparing = append(preparing, d.ID)
+				}
+			}
+			if len(preparing) == 1 {
+				return preparing[0], nil
+			}
+			if len(preparing) > 1 {
+				return "", fmt.Errorf("no booted device; %s are preparing their baselines (poll `devices`)", strings.Join(preparing, ", "))
+			}
 			return "", fmt.Errorf("no booted device; boot one with `agemu boot <device>`")
 		default:
 			return "", fmt.Errorf("several devices are booted, pass one with -d: %s", strings.Join(booted, ", "))
