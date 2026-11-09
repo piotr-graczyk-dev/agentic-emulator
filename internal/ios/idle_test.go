@@ -86,12 +86,16 @@ type fakeIdle struct {
 	// exclusiveHeld is true between exclusive and its release.
 	lockedAt      map[int]bool
 	exclusiveHeld bool
+	snapErrAt     int // the snapshot of this pass (1-based) fails, as deviceIdle's does after a reboot
 }
 
 func (f *fakeIdle) waitUntil(time.Duration) bool { f.pass++; return true }
 func (f *fakeIdle) current() bool                { return f.stopAt == 0 || f.pass < f.stopAt }
 func (f *fakeIdle) held() bool                   { return f.heldAt[f.pass] }
 func (f *fakeIdle) snapshot() (idleSnapshot, error) {
+	if f.snapErrAt != 0 && f.pass == f.snapErrAt {
+		return idleSnapshot{}, idleBootCheck(100, 200)
+	}
 	if f.pass > len(f.passes) {
 		return idleSnapshot{root: 1}, nil
 	}
@@ -682,5 +686,18 @@ func TestTwoIntervalsUnderAMinuteDoNotEndADaemon(t *testing.T) {
 	idlePasses(f, "test")
 	if len(f.signals) == 0 {
 		t.Fatal("not ended after a quiet span of 75 s")
+	}
+}
+
+// A reboot outside agemu before the first pass (deviceIdle.snapshot then returns idleBootCheck's
+// error) ends the passes before anything is signalled, also when idle daemons were seen earlier.
+func TestARebootOutsideAgemuStopsThePassesBeforeAnySignal(t *testing.T) {
+	idle := []daemonProc{dp(10, "maild", 3, 100)}
+	for _, at := range []int{1, 3} {
+		f := &fakeIdle{passes: snaps(idle, idle, idle, idle, idle), snapErrAt: at}
+		idlePasses(f, "test")
+		if len(f.signals) != 0 {
+			t.Fatalf("snapshot failing at pass %d (a reboot): signals %v", at, f.signals)
+		}
 	}
 }

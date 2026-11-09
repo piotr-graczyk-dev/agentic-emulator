@@ -1138,7 +1138,7 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    starts them again at the next request; launchd_sim does the same only when the Mac runs short of
    memory (the idle exits below). After a cold boot iOS starts about 60 of them for one-off work,
    and they then sit idle at 6-24 MB each. agemu looks every 30 s from 1 to 5 minutes after the
-   device is ready. A daemon of the simulator runtime is ended when 3 passes in a row (60 s) found
+   device is ready. A daemon of the simulator runtime is ended when 3 passes in a row (30 s apart) found
    it idle-exitable and its CPU time, read in the kernel's own units, did not change at all between
    them: serving an app's call costs CPU, so a daemon that an app calls more often than once a
    minute is never ended. An interval shorter than 15 s (a pass that ran late, followed at once by
