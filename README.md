@@ -52,9 +52,21 @@ On iOS most of the flow's time belongs to the app itself, so the gap is smaller 
 | Notice that the app crashed | the agent waits until its timeout | **under 0.2 s**, with the crash's top frames |
 | Read the app's latest logs | 250 ms (`logcat`), 960 ms (`log show`) | **~1 ms** |
 
-**Each device** uses less of your Mac. An agemu Android emulator takes 4.3-5.4 GB of memory, where
-Android Studio's takes 7.5 GB. An agemu iOS simulator takes about half the memory of a standard one
-(2.2 against 4.5 GB in the race).
+**Each device uses less of your Mac**, so it can run beside your IDE, builds and browser:
+
+| Per device | Standard | agemu |
+|---|---|---|
+| Android emulator, memory | 7.5 GB | **4.3-5.4 GB** |
+| Android emulator, CPU at idle | 86% of a core | **19-24%** |
+| Android emulator, CPU in the first minute after boot | 202% of a core | **120%** |
+| iOS simulator, memory with no app | 4.0 GB | **2.5 GB** |
+| iOS simulator, CPU at idle | 20% of a core | **1.5%** |
+| iOS simulator, memory with the app running (the race) | 4.3-4.6 GB | **2.1-2.3 GB** |
+
+The standard Android emulator is the AVD as Android Studio runs it: 4 GB of guest RAM, a window and
+audio. agemu runs it headless with 2 GB, the host GPU and preinstalled Google apps turned off. The
+iOS simulator saves come from system services an app under test doesn't use, which agemu turns
+off. Idle figures are single sessions on a busy Mac, so treat them as rough.
 
 Measured on an M2 Pro Mac with 16 GB, over agemu's daemon connection as the MCP server uses it. The
 method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/ANDROID.md),
