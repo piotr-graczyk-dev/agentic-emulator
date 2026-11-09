@@ -159,3 +159,56 @@ func TestPreparingIsCheckedBeforeTheWake(t *testing.T) {
 		t.Fatalf("resumes %d, bad %v", resumes, bad)
 	}
 }
+
+// A device whose idle threshold passed while it was preparing is parked once the preparation is
+// over, without another call (the parker looks again on later ticks).
+func TestAutoParkParksAfterThePreparationWithoutANewCall(t *testing.T) {
+	const id = "android:agemu-p"
+	b := &apPrepBackend{apBackend: newAPBackend(api.Android, "agemu-p"), preparing: map[string]bool{}}
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", id); err != nil {
+		t.Fatal(err)
+	}
+	b.setPreparing(id, true)
+	time.Sleep(300 * time.Millisecond) // 10x the threshold, all of it preparing
+	if b.Parked(id) {
+		t.Fatal("parked while preparing")
+	}
+	b.setPreparing(id, false)
+	if !waitFor(time.Second, func() bool { return b.Parked(id) }) {
+		t.Fatal("not parked after the preparation ended")
+	}
+	if _, _, bad := b.counts(); len(bad) > 0 {
+		t.Fatal(bad)
+	}
+}
+
+// A call that fails its argument checks before the wake leaves an auto-parked device parked and
+// still the daemon's: the daemon resumes it when it stops.
+func TestARejectedCallKeepsTheDaemonsPark(t *testing.T) {
+	const id = "android:agemu-a"
+	b := newAPBackend(api.Android, "agemu-a")
+	s := apService(t, 30*time.Millisecond, 2*time.Millisecond, b)
+	if err := apCall(s, "ui", id); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(time.Second, func() bool { return b.Parked(id) }) {
+		t.Fatal("setup: not auto-parked")
+	}
+	if _, err := s.Call(context.Background(), "set_profile", json.RawMessage(`{"device":"android:agemu-a","profile":"no-such-profile"}`)); err == nil {
+		t.Fatal("an invalid set_profile succeeded")
+	}
+	if !b.Parked(id) {
+		t.Fatal("the rejected call resumed the device")
+	}
+	s.actMu.Lock()
+	auto := s.activity[id] != nil && s.activity[id].auto
+	s.actMu.Unlock()
+	if !auto {
+		t.Fatal("the rejected call took the park away from the daemon: it would stay parked when the daemon stops")
+	}
+	s.stopAutoPark()
+	if b.Parked(id) {
+		t.Fatal("the daemon did not resume its park when it stopped")
+	}
+}

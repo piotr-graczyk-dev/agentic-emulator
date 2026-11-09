@@ -67,13 +67,17 @@ func adbReadString(c net.Conn) (string, error) {
 // unblockOnCancel makes reads and writes on c fail at once when ctx is cancelled (net.Conn
 // honours deadlines, not contexts): without it a wedged adbd or adb server would hold a call whose
 // context was cancelled, such as a boot that `shutdown` cancels, until the read returned by
-// itself. stop ends the watch; call it before reusing c with another context.
+// itself. stop ends the watch and returns only once the watcher is gone, so a cancellation that
+// comes later can no longer expire c; call it before reusing c with another context (and reset
+// the deadline after it).
 func unblockOnCancel(ctx context.Context, c net.Conn) (stop func()) {
 	if ctx.Done() == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		select {
 		case <-ctx.Done():
 			c.SetDeadline(time.Now())
@@ -81,7 +85,12 @@ func unblockOnCancel(ctx context.Context, c net.Conn) (stop func()) {
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done) }) }
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
+	}
 }
 
 // ctxErr returns ctx's error when it is done (the reason a read failed), else err.

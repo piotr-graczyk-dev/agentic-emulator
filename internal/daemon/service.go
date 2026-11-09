@@ -379,6 +379,7 @@ func (s *Service) wake(ctx context.Context, b backend.Backend, id, method string
 	if _, err := pk.Resume(ctx, id); err != nil {
 		return fmt.Errorf("resuming the parked device before %s: %w", method, err)
 	}
+	s.disown(id)
 	return nil
 }
 

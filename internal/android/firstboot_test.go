@@ -170,3 +170,23 @@ func TestAnAnsweringAgentRecordsTheFirstBoot(t *testing.T) {
 		t.Fatal("record lost")
 	}
 }
+
+// Before a power-off of a marked AVD, only the emulator saying the guest has not booted (and adb
+// not saying it has) keeps the AVD eligible for the repair. Any doubt records the boot: no
+// automatic wipe of a guest that may hold data.
+func TestFirstBootUnfinishedOnlyWhenTheEmulatorSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		emuKnown, emuBooted, adbBooted, unfinished bool
+		why                                        string
+	}{
+		{true, false, false, true, "a bricked first boot: the emulator answers, its guest never booted, adb offline"},
+		{true, true, false, false, "the emulator says booted (adb server down)"},
+		{true, false, true, false, "adb says booted"},
+		{false, false, false, false, "neither can be asked: fail closed, no wipe"},
+		{false, false, true, false, "only adb answers: booted"},
+	} {
+		if got := firstBootUnfinished(c.emuKnown, c.emuBooted, c.adbBooted); got != c.unfinished {
+			t.Errorf("%s: firstBootUnfinished = %v, want %v", c.why, got, c.unfinished)
+		}
+	}
+}

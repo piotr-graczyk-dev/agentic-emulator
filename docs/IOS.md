@@ -1141,9 +1141,10 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    device is ready. A daemon of the simulator runtime is ended when 3 passes in a row (60 s) found
    it idle-exitable and its CPU time, read in the kernel's own units, did not change at all between
    them: serving an app's call costs CPU, so a daemon that an app calls more often than once a
-   minute is never ended. Only daemons that started before a cut-off may be ended at all; the
+   minute is never ended. An interval shorter than 15 s (a pass that ran late, followed at once by
+   the next) does not count toward the 3. Only daemons that started before a cut-off may be ended at all; the
    cut-off is the earliest of the first agemu call of this boot that can start app work (`install`,
-   `launch`, `open`, `push`), and the earliest app process a pass saw: an installed app's or its
+   `launch`, `open`, `push`, `clear_app_data`, which reinstalls the app), and the earliest app process a pass saw: an installed app's or its
    extension's, or the frontmost app's when that is not SpringBoard (a system app such as Safari or
    Settings, also one opened from its icon). So nothing an install, a launch, an opened URL or an
    app brought up, or that iOS started after them, is ended. (An app opened from its icon and

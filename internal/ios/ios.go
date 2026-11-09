@@ -83,7 +83,7 @@ type Backend struct {
 	// appOps counts, per udid, the agemu calls in flight that act on apps or app-facing state
 	// (install, launch, open, push, uninstall, terminate, clear-data, reset, permissions,
 	// location; idle.go holds its passes meanwhile); appWork is, per udid, when the first call that
-	// can start app work (install, launch, open, push) began in the current boot (idle.go's
+	// can start app work (install, launch, open, push, clear-data) began in the current boot (idle.go's
 	// cut-off).
 	appOps   map[string]int
 	appWork  map[string]time.Time
@@ -1193,7 +1193,7 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 }
 
 // appOp marks an agemu call on udid that acts on apps as in flight until the returned func runs.
-// work: the call can start app work (install, launch, open, push); the first one of a boot sets
+// work: the call can start app work (install, launch, open, push, clear-data); the first one of a boot sets
 // the idle stop's cut-off (appWorkSince).
 func (b *Backend) appOp(udid string, work bool) func() {
 	// An idle pass that is ending daemons holds the gate (idle.go, exclusive): the call starts
@@ -1239,7 +1239,7 @@ func (b *Backend) appOpBusy(udid string) bool {
 	return b.appOps[udid] > 0
 }
 
-// appWorkSince is when the first install, launch, open or push of the current boot began on
+// appWorkSince is when the first install, launch, open, push or clear-data of the current boot began on
 // udid (zero: none yet).
 func (b *Backend) appWorkSince(udid string) time.Time {
 	b.mu.Lock()

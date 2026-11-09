@@ -625,3 +625,26 @@ func TestAppCallsWaitForAPassEnding(t *testing.T) {
 	r()
 	done()
 }
+
+// A late pass followed at once by the next one does not count as an idle interval: a daemon
+// whose CPU did not move over a few seconds is not ended before idleQuietPasses intervals of at
+// least idleMinInterval each.
+func TestAShortIntervalDoesNotCountAsIdle(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	p := dp(10, "periodicd", 3, 5) // 3: tracked, idle exit allowed, clean
+	at := func(d time.Duration) idleSnapshot {
+		return idleSnapshot{root: 1, daemons: []daemonProc{p}, taken: t0.Add(d)}
+	}
+	// 30 s, then two back-to-back passes 1 s apart: only one full interval so far.
+	f := &fakeIdle{passes: []idleSnapshot{at(0), at(30 * time.Second), at(31 * time.Second), at(32 * time.Second)}, stopAt: 5}
+	idlePasses(f, "test")
+	if len(f.signals) != 0 {
+		t.Fatalf("ended after short intervals: %v", f.signals)
+	}
+	// The same daemon over full intervals is ended at the third snapshot.
+	f = &fakeIdle{passes: []idleSnapshot{at(0), at(30 * time.Second), at(60 * time.Second)}, stopAt: 4}
+	idlePasses(f, "test")
+	if len(f.signals) == 0 {
+		t.Fatal("not ended after two full idle intervals")
+	}
+}

@@ -173,7 +173,9 @@ func waitPrepared(cl *client.Client, p daemon.Params, raw json.RawMessage, progr
 			return nil, fmt.Errorf("preparing %s failed: %s", id, cur.PrepareError)
 		}
 		q := p
-		q.Device, q.NoWait = id, false
+		// The preparation was the boot (a cold one): this call only reads the booted device, so
+		// it must not ask for another cold boot.
+		q.Device, q.NoWait, q.Cold = id, false, false
 		r, err := cl.Do("boot", q)
 		if err != nil {
 			return nil, err

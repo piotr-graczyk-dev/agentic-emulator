@@ -712,7 +712,6 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 		// An emulator runs but there is no baseline: a previous daemon stopped (or was
 		// restarted) while it prepared one. Start over: power it off and prepare it again.
 		logf("%s: boot: the emulator runs without %s (a previous daemon stopped while preparing it?); powering it off and preparing it again", d.name, baselineSnapshot)
-		d.recordIfBooted(ctx, a)
 		if err := d.shutdown(ctx); err != nil {
 			return api.Device{}, err
 		}
@@ -1000,8 +999,11 @@ func killProcGroup(pid int) {
 	}
 }
 
-// recordIfBooted records a completed boot of a running emulator whose guest has booted (asked
-// over adb, bounded, also when ctx is already cancelled), before agemu powers it off.
+// recordIfBooted runs before agemu powers off a running AVD whose first boot is not yet recorded
+// as completed (firstboot.go). It asks the emulator (gRPC getStatus, which reports the guest's
+// boot completion on this image) and adb (sys.boot_completed), each bounded and also when ctx is
+// already cancelled, and records the boot unless the guest's first boot is shown not to have
+// completed (firstBootUnfinished).
 func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 	d.mu.Lock()
 	serial := d.run.serial()
@@ -1009,12 +1011,29 @@ func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 	if r, ok := findRunning(d.name); ok {
 		serial = r.serial()
 	}
+	var emuKnown, emuBooted, adbBooted bool
 	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if out, err := adbShellOK(c, serial, "getprop sys.boot_completed"); err == nil && strings.TrimSpace(out) == "1" {
-		if _, err := recordBooted(a); err != nil {
-			logf("%s: could not record the completed boot: %v", d.name, err)
+	if e, _, err := d.connRaw(c); err == nil {
+		if st, err := e.status(c); err == nil {
+			emuKnown, emuBooted = true, st.GetBooted()
 		}
+	}
+	cancel()
+	if !emuBooted {
+		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		out, err := adbShellOK(c, serial, "getprop sys.boot_completed")
+		cancel()
+		adbBooted = err == nil && strings.TrimSpace(out) == "1"
+	}
+	if firstBootUnfinished(emuKnown, emuBooted, adbBooted) {
+		logf("%s: the guest has not finished its first boot (the emulator says so); the next boot repairs it", d.name)
+		return
+	}
+	if !emuKnown && !adbBooted {
+		logf("%s: could not ask the emulator or adb whether the guest finished its first boot; recording it as finished so it is never wiped automatically (if it never boots, boot it once with AGEMU_ANDROID_EMULATOR_FLAGS=-wipe-data)", d.name)
+	}
+	if _, err := recordBooted(a); err != nil {
+		logf("%s: could not record the completed boot: %v", d.name, err)
 	}
 }
 

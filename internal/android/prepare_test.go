@@ -27,8 +27,8 @@ func newFakeBoot(need bool) *fakeBoot {
 func (f *fakeBoot) boot(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
 	f.started <- struct{}{}
 	if f.needBaseline {
+		d.setPhase(phaseSettling) // before markNeeded, which releases a NoWait Boot
 		d.markNeeded()
-		d.setPhase(phaseSettling)
 	}
 	select {
 	case <-f.release:
@@ -314,8 +314,8 @@ func TestANoteIsShownWhilePreparing(t *testing.T) {
 	defer close(release)
 	b := New()
 	b.bootHook = func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+		d.setNote("an interrupted first boot is being repaired") // before markNeeded releases Boot
 		d.markNeeded()
-		d.setNote("an interrupted first boot is being repaired")
 		<-release
 		return api.Device{ID: id, State: "booted"}, nil
 	}

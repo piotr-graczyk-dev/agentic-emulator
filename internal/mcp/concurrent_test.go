@@ -222,3 +222,25 @@ func TestDeviceKeySpellings(t *testing.T) {
 		t.Error("two AVDs share a queue")
 	}
 }
+
+// After a burst of concurrent calls the pool keeps at most maxIdleConns connections; it closes
+// the others.
+func TestThePoolKeepsAtMostMaxIdleConns(t *testing.T) {
+	p := &clientPool{}
+	var peers []net.Conn
+	for i := 0; i < maxIdleConns+3; i++ {
+		a, b := net.Pipe()
+		peers = append(peers, b)
+		p.put(client.New(a), false)
+	}
+	if len(p.idle) != maxIdleConns {
+		t.Fatalf("%d idle connections, want %d", len(p.idle), maxIdleConns)
+	}
+	for _, b := range peers[maxIdleConns:] {
+		b.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := b.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("an extra connection was not closed: %v", err)
+		}
+	}
+	p.close()
+}

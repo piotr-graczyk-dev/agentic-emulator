@@ -176,12 +176,27 @@ func (s *Service) beginCall(ctx context.Context, id, method string) error {
 		a.inflight++
 		a.last = time.Now()
 		a.handled = false
-		if method != "logs" && method != "crashes" {
-			a.auto = false // the call resumes the device (wake) or parks it itself
+		if method == "park" || method == "resume" {
+			a.auto = false // the agent parks or resumes it itself: the park is no longer the daemon's
 		}
+		// Any other call keeps the mark until wake has resumed the device (disown): a call that
+		// fails its argument checks first leaves the device parked, and the daemon still resumes
+		// it when it stops.
 		s.actMu.Unlock()
 		return nil
 	}
+}
+
+// disown drops the daemon's mark on a device it parked once a call has resumed it (wake).
+func (s *Service) disown(id string) {
+	if s.ap == nil {
+		return
+	}
+	s.actMu.Lock()
+	if a := s.activity[id]; a != nil {
+		a.auto = false
+	}
+	s.actMu.Unlock()
 }
 
 // resumeAutoParked resumes, before a profile switch on the platform, every device of it the
@@ -281,7 +296,7 @@ func (s *Service) autoParkIdle(ctx context.Context) {
 func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 	b, err := s.backendFor(id)
 	pk, isParker := b.(backend.Parker)
-	why := ""
+	why, preparing := "", false
 	switch {
 	case err != nil || !isParker:
 		why = "its backend cannot park"
@@ -290,7 +305,10 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 	case preparingNow(b, id) != nil:
 		// Its boot is preparing a baseline (a first boot, a first-boot repair, a retake): it is
 		// listed as preparing too, but the backend's own state is read from memory and needs no
-		// List. The boot holds the device until it is done; it is never parked meanwhile.
+		// List. The boot holds the device until it is done; it is never parked meanwhile, and the
+		// parker looks again on later ticks (not handled), so the device can be parked once it has
+		// booted and stays idle.
+		preparing = true
 		why = "it is preparing its baseline"
 	default:
 		why = s.notParkable(ctx, b, id)
@@ -301,9 +319,9 @@ func (s *Service) autoParkOne(ctx context.Context, id string, last time.Time) {
 		s.actMu.Unlock()
 		return // a call came meanwhile: a new idle stretch
 	}
-	if s.switching[platformOf(id)] > 0 {
+	if s.switching[platformOf(id)] > 0 || preparing {
 		s.actMu.Unlock()
-		return // a profile switch may be acting on it; look again on the next tick
+		return // a profile switch may be acting on it, or it is preparing: look again on the next tick
 	}
 	a.handled = true
 	if why == notListed {

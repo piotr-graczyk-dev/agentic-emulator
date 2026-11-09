@@ -80,3 +80,39 @@ func TestADBShellHonoursItsDeadline(t *testing.T) {
 		t.Fatalf("took %v", time.Since(t0))
 	}
 }
+
+// A cancellation that comes after stop must not expire a connection that is reused (the agent's
+// cached stream): a late deadline would fail the next call's read after its request was sent.
+func TestUnblockOnCancelStopEndsTheWatch(t *testing.T) {
+	for i := 0; i < 2000; i++ {
+		a, b := net.Pipe()
+		ctx, cancel := context.WithCancel(context.Background())
+		stop := unblockOnCancel(ctx, a)
+		stop()
+		cancel()
+		a.SetDeadline(time.Time{})
+		go func() { b.Write([]byte("x")); b.Close() }()
+		buf := make([]byte, 1)
+		if _, err := a.Read(buf); err != nil {
+			t.Fatalf("iteration %d: read after stop and a later cancel: %v", i, err)
+		}
+		a.Close()
+	}
+	// Before stop, a cancellation still unblocks a read at once.
+	a, b := net.Pipe()
+	defer b.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := unblockOnCancel(ctx, a)
+	defer stop()
+	cancel()
+	done := make(chan error, 1)
+	go func() { _, err := a.Read(make([]byte, 1)); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("read succeeded with nothing written")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled context did not unblock the read")
+	}
+}

@@ -380,7 +380,7 @@ func (b *Backend) ClearAppData(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
-	defer b.appOp(d.UDID, false)()
+	defer b.appOp(d.UDID, true)() // it reinstalls the app: app work, like install (idle.go cut-off)
 	start := time.Now()
 	info, err := b.userApp(ctx, d.UDID, app, "clear-data")
 	if err != nil {

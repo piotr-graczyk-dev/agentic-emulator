@@ -271,3 +271,42 @@ func TestBootOfABootedDeviceDoesNotPoll(t *testing.T) {
 		t.Fatalf("%s %v", got, err)
 	}
 }
+
+// `boot --cold` of a device that prepared its baseline: the preparation was the cold boot, so the
+// final call that reads the booted device must not ask for another one.
+func TestBootColdDoesNotColdBootAgainAfterThePreparation(t *testing.T) {
+	old := prepPoll
+	prepPoll = time.Millisecond
+	defer func() { prepPoll = old }()
+	a, b := net.Pipe()
+	defer a.Close()
+	boots := make(chan daemon.Params, 4)
+	go func() {
+		r := bufio.NewReader(b)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req daemon.Request
+			_ = json.Unmarshal(line, &req)
+			var res any = []api.Device{{ID: "android:x", State: "booted"}}
+			if req.Method == "boot" {
+				var p daemon.Params
+				_ = json.Unmarshal(req.Params, &p)
+				boots <- p
+				res = api.Device{ID: "android:x", State: "booted"}
+			}
+			bs, _ := json.Marshal(res)
+			out, _ := json.Marshal(daemon.Response{ID: req.ID, Result: bs})
+			b.Write(append(out, '\n'))
+		}
+	}()
+	first, _ := json.Marshal(api.Device{ID: "android:x", State: api.StatePreparing, Preparing: &api.Preparing{Phase: "cold boot"}})
+	if _, err := waitPrepared(client.New(a), daemon.Params{Device: "android:x", Cold: true, NoWait: true}, first, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if p := <-boots; p.Cold || p.NoWait {
+		t.Fatalf("the final boot asked for cold=%v noWait=%v", p.Cold, p.NoWait)
+	}
+}

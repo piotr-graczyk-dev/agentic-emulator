@@ -262,8 +262,10 @@ func (d *device) waitGuestSettled(ctx context.Context, serial string, home time.
 		if prev == nil {
 			if !refined {
 				refined = true
-				// The wait cannot outlast the uptime cap by much, whatever the samples do.
-				deadline = t0.Add(target - cur.uptime + quietExtraLimit + time.Minute)
+				// The wait cannot outlast the uptime cap by much, whatever the samples do. Counted
+				// from this sample (its uptime is now), not from the start of the wait: samples that
+				// failed before it must not shorten the wait for a quiet guest.
+				deadline = time.Now().Add(target - cur.uptime + quietExtraLimit + time.Minute)
 				logf("%s: waiting until the guest has been up %v and is quiet (uptime now %v; at most until %v of uptime; AGEMU_ANDROID_BASELINE_UPTIME_S=0 skips this)", d.name, target, cur.uptime.Round(time.Second), target+quietExtraLimit)
 			}
 			prev = &cur

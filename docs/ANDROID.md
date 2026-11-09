@@ -758,7 +758,10 @@ A boot that takes a baseline does not block clients:
     `agemu-first-boot-incomplete` into the AVD folder. When a boot completes, it writes
     `agemu-booted` first and then removes the marker. It does the same when the device's agent first
     answers (a guest that finished booting while no daemon watched it), and before every power-off of
-    a marked AVD it asks the guest over adb whether it has booted. A boot that finds the marker, no `agemu-booted`
+    a marked AVD it asks the emulator (gRPC `getStatus`, which reports the guest's boot completion)
+    and adb whether the guest has booted. Only the emulator answering that it has not (and adb not
+    saying it has) keeps the AVD eligible for the repair; if neither can be asked, agemu records the
+    boot, so a guest that may hold data is never wiped automatically. A boot that finds the marker, no `agemu-booted`
     and no baseline adds `-wipe-data`, logs it, and shows it in `devices` as the preparation's
     `note`.
   - **Nothing can be lost:** that guest never finished booting, so nothing was ever installed in it.
@@ -772,7 +775,8 @@ A boot that takes a baseline does not block clients:
   booted device) waits for earlier device calls, and later ones wait for it: queued behind a long
   call on one device (a `wait_for` with a long timeout), it holds back calls on other devices
   until it has run. Agents that drive several devices should pass `device` on every call.
-  `notifications/cancelled` is ignored: a cancelled call still runs. A device has its own queue
+  `notifications/cancelled` is ignored: a cancelled call still runs. At most 64 requests are in
+  flight at once; beyond that the server reads the next request when one is answered. A device has its own queue
   only when the server can tell which device it is: `android:<avd>` (any case) or a simulator's
   UDID (`ios:<UDID>` or bare, any case). Any other reference (a simulator's name, an AVD name
   without `android:`) is ordered like a call without a device argument, because other calls may

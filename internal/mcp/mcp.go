@@ -236,9 +236,19 @@ func (p *clientPool) put(c *client.Client, broken bool) {
 		return
 	}
 	p.mu.Lock()
+	if len(p.idle) >= maxIdleConns {
+		p.mu.Unlock()
+		_ = c.Close() // a burst of concurrent calls does not leave its connections open
+		return
+	}
 	p.idle = append(p.idle, c)
 	p.mu.Unlock()
 }
+
+// maxIdleConns bounds the daemon connections the pool keeps between calls; maxInflight bounds the
+// requests read but not yet answered (when it is reached, the server reads the next request once
+// one is answered, as the sequential server did).
+const maxIdleConns, maxInflight = 8, 64
 
 func (p *clientPool) close() {
 	p.mu.Lock()
@@ -362,6 +372,7 @@ func serve(in io.Reader, out io.Writer, dial func() (*client.Client, error)) err
 	var order deviceOrder
 	var inflight sync.WaitGroup
 	defer inflight.Wait() // answer every request read before stdin closed
+	slots := make(chan struct{}, maxInflight)
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(strings.TrimSpace(string(line))) > 0 {
@@ -369,6 +380,9 @@ func serve(in io.Reader, out io.Writer, dial func() (*client.Client, error)) err
 			if jerr := json.Unmarshal(line, &req); jerr != nil {
 				write(rpcResp{ID: json.RawMessage("null"), Error: &rpcErr{Code: -32700, Message: jerr.Error()}})
 			} else if len(req.ID) > 0 { // notifications (no id) get no response
+				// Every request admitted earlier holds a slot and waits only for earlier ones, so
+				// the oldest always runs: a full table only delays reading the next request.
+				slots <- struct{}{}
 				inflight.Add(1)
 				var wait []chan struct{}
 				done := func() {}
@@ -377,6 +391,7 @@ func serve(in io.Reader, out io.Writer, dial func() (*client.Client, error)) err
 				}
 				go func(req rpcReq) {
 					defer inflight.Done()
+					defer func() { <-slots }()
 					for _, c := range wait {
 						<-c
 					}
