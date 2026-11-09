@@ -1,9 +1,18 @@
 package android
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/android/emupb"
 )
 
 func newAVDDir(t *testing.T) avdInfo {
@@ -187,6 +196,66 @@ func TestFirstBootUnfinishedOnlyWhenThePausedEmulatorSaysSo(t *testing.T) {
 	} {
 		if got := firstBootUnfinished(c.paused, c.known, c.booted); got != c.unfinished {
 			t.Errorf("%s: firstBootUnfinished = %v, want %v", c.why, got, c.unfinished)
+		}
+	}
+}
+
+// fakeCtl is an emulator controller whose pause is queued: the VM reports running for the first
+// runningPolls state reads after SetVmState (forever when runningPolls < 0).
+type fakeCtl struct {
+	emupb.EmulatorControllerClient
+	mu           sync.Mutex
+	pauseErr     error
+	runningPolls int
+	polls        int
+	booted       bool
+	statusErr    error
+}
+
+func (f *fakeCtl) SetVmState(ctx context.Context, in *emupb.VmRunState, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, f.pauseErr
+}
+
+func (f *fakeCtl) GetVmState(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emupb.VmRunState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.polls++
+	if f.runningPolls < 0 || f.polls <= f.runningPolls {
+		return &emupb.VmRunState{State: emupb.VmRunState_RUNNING}, nil
+	}
+	return &emupb.VmRunState{State: emupb.VmRunState_PAUSED}, nil
+}
+
+func (f *fakeCtl) GetStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emupb.EmulatorStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	return &emupb.EmulatorStatus{Booted: f.booted}, nil
+}
+
+// The boot flag counts only once the emulator confirms the VM is paused (SetVmState only queues
+// the pause): an acknowledged pause with the VM still running, a failed pause or an unread flag
+// records the boot.
+func TestPausedBootStatusWaitsForAConfirmedPause(t *testing.T) {
+	old := pausedSettle
+	pausedSettle = time.Millisecond
+	defer func() { pausedSettle = old }()
+	for _, c := range []struct {
+		ctl        *fakeCtl
+		unfinished bool
+		why        string
+	}{
+		{&fakeCtl{runningPolls: -1}, false, "pause acknowledged, VM still running: not confirmed, the boot is recorded"},
+		{&fakeCtl{runningPolls: 3}, true, "pause confirmed after 3 polls, guest not booted: repair kept"},
+		{&fakeCtl{runningPolls: 1, booted: true}, false, "pause confirmed, guest booted: recorded"},
+		{&fakeCtl{pauseErr: errors.New("no")}, false, "pause failed: recorded"},
+		{&fakeCtl{statusErr: errors.New("no")}, false, "flag not read: recorded"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		paused, known, booted := pausedBootStatus(ctx, &emuClient{ctl: c.ctl})
+		cancel()
+		if got := firstBootUnfinished(paused, known, booted); got != c.unfinished {
+			t.Errorf("%s: unfinished = %v (paused %v known %v booted %v)", c.why, got, paused, known, booted)
 		}
 	}
 }

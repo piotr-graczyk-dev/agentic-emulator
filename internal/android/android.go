@@ -1011,12 +1011,7 @@ func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 	defer cancel()
 	if e, _, err := d.connRaw(c); err == nil {
 		// The VM stays paused: the caller powers it off next.
-		if err := e.setVM(c, emupb.VmRunState_PAUSED); err == nil {
-			paused = true
-			if st, err := e.status(c); err == nil {
-				known, booted = true, st.GetBooted()
-			}
-		}
+		paused, known, booted = pausedBootStatus(c, e)
 	}
 	if firstBootUnfinished(paused, known, booted) {
 		logf("%s: the guest has not finished its first boot (the emulator says so, VM paused); the next boot repairs it", d.name)
@@ -1029,6 +1024,41 @@ func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 		logf("%s: could not record the completed boot: %v", d.name, err)
 	}
 }
+
+// pausedBootStatus pauses the VM and reads whether the guest has finished booting. SetVmState only
+// queues the pause on the emulator's main loop, so it waits until getVmState reports the VM paused
+// and then gives the emulator a moment to handle events the guest sent before the pause (a boot
+// completion among them) before it reads the flag. paused is false when the pause is not
+// confirmed before ctx ends; known is false when the flag could not be read.
+func pausedBootStatus(ctx context.Context, e *emuClient) (paused, known, booted bool) {
+	if e.setVM(ctx, emupb.VmRunState_PAUSED) != nil {
+		return false, false, false
+	}
+	for {
+		if st, err := e.vmState(ctx); err == nil && st == emupb.VmRunState_PAUSED {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, false, false
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return false, false, false
+	case <-time.After(pausedSettle):
+	}
+	st, err := e.status(ctx)
+	if err != nil {
+		return true, false, false
+	}
+	return true, true, st.GetBooted()
+}
+
+// pausedSettle is how long pausedBootStatus lets the emulator handle the guest's last events once
+// the VM is paused.
+var pausedSettle = 200 * time.Millisecond
 
 // groupAlive reports whether any process of the process group pgid still runs.
 func groupAlive(pgid int) bool { return pgid > 0 && syscall.Kill(-pgid, 0) == nil }
