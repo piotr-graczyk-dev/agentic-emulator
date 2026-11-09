@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +64,34 @@ func adbReadString(c net.Conn) (string, error) {
 	return string(b), err
 }
 
+// unblockOnCancel makes reads and writes on c fail at once when ctx is cancelled (net.Conn
+// honours deadlines, not contexts): without it a wedged adbd or adb server would hold a call whose
+// context was cancelled, such as a boot that `shutdown` cancels, until the read returned by
+// itself. stop ends the watch; call it before reusing c with another context.
+func unblockOnCancel(ctx context.Context, c net.Conn) (stop func()) {
+	if ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// ctxErr returns ctx's error when it is done (the reason a read failed), else err.
+func ctxErr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w (%v)", ctx.Err(), err)
+	}
+	return err
+}
+
 // adbOpen opens a stream to a device service (e.g. "localabstract:agemu-agent", "shell,v2,raw:ls").
 func adbOpen(ctx context.Context, serial, service string) (net.Conn, error) {
 	d := net.Dialer{Timeout: 2 * time.Second}
@@ -73,13 +102,20 @@ func adbOpen(ctx context.Context, serial, service string) (net.Conn, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
+	stop := unblockOnCancel(ctx, c)
+	defer stop()
 	if err := adbRequest(c, "host:transport:"+serial); err != nil {
 		c.Close()
-		return nil, err
+		return nil, ctxErr(ctx, err)
 	}
 	if err := adbRequest(c, service); err != nil {
 		c.Close()
-		return nil, err
+		return nil, ctxErr(ctx, err)
+	}
+	stop()
+	if ctx.Err() != nil {
+		c.Close()
+		return nil, ctx.Err()
 	}
 	c.SetDeadline(time.Time{})
 	return c, nil
@@ -96,10 +132,12 @@ func adbHostQuery(ctx context.Context, req string) (string, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
+	defer unblockOnCancel(ctx, c)()
 	if err := adbRequest(c, req); err != nil {
-		return "", err
+		return "", ctxErr(ctx, err)
 	}
-	return adbReadString(c)
+	s, err := adbReadString(c)
+	return s, ctxErr(ctx, err)
 }
 
 // adbState returns "device", "offline", ... for the serial, or an error when unknown.
@@ -123,6 +161,7 @@ func adbShell(ctx context.Context, serial, cmd string) (shellResult, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
+	defer unblockOnCancel(ctx, c)()
 	var out, errb bytes.Buffer
 	var hdr [5]byte
 	for {
@@ -130,12 +169,12 @@ func adbShell(ctx context.Context, serial, cmd string) (shellResult, error) {
 			if errors.Is(err, io.EOF) {
 				return res, fmt.Errorf("adb shell %q: connection closed without exit status", cmd)
 			}
-			return res, err
+			return res, ctxErr(ctx, err)
 		}
 		n := binary.LittleEndian.Uint32(hdr[1:])
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(c, buf); err != nil {
-			return res, err
+			return res, ctxErr(ctx, err)
 		}
 		switch hdr[0] {
 		case 1:

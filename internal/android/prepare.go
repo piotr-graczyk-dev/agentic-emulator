@@ -70,11 +70,19 @@ func (p *prepState) info() *api.Preparing {
 	}
 }
 
-// prepMax is the longest a preparation can take: the cold boot, the uptime target, the longest
-// wait past it for a quiet guest, and the save (quiet.go). Shown in `devices` and errors.
-func prepMax() time.Duration {
-	return 90*time.Second + baselineUptime() + quietExtraLimit + time.Minute
-}
+// Bounds of a boot. Everything before the snapshot save runs under prepLimit (the emulator start,
+// the cold boot, the baseline steps, each with its own deadline, and the settle wait, which saves
+// at the latest at 12 minutes of guest uptime); the save then has saveTimeout and is not
+// cancelled. prepMax, their sum, is a hard bound: a boot that reaches it fails (no baseline is
+// saved, the next boot prepares again). Typical first boots took 430-455 s.
+const (
+	stepTimeout = 30 * time.Second // one guest call in the baseline steps
+	saveTimeout = 3 * time.Minute  // the snapshot save (3-7 s measured)
+	prepLimit   = 17 * time.Minute // everything before the save
+)
+
+// prepMax is the hard bound of a preparation, shown in `devices` and errors.
+func prepMax() time.Duration { return prepLimit + saveTimeout }
 
 // setPhase records the current phase of the device's boot, if one is running.
 func (d *device) setPhase(s string) {
@@ -124,6 +132,45 @@ func (b *Backend) Preparing(id string) *api.Preparing {
 	return nil
 }
 
+// AwaitDecision implements backend.Preparer: for a boot in progress that has not yet shown
+// whether it prepares a baseline, it waits until it has (or finished, or noWaitBound passed, which
+// marks it visible as a NoWait boot does), then reports the preparation, if any.
+func (b *Backend) AwaitDecision(ctx context.Context, id string) *api.Preparing {
+	name, err := avdName(id)
+	if err != nil {
+		return nil
+	}
+	b.mu.Lock()
+	d := b.devs[name]
+	b.mu.Unlock()
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	p := d.prep
+	d.mu.Unlock()
+	if p == nil {
+		return nil
+	}
+	if !p.visible.Load() {
+		t := time.NewTimer(noWaitBound)
+		defer t.Stop()
+		select {
+		case <-p.needed:
+		case <-p.done:
+			return nil
+		case <-t.C:
+			p.visible.Store(true)
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	if d.preparing() == p {
+		return p.info()
+	}
+	return nil
+}
+
 // Boot boots the device (see bootSync). A boot already in progress is joined.
 func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (api.Device, error) {
 	d, err := b.devFor(id)
@@ -146,6 +193,8 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 }
 
 func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.BootOptions, p *prepState) {
+	ctx, cancelLimit := context.WithTimeout(ctx, prepLimit)
+	defer cancelLimit()
 	boot := b.bootSync
 	if b.bootHook != nil {
 		boot = b.bootHook
@@ -223,6 +272,7 @@ func (d *device) cancelPrep(why string) error {
 	}
 	d.mu.Lock()
 	d.prepErr = "cancelled by " + why
+	d.retook = false // a later boot may retake again
 	d.mu.Unlock()
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -465,6 +466,14 @@ func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
 	}
 	if _, ok := run[a.Name]; ok {
 		dev.State = "booted"
+		if !a.hasBaseline() && !booting {
+			// A daemon stopped mid-preparation left the emulator running without a baseline
+			// (a boot in progress would show as preparing or booting).
+			dev.NoBaseline = true
+			if dev.PrepareError == "" {
+				dev.PrepareError = "the device runs without a baseline snapshot (a daemon stopped or was restarted while preparing it): call boot to prepare it again; reset fails until then"
+			}
+		}
 		if d.parked() {
 			dev.State = api.StateParked // paused in place (park.go)
 		} else if standbyEnabled() && d.inStandby(context.Background()) {
@@ -844,6 +853,10 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.Env = emulatorEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
+	// A boot cancelled before this point (a shutdown right after boot) starts nothing.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
 	if err := cmd.Start(); err != nil {
 		return err
@@ -852,17 +865,24 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	d.proc = cmd
 	d.mu.Unlock()
 	go func() { _ = cmd.Wait() }() // reap
+	// Until the emulator is registered and answers gRPC, nothing else can find or stop it (a
+	// shutdown looks for registered emulators): any failure or cancellation here kills it.
+	fail := func(err error) error {
+		logf("%s: emulator start abandoned (%v); stopping pid %d", d.name, err, cmd.Process.Pid)
+		killProcGroup(cmd.Process.Pid)
+		return err
+	}
 
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		if r, ok := findRunning(d.name); ok && r.GRPCPort != 0 {
 			e, err := dialEmu(r)
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			if err := e.waitGRPC(ctx, time.Until(deadline)); err != nil {
 				e.Close()
-				return err
+				return fail(err)
 			}
 			d.mu.Lock()
 			if d.emu != nil {
@@ -883,14 +903,47 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			return fmt.Errorf("emulator exited during startup; see %s", filepath.Join(logDir(), d.name+".log"))
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log"))
+			return fail(fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log")))
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fail(ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// killProcGroup stops an emulator agemu started (its own session, so its process group is its
+// pid): SIGTERM, then SIGKILL after 10 s.
+func killProcGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	deadline := time.Now().Add(10 * time.Second)
+	for groupAlive(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// groupAlive reports whether any process of the process group pgid still runs.
+func groupAlive(pgid int) bool { return pgid > 0 && syscall.Kill(-pgid, 0) == nil }
+
+// stopUnregistered stops the emulator this daemon launched for d if it still runs but never
+// registered (findRunning cannot see it, so shutdown would miss it).
+func (d *device) stopUnregistered() {
+	d.mu.Lock()
+	cmd := d.proc
+	d.mu.Unlock()
+	if cmd == nil || cmd.Process == nil || !groupAlive(cmd.Process.Pid) {
+		return
+	}
+	if _, ok := findRunning(d.name); ok {
+		return // registered: the normal shutdown stops it
+	}
+	logf("%s: stopping the unregistered emulator pid %d", d.name, cmd.Process.Pid)
+	killProcGroup(cmd.Process.Pid)
 }
 
 // waitBooted waits until adb sees the device and sys.boot_completed=1.
@@ -971,10 +1024,15 @@ func (d *device) checkGuest(ctx context.Context) {
 // the one snapshot agemu boots and resets from. The on-device agent is running when the
 // snapshot is taken, so every snapshot boot / reset is agent-ready immediately.
 func (d *device) makeBaseline(ctx context.Context) error {
-	e, a, err := d.conn(ctx)
+	cctx, ccancel := context.WithTimeout(ctx, time.Minute)
+	e, a, err := d.conn(cctx)
+	ccancel()
 	if err != nil {
 		return err
 	}
+	// Every guest call below has its own deadline (and ends when ctx is cancelled): a wedged adbd
+	// or agent must not hold the preparation, or a shutdown that cancels it.
+	step := func(dl time.Duration) (context.Context, context.CancelFunc) { return context.WithTimeout(ctx, dl) }
 	settle := time.Duration(envInt("AGEMU_ANDROID_BASELINE_SETTLE_S", 20)) * time.Second
 	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
 	d.setPhase(phaseSteps)
@@ -988,16 +1046,23 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	d.mu.Lock()
 	serial := d.run.serial()
 	d.mu.Unlock()
-	if _, err := adbShellOK(ctx, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
+	sc, scancel := step(stepTimeout)
+	if _, err := adbShellOK(sc, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
 		logf("%s: could not turn off stylus handwriting: %v", d.name, err)
 	}
+	scancel()
 	if leanOn() {
 		d.disableLeanPackages(ctx, serial)
 	}
-	d.warmUpKeyboard(ctx, e, a)
-	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
-	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
-	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+	d.warmUpKeyboard(ctx, e, a) // bounded at 40 s
+	agentStep := func(req map[string]any) {
+		c, cancel := step(stepTimeout)
+		_ = a.call(c, req, nil)
+		cancel()
+	}
+	agentStep(map[string]any{"cmd": "cleartasks"})
+	agentStep(map[string]any{"cmd": "key", "code": keyCodes["home"]})
+	agentStep(map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000})
 	// Work the guest still has pending would run again after every reset (see quiet.go).
 	d.setPhase(phaseSettling)
 	if err := d.waitGuestSettled(ctx, serial, time.Now()); err != nil {
@@ -1006,24 +1071,34 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if baselineUptime() > 0 {
 		// Anything that came up during the wait (a dialog, a notification shade) is dismissed;
 		// on the home screen the key does nothing.
-		_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
-		_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
-		bctx, bcancel := context.WithTimeout(ctx, 60*time.Second)
+		agentStep(map[string]any{"cmd": "key", "code": keyCodes["home"]})
+		agentStep(map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000})
+		bctx, bcancel := step(60 * time.Second)
 		if _, err := adbShellOK(bctx, serial, "am wait-for-broadcast-idle"); err != nil {
 			logf("%s: broadcast queue not idle: %v", d.name, err)
 		}
 		bcancel()
 	}
-	d.zeroFreeMemory(ctx, serial)
+	zc, zcancel := step(time.Minute)
+	d.zeroFreeMemory(zc, serial)
+	zcancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("preparing the baseline was cancelled: %w", err)
+	}
 	// The snapshot must contain a running agent, so boots from it are agent-ready at once.
-	if _, err := ensureAgent(ctx, a, logf); err != nil {
+	ac, acancel := step(2 * time.Minute)
+	_, err = ensureAgent(ac, a, logf)
+	acancel()
+	if err != nil {
 		return fmt.Errorf("agent not running before snapshot: %w", err)
 	}
 	// No host connection or port redirection inside the snapshot: the emulator cannot load a
 	// snapshot that holds the redirection's socket (see redirector.drop).
 	a.Close()
 	if a.rd != nil {
-		a.rd.drop(ctx)
+		rc, rcancel := step(stepTimeout)
+		a.rd.drop(rc)
+		rcancel()
 	}
 	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
 		return err
@@ -1032,7 +1107,7 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	t := time.Now()
 	// The save is not cancelled with the boot (a shutdown waits for it): an interrupted save
 	// could leave a snapshot that does not load.
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveTimeout)
 	defer cancel()
 	if names, err := e.listSnapshots(sctx); err == nil {
 		for _, n := range names {
@@ -1133,6 +1208,7 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 		return err
 	}
 	d.life.Lock()
+	d.stopUnregistered()
 	defer d.life.Unlock()
 	if !standbyEnabled() {
 		return d.shutdown(ctx)
@@ -1276,7 +1352,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 		return err
 	}
 	if !a.hasBaseline() {
-		return fmt.Errorf("%s has no baseline snapshot: a device's first boot takes it, and a daemon stopped or restarted while preparing it leaves none; run `agemu boot %s` (it prepares the baseline again, up to about %.0f min once)", id, id, prepMax().Minutes())
+		return fmt.Errorf("%s has no baseline snapshot: a device's first boot takes it, and a daemon stopped or restarted while preparing it leaves none; run `agemu boot %s` (it prepares the baseline again: usually 7-8 min, at most %.0f, once)", id, id, math.Ceil(prepMax().Minutes()))
 	}
 	e, ag, err := d.ready(ctx)
 	if err != nil {

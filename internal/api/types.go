@@ -144,6 +144,9 @@ type Device struct {
 	Preparing *Preparing `json:"preparing,omitempty"`
 	// PrepareError is why the last preparation failed (or was cancelled), until the next boot.
 	PrepareError string `json:"prepareError,omitempty"`
+	// NoBaseline: the device runs but has no baseline snapshot (a daemon stopped or was
+	// restarted while preparing it). Calls work, but reset cannot; `boot` prepares it again.
+	NoBaseline bool `json:"noBaseline,omitempty"`
 }
 
 // StatePreparing is the state of a device whose boot takes a baseline snapshot (a new Android

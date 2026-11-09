@@ -42,6 +42,9 @@ func (s *slowBackend) Preparing(id string) *api.Preparing {
 	}
 	return &api.Preparing{Phase: "settling", ElapsedS: 12, MaxS: 870}
 }
+func (s *slowBackend) AwaitDecision(ctx context.Context, id string) *api.Preparing {
+	return s.Preparing(id)
+}
 func (s *slowBackend) Boot(ctx context.Context, id string, o api.BootOptions) (api.Device, error) {
 	s.mu.Lock()
 	s.bootOpts = append(s.bootOpts, o)
@@ -60,11 +63,15 @@ func mcpSession(t *testing.T, b backend.Backend) (func(string), chan map[string]
 		go daemon.ServeConn(ctx, svc, c2)
 		return client.New(c1), nil
 	}
+	return sessionWithDial(t, dial)
+}
+
+func sessionWithDial(t *testing.T, dial func() (*client.Client, error)) (func(string), chan map[string]any) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	t.Cleanup(func() { inW.Close() })
 	go func() { _ = serve(inR, outW, dial); outW.Close() }()
-	resp := make(chan map[string]any, 16)
+	resp := make(chan map[string]any, 1024)
 	go func() {
 		sc := bufio.NewScanner(outR)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)

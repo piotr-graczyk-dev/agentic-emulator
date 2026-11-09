@@ -247,7 +247,7 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
 	}
-	if err := checkPreparing(b, id, method); err != nil {
+	if err := checkPreparing(ctx, b, id, method); err != nil {
 		return nil, nil, err
 	}
 	if err := s.wake(ctx, b, id, method); err != nil {
@@ -265,7 +265,7 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 // checkPreparing answers a call on a device that is preparing its baseline at once, instead of
 // letting it wait for minutes behind the boot (backend.Preparer). Boot (which returns the state or
 // waits), shutdown (which cancels the preparation) and the reads of what was captured go through.
-func checkPreparing(b backend.Backend, id, method string) error {
+func checkPreparing(ctx context.Context, b backend.Backend, id, method string) error {
 	pr, ok := b.(backend.Preparer)
 	if !ok {
 		return nil
@@ -274,11 +274,24 @@ func checkPreparing(b backend.Backend, id, method string) error {
 	case "boot", "shutdown", "logs", "crashes":
 		return nil
 	}
-	p := pr.Preparing(id)
+	p := pr.AwaitDecision(ctx, id)
 	if p == nil {
 		return nil
 	}
 	return &api.PreparingError{Device: id, Phase: p.Phase, Elapsed: p.ElapsedS, MaxS: p.MaxS}
+}
+
+// preparingNow is checkPreparing without the wait (after the device lock: a boot that held it
+// may have become a preparation meanwhile).
+func preparingNow(b backend.Backend, id string) error {
+	pr, ok := b.(backend.Preparer)
+	if !ok {
+		return nil
+	}
+	if p := pr.Preparing(id); p != nil {
+		return &api.PreparingError{Device: id, Phase: p.Phase, Elapsed: p.ElapsedS, MaxS: p.MaxS}
+	}
+	return nil
 }
 
 // wake resumes a parked device (backend.Parker) before a call that needs it running: every call
@@ -351,6 +364,11 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 	l := s.deviceLock(id)
 	l.Lock()
 	defer l.Unlock()
+	if method != "boot" && method != "shutdown" {
+		if err := preparingNow(b, id); err != nil {
+			return nil, err
+		}
+	}
 
 	if method == "launch" {
 		s.launching(id, appOf(p.App), p.start) // a crash during the launch counts

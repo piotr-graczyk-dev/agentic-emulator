@@ -3,6 +3,8 @@ package android
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -182,5 +184,89 @@ func TestPreparingErrorText(t *testing.T) {
 	}
 	if !errors.Is(e, api.ErrPreparing) {
 		t.Fatal("PreparingError must match ErrPreparing")
+	}
+}
+
+// delayedBoot decides after delay whether it needs a baseline (a retake is known only after a
+// failed snapshot load), then either prepares (until release) or finishes.
+func delayedBoot(delay time.Duration, need bool, release chan struct{}) func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+	return func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+		time.Sleep(delay)
+		if !need {
+			return api.Device{ID: id, State: "booted"}, nil
+		}
+		d.markNeeded()
+		select {
+		case <-release:
+			return api.Device{ID: id, State: "booted"}, nil
+		case <-ctx.Done():
+			return api.Device{}, ctx.Err()
+		}
+	}
+}
+
+func TestACallDuringTheDecisionFailsFastOnceItIsAPreparation(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	b := New()
+	b.bootHook = delayedBoot(200*time.Millisecond, true, release)
+	go b.Boot(context.Background(), testID, api.BootOptions{NoWait: true})
+	time.Sleep(20 * time.Millisecond) // the call arrives before the boot has decided
+	t0 := time.Now()
+	p := b.AwaitDecision(context.Background(), testID)
+	if p == nil {
+		t.Fatal("the call must learn that the device prepares a baseline")
+	}
+	if el := time.Since(t0); el > time.Second {
+		t.Fatalf("waited %v; it must return once the boot decided (~0.2 s)", el)
+	}
+}
+
+func TestACallDuringANormalBootWaitsForIt(t *testing.T) {
+	b := New()
+	b.bootHook = delayedBoot(150*time.Millisecond, false, nil)
+	go b.Boot(context.Background(), testID, api.BootOptions{NoWait: true})
+	time.Sleep(20 * time.Millisecond)
+	if p := b.AwaitDecision(context.Background(), testID); p != nil {
+		t.Fatalf("a boot from the baseline is no preparation: %+v", p)
+	}
+	if b.Preparing(testID) != nil {
+		t.Fatal("still preparing")
+	}
+}
+
+func TestAwaitDecisionWithoutABoot(t *testing.T) {
+	b := New()
+	t0 := time.Now()
+	if b.AwaitDecision(context.Background(), testID) != nil || time.Since(t0) > 100*time.Millisecond {
+		t.Fatal("no boot: no wait, no preparation")
+	}
+}
+
+func TestDevicesFlagsARunningDeviceWithoutABaseline(t *testing.T) {
+	t.Setenv("AGEMU_ANDROID_STANDBY", "0") // describe would ask the emulator about standby
+	t.Setenv("AGEMU_HOME", t.TempDir())
+	dir := t.TempDir()
+	a := avdInfo{Name: "agemu-test-nobase", Dir: dir, Config: map[string]string{}}
+	run := map[string]runningEmu{a.Name: {AVD: a.Name}}
+	b := New()
+	dev := b.describe(a, run)
+	if dev.State != "booted" || !dev.NoBaseline || !strings.Contains(dev.PrepareError, "call boot") {
+		t.Fatalf("running without a baseline: %+v", dev)
+	}
+	// With a baseline it is an ordinary booted device.
+	if err := os.MkdirAll(filepath.Join(dir, "snapshots", baselineSnapshot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "snapshots", baselineSnapshot, "snapshot.pb"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dev = b.describe(a, run)
+	if dev.NoBaseline || dev.PrepareError != "" {
+		t.Fatalf("with a baseline: %+v", dev)
+	}
+	// Not running: nothing to flag.
+	if dev := b.describe(avdInfo{Name: "agemu-test-off", Dir: t.TempDir(), Config: map[string]string{}}, nil); dev.NoBaseline {
+		t.Fatalf("powered off: %+v", dev)
 	}
 }

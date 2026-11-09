@@ -1,6 +1,8 @@
 package android
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -158,5 +160,88 @@ radio0:    2048      10    0    0    0     0          0         0       0       
 	b := guestSample{at: t0.Add(10 * time.Second), rx: 10 * 1024 * 1024}
 	if got := rxKBps(a, b); got != 1024 {
 		t.Fatalf("rate %v", got)
+	}
+}
+
+// fakeSamples serves guest samples: uptime advances 10 s and busy 0.5 s (5% of a vCPU) per
+// call, nothing received; calls listed in fail return an error.
+type fakeSamples struct {
+	calls int
+	fail  map[int]bool
+	start time.Time
+}
+
+func (f *fakeSamples) read(ctx context.Context, serial string) (guestSample, error) {
+	f.calls++
+	if f.fail[f.calls] {
+		return guestSample{}, errors.New("adb: device offline")
+	}
+	n := time.Duration(f.calls)
+	return guestSample{at: f.start.Add(n * 10 * time.Second), uptime: 500*time.Second + n*10*time.Second, busy: int64(f.calls) * 50}, nil
+}
+
+func withFakeSamples(t *testing.T, f *fakeSamples) {
+	oldRead, oldWin, oldCap := readGuestSampleFn, quietWindow, quietExtraLimit
+	readGuestSampleFn, quietWindow = f.read, time.Millisecond
+	t.Cleanup(func() { readGuestSampleFn, quietWindow, quietExtraLimit = oldRead, oldWin, oldCap })
+	t.Setenv("AGEMU_ANDROID_BASELINE_UPTIME_S", "420")
+}
+
+func TestFailedSamplesDoNotEndTheWait(t *testing.T) {
+	f := &fakeSamples{fail: map[int]bool{1: true, 2: true, 3: true}, start: time.Now()}
+	withFakeSamples(t, f)
+	d := &device{name: "t"}
+	if err := d.waitGuestSettled(context.Background(), "s", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// 3 failures, then one sample to start from, then a quiet minute of 6 samples.
+	if f.calls != 3+1+quietWindows {
+		t.Fatalf("calls %d, want %d: a failed sample must not end the wait", f.calls, 3+1+quietWindows)
+	}
+}
+
+func TestAFailedSampleRestartsTheQuietMinute(t *testing.T) {
+	f := &fakeSamples{fail: map[int]bool{5: true}, start: time.Now()}
+	withFakeSamples(t, f)
+	d := &device{name: "t"}
+	if err := d.waitGuestSettled(context.Background(), "s", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls != 5+1+quietWindows {
+		t.Fatalf("calls %d, want %d", f.calls, 5+1+quietWindows)
+	}
+}
+
+func TestSamplesThatAlwaysFailEndAtTheDeadline(t *testing.T) {
+	f := &fakeSamples{fail: map[int]bool{}, start: time.Now()}
+	for i := 1; i < 100000; i++ {
+		f.fail[i] = true
+	}
+	withFakeSamples(t, f)
+	quietExtraLimit = -419*time.Second - time.Minute + 200*time.Millisecond // deadline 0.2 s from now
+	d := &device{name: "t"}
+	t0 := time.Now()
+	if err := d.waitGuestSettled(context.Background(), "s", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(t0); el > 3*time.Second {
+		t.Fatalf("the wait ran %v past its deadline", el)
+	}
+	if f.calls < 3 {
+		t.Fatalf("calls %d: it must keep trying until the deadline", f.calls)
+	}
+}
+
+func TestSettleWaitEndsOnCancel(t *testing.T) {
+	f := &fakeSamples{fail: map[int]bool{}, start: time.Now()}
+	for i := 1; i < 100000; i++ {
+		f.fail[i] = true
+	}
+	withFakeSamples(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	d := &device{name: "t"}
+	if err := d.waitGuestSettled(ctx, "s", time.Now()); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("got %v, want the cancellation", err)
 	}
 }

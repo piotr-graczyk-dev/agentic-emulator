@@ -130,8 +130,14 @@ type Parker interface {
 // not touch the device. While a device is preparing, the daemon answers every call on it but
 // boot, shutdown, logs and crashes at once with an *api.PreparingError; boot returns the current
 // state (or waits, without NoWait), and shutdown cancels the preparation.
+//
+// AwaitDecision is Preparing for a call that arrives while a boot is still deciding whether it
+// prepares a baseline (a retake is known only after a failed snapshot load): it waits, bounded,
+// until the boot has decided or finished, so the call fails fast instead of queueing behind a
+// preparation of several minutes.
 type Preparer interface {
 	Preparing(id string) *api.Preparing
+	AwaitDecision(ctx context.Context, id string) *api.Preparing
 }
 
 // FrameWaiter is implemented by backends that can block until the screen shows a new frame.

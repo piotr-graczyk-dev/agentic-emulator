@@ -30,6 +30,10 @@ func (p *prepBackend) Preparing(id string) *api.Preparing {
 	return &api.Preparing{Phase: "settling", ElapsedS: 75, MaxS: 840}
 }
 
+func (p *prepBackend) AwaitDecision(ctx context.Context, id string) *api.Preparing {
+	return p.Preparing(id)
+}
+
 func (p *prepBackend) List(ctx context.Context) ([]api.Device, error) {
 	st := "booted"
 	if p.preparing {

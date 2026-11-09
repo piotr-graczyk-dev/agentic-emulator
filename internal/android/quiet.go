@@ -7,7 +7,7 @@ package android
 // (saved about 50 s after boot), 54 with a retake saved at 49 s, 10-17 with a settled one. agemu
 // therefore waits, before it saves the baseline, until the guest has been up
 // AGEMU_ANDROID_BASELINE_UPTIME_S (default 420) and its last minute was quiet (CPU and network).
-// That makes a first boot (or a retake) take 7-8 minutes, at most about 15 (prepMax); the boot
+// That makes a first boot (or a retake) take 7-8 minutes, at most 20 (prepMax, a hard bound); the boot
 // goes on in the background meanwhile (prepare.go). Boots and resets from the baseline are
 // unchanged in speed. AGEMU_ANDROID_BASELINE_UPTIME_S=0 saves as soon as the baseline steps are
 // done (agemu before 2026-11-08).
@@ -21,14 +21,20 @@ import (
 	"time"
 )
 
+// Variables only so tests can shorten them.
+var (
+	quietWindow     = 10 * time.Second // one guest sample
+	quietExtraLimit = 5 * time.Minute  // past the uptime target, save even if never quiet
+	// readGuestSampleFn reads one sample (tests replace it).
+	readGuestSampleFn = readGuestSample
+)
+
 const (
-	quietWindow        = 10 * time.Second // one guest sample
 	quietWindows       = 6                // samples in the quiet minute
 	quietMeanPct       = 15.0             // mean over the minute, % of one vCPU; a settled guest reads 4-11%
 	quietPeakPct       = 30.0             // no sample above this (a job, an install, a dexopt)
 	quietRxKBps        = 50.0             // guest network receive rate; a Play Store download is ~1 MB/s
 	quietAfterHome     = 60 * time.Second // the freezer freezes and compacts cached apps by then
-	quietExtraLimit    = 5 * time.Minute  // past the uptime target, save even if never quiet
 	quietSampleTimeout = 15 * time.Second // one guest read (adb)
 )
 
@@ -208,50 +214,68 @@ func (d *device) waitGuestSettled(ctx context.Context, serial string, home time.
 	sample := func() (guestSample, error) {
 		sctx, cancel := context.WithTimeout(ctx, quietSampleTimeout)
 		defer cancel()
-		return readGuestSample(sctx, serial)
+		return readGuestSampleFn(sctx, serial)
 	}
-	prev, err := sample()
-	if err != nil {
-		if ctx.Err() != nil {
-			return d.settleCancelled(ctx, t0)
-		}
-		logf("%s: could not read the guest's CPU (%v); saving the baseline without waiting for it to settle", d.name, err)
-		return nil
-	}
-	// The wait cannot outlast the uptime cap by much, whatever the samples do.
-	deadline := t0.Add(target - prev.uptime + quietExtraLimit + time.Minute)
-	logf("%s: waiting until the guest has been up %v and is quiet (uptime now %v; at most until %v of uptime; AGEMU_ANDROID_BASELINE_UPTIME_S=0 skips this)", d.name, target, prev.uptime.Round(time.Second), target+quietExtraLimit)
+	// Until the first sample gives the uptime, the deadline assumes a guest that just booted.
+	deadline := t0.Add(target + quietExtraLimit + time.Minute)
+	var prev *guestSample
 	var win []quietSample
 	quiet, why := false, "no sample yet"
 	var last quietSample
+	failures, first, refined := 0, true, false
 	for {
-		ok, reason := settleDecision(prev.uptime, target, time.Since(home), quiet, why)
-		if ok {
-			logf("%s: guest settled after %v (uptime %v, last %.1f%% of a vCPU, %.1f KB/s received)", d.name, time.Since(t0).Round(time.Second), prev.uptime.Round(time.Second), last.busyPct, last.rxKBps)
+		if prev != nil {
+			ok, reason := settleDecision(prev.uptime, target, time.Since(home), quiet, why)
+			if ok {
+				logf("%s: guest settled after %v (uptime %v, last %.1f%% of a vCPU, %.1f KB/s received)", d.name, time.Since(t0).Round(time.Second), prev.uptime.Round(time.Second), last.busyPct, last.rxKBps)
+				return nil
+			}
+			if prev.uptime > target+quietExtraLimit {
+				logf("%s: guest not quiet %v past the uptime target (%s); saving the baseline anyway", d.name, quietExtraLimit, reason)
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			logf("%s: the wait for a quiet guest reached its deadline after %v (%s, %d failed samples); saving the baseline anyway", d.name, time.Since(t0).Round(time.Second), why, failures)
 			return nil
 		}
-		if prev.uptime > target+quietExtraLimit || time.Now().After(deadline) {
-			logf("%s: guest not quiet %v past the uptime target (%s); saving the baseline anyway", d.name, quietExtraLimit, reason)
-			return nil
+		if !first {
+			if err := sleepCtx(ctx, quietWindow); err != nil {
+				return d.settleCancelled(ctx, t0)
+			}
 		}
-		if err := sleepCtx(ctx, quietWindow); err != nil {
-			return d.settleCancelled(ctx, t0)
-		}
+		first = false
 		cur, err := sample()
 		if err != nil {
 			if ctx.Err() != nil {
 				return d.settleCancelled(ctx, t0)
 			}
-			logf("%s: could not read the guest's CPU (%v); saving the baseline now", d.name, err)
-			return nil
+			// A failed or slow read says nothing about the guest being quiet: the quiet minute
+			// starts over, and the wait goes on until its deadline.
+			failures++
+			if failures == 1 || failures%6 == 0 {
+				logf("%s: could not read the guest's CPU (%v; %d failed samples so far); counting it as not quiet", d.name, err, failures)
+			}
+			prev, win, quiet, why = nil, nil, false, "a guest sample failed"
+			continue
 		}
-		last = quietSample{busyPct: busyPct(prev, cur), rxKBps: rxKBps(prev, cur)}
+		if prev == nil {
+			if !refined {
+				refined = true
+				// The wait cannot outlast the uptime cap by much, whatever the samples do.
+				deadline = t0.Add(target - cur.uptime + quietExtraLimit + time.Minute)
+				logf("%s: waiting until the guest has been up %v and is quiet (uptime now %v; at most until %v of uptime; AGEMU_ANDROID_BASELINE_UPTIME_S=0 skips this)", d.name, target, cur.uptime.Round(time.Second), target+quietExtraLimit)
+			}
+			prev = &cur
+			continue
+		}
+		last = quietSample{busyPct: busyPct(*prev, cur), rxKBps: rxKBps(*prev, cur)}
 		win = append(win, last)
 		if len(win) > quietWindows {
 			win = win[len(win)-quietWindows:]
 		}
 		quiet, why = quietVerdict(win)
-		prev = cur
+		prev = &cur
 	}
 }
 

@@ -38,7 +38,7 @@ Device commands (-d <device> optional when exactly one device is booted):
   create --platform android|ios --name N [--profile P]
   boot <device> [--cold] [--no-wait]        boot (warm snapshot by default). A new Android device's
                                             first boot (or a retake) prepares its baseline snapshot
-                                            once, up to ~15 min: boot waits and prints progress on
+                                            once, usually 7-8 min, at most 20: boot waits, prints progress on
                                             stderr; --no-wait returns at once with state "preparing"
   shutdown | reset                          stop / restore clean baseline
   park | resume                             stop a booted device in place (no CPU, memory the
@@ -169,7 +169,7 @@ func waitPrepared(cl *client.Client, p daemon.Params, raw json.RawMessage, progr
 			report(cur.Preparing)
 			continue
 		}
-		if cur.PrepareError != "" {
+		if cur.PrepareError != "" || cur.NoBaseline {
 			return nil, fmt.Errorf("preparing %s failed: %s", id, cur.PrepareError)
 		}
 		q := p

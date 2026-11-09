@@ -288,7 +288,7 @@ claude mcp add agemu -- /path/to/bin/agemu mcp
 and `logs`, `crashes`.
 
 The server handles tool calls concurrently, so `devices` answers while another call runs. A new
-Android device's first `boot` returns state `preparing` at once: the baseline takes 7.5-15 minutes,
+Android device's first `boot` returns state `preparing` at once: the baseline takes 7-8 minutes, at most 20,
 once. The agent then polls `devices` until the device is `booted`, so no tool call outlasts a 60 s
 client timeout.
 
@@ -444,8 +444,8 @@ launch rows are
   Resets, boots and the agent step were not slower. There is no memory saving: `phys_footprint` read
   0.9-1.1 GB lower, but the emulator's region footprint was the same on both (3.0-3.2 GB).
 
-  The cost is the first boot of a new device (or a retake): 7.5 minutes measured (436-575 s), at
-  most ~15 minutes. It does not block clients:
+  The cost is the first boot of a new device (or a retake): 430-455 s measured,
+  never more than 20 minutes (a hard bound: the boot then fails and the next one prepares again). It does not block clients:
   - the device shows state `preparing` with its phase;
   - MCP `boot` and `agemu boot --no-wait` return at once;
   - `agemu boot` waits with progress on stderr;
@@ -500,7 +500,7 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: keep the Google apps (applies when a baseline is taken). |
 | `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |
-| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; a first boot then takes 7.5-15 min, during which the device is `preparing`; `0`: save at once (applies when a baseline is taken). |
+| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; a first boot then takes 7-8 min (at most 20), during which the device is `preparing`; `0`: save at once (applies when a baseline is taken). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Seconds without calls before the frame stream of a changing screen stops; `0`: never. |
 | `AGEMU_ANDROID_ANIMATIONS` | normal | `0`: system animations off. |
 | `AGEMU_IOS_ANIMATIONS` | normal | `0`: UIKit and SwiftUI animations ×0.05 (or a factor from 0.05 to 1). |

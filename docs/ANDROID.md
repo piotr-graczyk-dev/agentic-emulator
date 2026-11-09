@@ -26,7 +26,7 @@ agemu daemon (Go, internal/android)
 make android-build                                              # bin/android/{agemu,agemud,agemu-bench}
 export AGEMU_HOME=$HOME/.agemu-dev-android                      # optional, default ~/.agemu
 bin/android/agemu create --platform android --name pixel        # -> android:agemu-pixel (no download)
-bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (7-8 min, at most ~15, once; progress on stderr)
+bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (7-8 min, at most 20, once; progress on stderr)
 bin/android/agemu launch com.android.settings
 bin/android/agemu ui                                            # outline; --json for the full tree
 bin/android/agemu tap --text "Network & internet"
@@ -248,7 +248,7 @@ Any TCP failure falls back to adb.
 - **Baseline.** On the first boot agemu waits 20 s for the device to settle, then:
   - turns stylus handwriting off (see Caveats), turns the lean apps off and warms up the keyboard;
   - clears recent tasks and goes home;
-  - waits until the guest has been up 7 minutes, has shown the home screen for a minute and its last minute was quiet (mean CPU below 15% of a vCPU, no 10 s sample at 30% or more, below 50 KB/s received; at most 5 minutes past the 7), then for the broadcast queue to drain (see Quiet baseline). A first boot therefore takes 7-8 minutes (430-455 s measured), at most about 15, once; meanwhile the device is `preparing` and other calls on it fail at once;
+  - waits until the guest has been up 7 minutes, has shown the home screen for a minute and its last minute was quiet (mean CPU below 15% of a vCPU, no 10 s sample at 30% or more, below 50 KB/s received; at most 5 minutes past the 7), then for the broadcast queue to drain (see Quiet baseline). A first boot therefore takes 7-8 minutes (430-455 s measured), never more than 20 (a hard bound), once; meanwhile the device is `preparing` and other calls on it fail at once;
   - deletes its console redirections and closes its agent connection (see Agent transport);
   - saves the one snapshot it keeps, `agemu-baseline`, with the agent running inside it. Every boot or reset from it is agent-ready at once.
   - If agemu is upgraded and the snapshot holds an older agent, it is retaken once.
@@ -710,9 +710,18 @@ All five runs with the current criterion settled at 7 min 2-9 s of guest uptime,
 sample. The guest-side sampler stretched the previous criterion by 172 s; it no longer delays the
 save.
 
-The worst case is bounded: `waitGuestSettled` saves at the latest at 12 minutes of guest uptime; with
-the emulator start, the steps before the wait, the broadcast wait and the save, `devices` shows at
-most ~15 minutes (`maxS` 870 s).
+**Bounds.**
+- **Settle wait:** `waitGuestSettled` saves at the latest at 12 minutes of guest uptime, a minute or
+  two more with slow samples.
+- **Guest calls:** every one in the baseline steps has a deadline (30 s each; 2 minutes to restart
+  the agent; 60 s for the broadcast queue).
+- **The whole boot, before the save,** runs under a 17-minute limit; the save then has 3 minutes.
+- **20 minutes (`maxS` 1200 s) is a hard bound.** A boot that reaches it fails, no baseline is saved,
+  and the next boot prepares again.
+- **Typical and worst case:** first boots took 430-455 s; a guest that never goes quiet would take
+  about 13-14 minutes.
+- **Samples:** a failed or slow guest sample counts as "not quiet" and the quiet minute starts over;
+  it no longer ends the wait.
 
 A boot that takes a baseline does not block clients:
 - **State.** The device shows state `preparing` in `devices`, with the phase (starting the emulator,
@@ -720,15 +729,23 @@ A boot that takes a baseline does not block clients:
 - **`boot` with `noWait`** (MCP, and the CLI underneath) returns as soon as the boot turns out to need
   a baseline, or after 40 s; a boot from an existing baseline still returns `booted` in seconds.
 - **Other calls** on a preparing device fail at once with code `preparing` (CLI exit status 5); the
-  message names the phase and the time so far.
+  message names the phase and the time so far. A call that arrives while a boot is still finding out
+  whether it must take a baseline (a retake is known only after a failed snapshot load) waits for
+  that, at most 40 s, then fails the same way or goes ahead.
 - **A second `boot`** returns the state, or without `noWait` waits for the end.
-- **`shutdown`** cancels the preparation (a save in progress finishes first) and powers off.
+- **`shutdown`** cancels the preparation in every phase and powers off; an emulator that was just
+  starting is stopped too. A save in progress finishes first.
 - **CLI.** `agemu boot` waits by polling `devices` and prints the phase on stderr; `--no-wait`
   returns at once.
 - **MCP.** The server handles tool calls concurrently, so `devices` answers while another call runs.
+  Calls on the same device run in the order they arrived. A call without a device argument (the only
+  booted device) waits for earlier device calls, and later ones wait for it. Naming one device in two
+  ways ("android:x" and "x") counts as the same device.
 - **A daemon stopped or restarted mid-preparation** leaves the emulator running without a baseline.
-  The next `boot` powers it off and prepares again; `reset` says so instead of failing with an
-  emulator error.
+  `devices` then shows it `booted` with `noBaseline: true` and a `prepareError` saying to call
+  `boot`. The next `boot` powers it off and prepares again, and `reset` says so instead of failing
+  with an emulator error. An agent polling `devices` should call `boot` again when it sees
+  `noBaseline`.
 
 **Old baselines.** Guest elapsed realtime does not advance across a restore, so no JobScheduler job
 becomes due because the baseline is old: right after a restore all 109 jobs had elapsed-relative

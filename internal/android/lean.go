@@ -46,7 +46,12 @@ func leanOn() bool {
 func (d *device) disableLeanPackages(ctx context.Context, serial string) {
 	n := 0
 	for _, p := range leanPackages {
-		out, err := adbShellOK(ctx, serial, "pm disable-user --user 0 "+p)
+		c, cancel := context.WithTimeout(ctx, stepTimeout)
+		out, err := adbShellOK(c, serial, "pm disable-user --user 0 "+p)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil && strings.Contains(out, "disabled-user") {
 			n++
 		}
