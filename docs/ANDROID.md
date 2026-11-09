@@ -734,7 +734,18 @@ A boot that takes a baseline does not block clients:
   that, at most 40 s, then fails the same way or goes ahead.
 - **A second `boot`** returns the state, or without `noWait` waits for the end.
 - **`shutdown`** cancels the preparation in every phase and powers off; an emulator that was just
-  starting is stopped too. A save in progress finishes first.
+  starting is stopped too. Measured: `boot --no-wait`, then `shutdown` 0, 0.5, 2 and 10 s later
+  (twice each) returned in 0.08-4.3 s with no emulator left. A save in progress finishes first: a
+  `shutdown` sent during `saving` returned after 6.4 s, and the saved baseline loaded at the next
+  boot (5.1 s).
+- **A preparation that fails by itself** (the guest never finishes booting, the 20-minute bound)
+  powers the emulator off. `devices` then shows the device shut down with the reason in
+  `prepareError`.
+- **Repeated interruptions of a new AVD's first boot.** One of three new AVDs no longer booted
+  (adb stayed offline) after its very first boot was interrupted eight times in a row. A single
+  interruption, while the emulator was starting or 12 s into the cold boot, did no harm (2 of 2).
+  Which interruption damaged it is not known. If a new AVD never finishes booting, delete it and
+  create it again.
 - **CLI.** `agemu boot` waits by polling `devices` and prints the phase on stderr; `--no-wait`
   returns at once.
 - **MCP.** The server handles tool calls concurrently, so `devices` answers while another call runs.

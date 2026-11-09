@@ -11,6 +11,7 @@ package android
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -212,6 +213,20 @@ func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.Bo
 	d.mu.Unlock()
 	if err != nil && p.visible.Load() {
 		logf("%s: preparing the baseline failed after %v: %v", d.name, time.Since(p.start).Round(time.Second), err)
+		// A preparation that failed by itself (the guest never booted, a deadline) leaves an
+		// emulator without a baseline that may be wedged: power it off, so `devices` shows the
+		// device shut down with the error and the next boot starts clean. A cancelled one is
+		// left to whoever cancelled it (shutdown powers off; a stopping daemon leaves it to the
+		// next daemon's boot).
+		if b.bootHook == nil && !errors.Is(err, context.Canceled) {
+			d.life.Lock()
+			sctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			if serr := d.shutdown(sctx); serr != nil {
+				logf("%s: powering off after the failed preparation: %v", d.name, serr)
+			}
+			cancel()
+			d.life.Unlock()
+		}
 	}
 	close(p.done)
 }
