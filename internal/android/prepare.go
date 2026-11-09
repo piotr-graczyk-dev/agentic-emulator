@@ -236,22 +236,14 @@ func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.Bo
 		}
 		err = nil
 	}
-	d.mu.Lock()
-	p.dev, p.err = dev, err
-	if d.prep == p {
-		d.prep = nil
-	}
-	if err != nil && p.visible.Load() {
-		d.prepErr = err.Error()
-	}
-	d.mu.Unlock()
 	if err != nil && p.visible.Load() {
 		logf("%s: preparing the baseline failed after %v: %v", d.name, time.Since(p.start).Round(time.Second), err)
 		// A preparation that failed by itself (the guest never booted, a deadline) leaves an
 		// emulator without a baseline that may be wedged: power it off, so `devices` shows the
 		// device shut down with the error and the next boot starts clean. A cancelled one is
 		// left to whoever cancelled it (shutdown powers off; a stopping daemon leaves it to the
-		// next daemon's boot).
+		// next daemon's boot). The preparation stays registered until then: a boot started
+		// meanwhile joins this one instead of running first and being powered off by it.
 		if b.bootHook == nil && !errors.Is(err, context.Canceled) {
 			d.life.Lock()
 			sctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -262,6 +254,21 @@ func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.Bo
 			d.life.Unlock()
 		}
 	}
+	d.mu.Lock()
+	if d.prep == p {
+		d.prep = nil
+	}
+	if err != nil && p.visible.Load() {
+		d.prepErr = err.Error()
+	}
+	d.mu.Unlock()
+	if err == nil && dev.State == api.StatePreparing {
+		// bootSync read the device while this preparation was still registered: read it again.
+		if cur, derr := b.device(id); derr == nil {
+			dev = cur
+		}
+	}
+	p.dev, p.err = dev, err // published by close(p.done)
 	close(p.done)
 }
 

@@ -93,6 +93,21 @@ func recordBooted(a avdInfo) (bool, error) {
 	return true, nil
 }
 
+// recordBootedIfMarked records a completed boot of the AVD named name if it still has the
+// first-boot marker and no record: for evidence the guest has booted that agemu sees outside
+// bootSync (its agent answered).
+func recordBootedIfMarked(name string) {
+	a, err := loadAVD(name)
+	if err != nil || !a.hasFirstBootMarker() || a.hasBootedRecord() {
+		return
+	}
+	if _, err := recordBooted(a); err != nil {
+		logf("%s: could not record the completed boot: %v", name, err)
+		return
+	}
+	logf("%s: the AVD's first boot completed (its agent answered; %s removed)", name, firstBootMarker)
+}
+
 // writeFileAtomic writes data to a temporary file in the same folder and renames it into place.
 func writeFileAtomic(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")

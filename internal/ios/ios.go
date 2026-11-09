@@ -87,6 +87,7 @@ type Backend struct {
 	// cut-off).
 	appOps   map[string]int
 	appWork  map[string]time.Time
+	appGates map[string]*sync.RWMutex // appGate
 	parkScan sync.Once
 	// parkLocks serializes, per simulator, a park with a shutdown (park.go, parkLock).
 	parkLocks map[string]*sync.Mutex
@@ -1195,12 +1196,17 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 // work: the call can start app work (install, launch, open, push); the first one of a boot sets
 // the idle stop's cut-off (appWorkSince).
 func (b *Backend) appOp(udid string, work bool) func() {
+	// An idle pass that is ending daemons holds the gate (idle.go, exclusive): the call starts
+	// once those ends are done, and a pass sees it as busy before any later end.
+	g := b.appGate(udid)
+	g.RLock()
 	b.mu.Lock()
 	b.appOps[udid]++
 	if _, ok := b.appWork[udid]; work && !ok {
 		b.appWork[udid] = time.Now()
 	}
 	b.mu.Unlock()
+	g.RUnlock()
 	return func() {
 		b.mu.Lock()
 		if b.appOps[udid]--; b.appOps[udid] <= 0 {
@@ -1208,6 +1214,22 @@ func (b *Backend) appOp(udid string, work bool) func() {
 		}
 		b.mu.Unlock()
 	}
+}
+
+// appGate orders the registration of app calls on udid (appOp, shared) with an idle pass's final
+// busy check and SIGKILLs (exclusive).
+func (b *Backend) appGate(udid string) *sync.RWMutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appGates == nil {
+		b.appGates = map[string]*sync.RWMutex{}
+	}
+	g, ok := b.appGates[udid]
+	if !ok {
+		g = &sync.RWMutex{}
+		b.appGates[udid] = g
+	}
+	return g
 }
 
 // appOpBusy reports whether an agemu call that acts on apps is in flight on udid.

@@ -141,3 +141,32 @@ func TestFirstBootRepairEnv(t *testing.T) {
 		t.Fatal("0 turns it off")
 	}
 }
+
+// Evidence of a booted guest that agemu sees outside its boot (the agent answered, for example on
+// a device whose guest finished booting while no daemon watched it) records the completed boot,
+// so a later cold boot or power-off never wipes it.
+func TestAnAnsweringAgentRecordsTheFirstBoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ANDROID_AVD_HOME", home)
+	dir := filepath.Join(home, "agemu-test-fb.avd")
+	touch(t, filepath.Join(dir, "config.ini"))
+	if err := os.WriteFile(filepath.Join(home, "agemu-test-fb.ini"), []byte("path="+dir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := loadAVD("agemu-test-fb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := markFirstBoot(a); !m || err != nil {
+		t.Fatalf("setup: marked %v %v", m, err)
+	}
+	recordBootedIfMarked("agemu-test-fb")
+	if !a.hasBootedRecord() || a.hasFirstBootMarker() || needsWipe(a) {
+		t.Fatal("after the agent answered: record, no marker, never a wipe")
+	}
+	recordBootedIfMarked("agemu-test-fb") // again, and for an unknown AVD: no effect, no error
+	recordBootedIfMarked("agemu-no-such-avd")
+	if !a.hasBootedRecord() || needsWipe(a) {
+		t.Fatal("record lost")
+	}
+}

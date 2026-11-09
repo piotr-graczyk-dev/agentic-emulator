@@ -756,7 +756,9 @@ A boot that takes a baseline does not block clients:
   - **How agemu applies it:** before the first launch of an AVD that no emulator has ever started (no
     `userdata-qemu.img.qcow2`, no baseline, no completed boot), agemu writes
     `agemu-first-boot-incomplete` into the AVD folder. When a boot completes, it writes
-    `agemu-booted` first and then removes the marker. A boot that finds the marker, no `agemu-booted`
+    `agemu-booted` first and then removes the marker. It does the same when the device's agent first
+    answers (a guest that finished booting while no daemon watched it), and before every power-off of
+    a marked AVD it asks the guest over adb whether it has booted. A boot that finds the marker, no `agemu-booted`
     and no baseline adds `-wipe-data`, logs it, and shows it in `devices` as the preparation's
     `note`.
   - **Nothing can be lost:** that guest never finished booting, so nothing was ever installed in it.
@@ -770,8 +772,11 @@ A boot that takes a baseline does not block clients:
   booted device) waits for earlier device calls, and later ones wait for it: queued behind a long
   call on one device (a `wait_for` with a long timeout), it holds back calls on other devices
   until it has run. Agents that drive several devices should pass `device` on every call.
-  `notifications/cancelled` is ignored: a cancelled call still runs. Naming one device in two
-  ways ("android:x" and "x") counts as the same device.
+  `notifications/cancelled` is ignored: a cancelled call still runs. A device has its own queue
+  only when the server can tell which device it is: `android:<avd>` (any case) or a simulator's
+  UDID (`ios:<UDID>` or bare, any case). Any other reference (a simulator's name, an AVD name
+  without `android:`) is ordered like a call without a device argument, because other calls may
+  name the same device another way.
 - **A daemon stopped or restarted mid-preparation** leaves the emulator running without a baseline.
   `devices` then shows it `booted` with `noBaseline: true` and a `prepareError` saying to call
   `boot`. The next `boot` powers it off and prepares again, and `reset` says so instead of failing

@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -277,11 +278,26 @@ func orderKey(req rpcReq) (key string, ok bool) {
 	if json.Unmarshal(req.Params, &p) != nil || noDeviceTools[p.Name] {
 		return "", false
 	}
-	dev := strings.TrimSpace(p.Arguments.Device)
-	for _, pre := range []string{string(api.Android) + ":", string(api.IOS) + ":"} {
-		dev = strings.TrimPrefix(dev, pre)
+	return deviceKey(p.Arguments.Device), true
+}
+
+var udidRE = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+// deviceKey is the queue of a device argument. Every spelling of one device must land in one
+// queue, so only references whose device is known here get their own: a simulator's UDID (any
+// case) and an AVD name (`android:<name>`, any case; two AVDs differing only in case share a
+// queue, which only orders them). Anything else (a simulator's name, which other calls may give
+// as its UDID; a reference without a platform; no device) is "", the implicit device, ordered
+// against every call.
+func deviceKey(dev string) string {
+	dev = strings.TrimSpace(dev)
+	if name, ok := strings.CutPrefix(dev, string(api.Android)+":"); ok && name != "" {
+		return string(api.Android) + ":" + strings.ToLower(name)
 	}
-	return dev, true
+	if u := strings.TrimPrefix(dev, string(api.IOS)+":"); udidRE.MatchString(u) {
+		return string(api.IOS) + ":" + strings.ToUpper(u)
+	}
+	return ""
 }
 
 // enter registers a call on key (in arrival order) and returns what it must wait for and the

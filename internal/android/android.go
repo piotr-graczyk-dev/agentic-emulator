@@ -330,6 +330,9 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		d.mu.Lock()
 		d.agentOK = true
 		d.mu.Unlock()
+		// The agent runs only in a guest that has finished booting: from now on calls can put
+		// apps and data in it, so its first boot counts as completed (firstboot.go).
+		recordBootedIfMarked(d.name)
 	}
 	// Every operation goes through here before it sends input: reopen a frame stream stopped
 	// after idle now, so the frames of that input are seen.
@@ -998,7 +1001,7 @@ func killProcGroup(pid int) {
 }
 
 // recordIfBooted records a completed boot of a running emulator whose guest has booted (asked
-// over adb, bounded), before agemu powers it off.
+// over adb, bounded, also when ctx is already cancelled), before agemu powers it off.
 func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 	d.mu.Lock()
 	serial := d.run.serial()
@@ -1006,7 +1009,7 @@ func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
 	if r, ok := findRunning(d.name); ok {
 		serial = r.serial()
 	}
-	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if out, err := adbShellOK(c, serial, "getprop sys.boot_completed"); err == nil && strings.TrimSpace(out) == "1" {
 		if _, err := recordBooted(a); err != nil {
@@ -1398,6 +1401,12 @@ func (d *device) shutdown(ctx context.Context) error {
 	if !ok {
 		d.drop()
 		return nil
+	}
+	if a, err := loadAVD(d.name); err == nil && a.hasFirstBootMarker() && !a.hasBootedRecord() {
+		// Every power-off of an AVD whose first boot is not yet recorded as completed asks the
+		// guest first: one that finished booting meanwhile (for example while no daemon watched
+		// it) holds data and must never be wiped at its next boot (firstboot.go).
+		d.recordIfBooted(ctx, a)
 	}
 	e, _, err := d.connRaw(ctx)
 	if err == nil {

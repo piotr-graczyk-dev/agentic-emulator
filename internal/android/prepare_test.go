@@ -326,3 +326,34 @@ func TestANoteIsShownWhilePreparing(t *testing.T) {
 		t.Fatalf("Preparing = %+v", p)
 	}
 }
+
+// A blocking boot that prepared a baseline returns the device as it is after the preparation,
+// not the `preparing` state bootSync read at its end while the preparation was still registered.
+func TestABlockingBootReturnsTheStateAfterThePreparation(t *testing.T) {
+	t.Setenv("AGEMU_ANDROID_STANDBY", "0")
+	t.Setenv("AGEMU_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("ANDROID_AVD_HOME", home)
+	dir := filepath.Join(home, "agemu-test-prep.avd")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.ini"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "agemu-test-prep.ini"), []byte("path="+dir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := New()
+	b.bootHook = func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
+		d.markNeeded()
+		return b.device(id) // as bootSync ends
+	}
+	dev, err := b.Boot(context.Background(), testID, api.BootOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dev.State == api.StatePreparing || dev.Preparing != nil {
+		t.Fatalf("a finished blocking boot returned %+v", dev)
+	}
+}

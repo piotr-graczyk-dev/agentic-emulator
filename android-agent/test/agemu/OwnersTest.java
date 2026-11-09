@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Host-side tests of Owners (plain Java, no Android classes). Run by
@@ -182,11 +183,21 @@ public final class OwnersTest {
     /** Counts the checks and says gone from the given check on (0: never). */
     static final class Checks implements Owners.Check {
         final int goneAt;
-        int n;
+        final CountDownLatch counted; // counted down at each check, or null
+        volatile int n;
 
-        Checks(int goneAt) { this.goneAt = goneAt; }
+        Checks(int goneAt) { this(goneAt, null); }
 
-        public boolean gone() { return ++n == goneAt || (goneAt > 0 && n > goneAt); }
+        Checks(int goneAt, CountDownLatch counted) {
+            this.goneAt = goneAt;
+            this.counted = counted;
+        }
+
+        public boolean gone() {
+            int k = ++n;
+            if (counted != null) counted.countDown();
+            return k == goneAt || (goneAt > 0 && k > goneAt);
+        }
     }
 
     static void testAwait() {
@@ -220,12 +231,14 @@ public final class OwnersTest {
             check(r == null && c.n == 3, "a stuck read: " + r + " after " + c.n + " checks");
             check(ms >= 55 && ms < 2000, "a stuck read gone at the third check took " + ms + " ms");
 
-            // A slow read of a live app (never gone) is waited for: its answer comes back.
-            c = new Checks(0);
+            // A slow read of a live app (never gone) is waited for: its answer comes back. It
+            // answers after the third check rather than after a fixed time, so a loaded host (CI
+            // runs the test packages in parallel) cannot make it answer before three checks.
+            final CountDownLatch threeChecks = new CountDownLatch(3);
+            c = new Checks(0, threeChecks);
             r = Owners.await(ex.submit(new Callable<String>() {
                 public String call() throws Exception {
-                    Thread.sleep(120);
-                    return "slow";
+                    return threeChecks.await(10, TimeUnit.SECONDS) ? "slow" : "no checks in 10 s";
                 }
             }), 20, c);
             check("slow".equals(r) && c.n >= 3, "a slow live read: " + r + " after " + c.n + " checks");

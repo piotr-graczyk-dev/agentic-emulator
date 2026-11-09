@@ -583,3 +583,45 @@ func TestDeviceIdleHeldOnceAfterAPark(t *testing.T) {
 		t.Fatal("held again with no new park")
 	}
 }
+
+// An app call that starts while a pass is ending daemons waits for the ends: no SIGKILL can follow
+// the start of app work, and a call registered before the pass holds the device is seen by its
+// held check.
+func TestAppCallsWaitForAPassEnding(t *testing.T) {
+	const udid = "11111111-2222-3333-4444-777777777777"
+	b := &Backend{parked: map[string]bool{}, parking: map[string]bool{}, appOps: map[string]int{}, appWork: map[string]time.Time{}}
+	e := newDeviceIdle(b, simDevice{UDID: udid, Name: "agemu-test"}, 0)
+	release, ok := e.exclusive()
+	if !ok {
+		t.Fatal("exclusive refused on an idle device")
+	}
+	started := make(chan func())
+	go func() { started <- b.appOp(udid, true) }()
+	select {
+	case <-started:
+		t.Fatal("an app call registered while the pass held the device")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if e.held() {
+		t.Fatal("the waiting app call made the device busy before the ends were done")
+	}
+	release()
+	var done func()
+	select {
+	case done = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the app call did not start after the pass released the device")
+	}
+	if !e.held() {
+		t.Fatal("an app call in flight must hold the passes")
+	}
+	done()
+	// Registered before the pass takes the device: the pass sees it under the gate.
+	done = b.appOp(udid, false)
+	r, ok := e.exclusive()
+	if !ok || !e.held() {
+		t.Fatalf("exclusive %v, held %v: an app call in flight must hold the ends", ok, e.held())
+	}
+	r()
+	done()
+}

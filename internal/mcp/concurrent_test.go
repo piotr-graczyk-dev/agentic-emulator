@@ -197,3 +197,28 @@ func TestACallIsResentAfterTheDaemonRestarted(t *testing.T) {
 		t.Fatalf("dials %d, want 2 (the broken connection, then a new one)", dials)
 	}
 }
+
+// Every spelling of one device lands in one queue; a reference whose device is not known here
+// (a simulator's name, no platform) is ordered against everything.
+func TestDeviceKeySpellings(t *testing.T) {
+	const u = "ED6C55BD-83FB-49B9-93A2-54BA0AD521DD"
+	same := []string{"ios:" + u, "ios:" + strings.ToLower(u), u, " ios:" + u + " "}
+	for _, s := range same {
+		if k := deviceKey(s); k != "ios:"+u {
+			t.Errorf("deviceKey(%q) = %q, want ios:%s", s, k, u)
+		}
+	}
+	for _, s := range []string{"android:agemu-lab", "android:Agemu-Lab"} {
+		if k := deviceKey(s); k != "android:agemu-lab" {
+			t.Errorf("deviceKey(%q) = %q", s, k)
+		}
+	}
+	for _, s := range []string{"", "ios:agemu-iphone-17-pro", "agemu-iphone-17-pro", "agemu-lab", "android:"} {
+		if k := deviceKey(s); k != "" {
+			t.Errorf("deviceKey(%q) = %q, want the implicit device (a barrier)", s, k)
+		}
+	}
+	if deviceKey("android:agemu-a") == deviceKey("android:agemu-b") {
+		t.Error("two AVDs share a queue")
+	}
+}

@@ -356,13 +356,21 @@ func (e *deviceIdle) signal(pid int, sig syscall.Signal) error { return syscall.
 
 // exclusive takes the simulator's park lock (park.go, parkLock) without waiting: Park takes it
 // before it marks the device parked, so while a pass holds it no park (an agent's or the
-// daemon's auto-park) can begin, and a pass never waits behind a park or a shutdown.
+// daemon's auto-park) can begin, and a pass never waits behind a park or a shutdown. It then
+// takes the app gate (ios.go, appGate), which waits only for app calls being registered: an app
+// call that starts during the ends waits for them, and one that started before is seen by the
+// held check that follows.
 func (e *deviceIdle) exclusive() (func(), bool) {
 	l := e.b.parkLock(e.d.UDID)
 	if !l.TryLock() {
 		return nil, false
 	}
-	return l.Unlock, true
+	g := e.b.appGate(e.d.UDID)
+	g.Lock()
+	return func() {
+		g.Unlock()
+		l.Unlock()
+	}, true
 }
 
 // appBundlePath marks the executables of installed apps (and their extensions) in a simulator.
