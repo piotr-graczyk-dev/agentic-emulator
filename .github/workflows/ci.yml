@@ -29,6 +29,7 @@ jobs:
         run: |
           sh -n install.sh
           scripts/package.sh v0.0.0-ci dist
+          npm publish ./dist/agentic-emulator-*.tgz --dry-run --access public --tag next   # as release.yml does
       - name: smoke test the CLI and MCP server
         run: |
           export AGEMU_HOME="$(mktemp -d /tmp/agemu-ci.XXXX)"
