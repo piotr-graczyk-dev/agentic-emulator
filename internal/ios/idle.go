@@ -293,14 +293,30 @@ func idlePasses(env idleEnv, name string) map[string]int {
 // stopIdleDaemons runs idlePasses after a cold boot. A newer cold boot of the device (gen) or the
 // backend closing ends it.
 func (b *Backend) stopIdleDaemons(d simDevice, gen int) {
-	idlePasses(&deviceIdle{deviceBackground{b: b, d: d, gen: gen, ready: time.Now()}}, d.Name)
+	idlePasses(newDeviceIdle(b, d, gen), d.Name)
+}
+
+func newDeviceIdle(b *Backend, d simDevice, gen int) *deviceIdle {
+	return &deviceIdle{deviceBackground: deviceBackground{b: b, d: d, gen: gen, ready: time.Now()}, parks: b.parkCount(d.UDID)}
 }
 
 // deviceIdle is the idleEnv of one cold boot of a simulator (its waiting and boot checks are the
 // background stop's).
-type deviceIdle struct{ deviceBackground }
+type deviceIdle struct {
+	deviceBackground
+	parks int // the simulator's park count (parkCount) at the last held check
+}
 
-func (e *deviceIdle) held() bool { return e.b.isParked(e.d.UDID) || e.b.appOpBusy(e.d.UDID) }
+// held is also true once after any park since the last check, also one that ended before it
+// (waitUntil holds a pass while the simulator is parked, so the pass after a resume would
+// otherwise compare with a snapshot from before the park: a daemon frozen for the park used no
+// CPU and would count as idle for that interval).
+func (e *deviceIdle) held() bool {
+	n := e.b.parkCount(e.d.UDID)
+	parkedSince := n != e.parks
+	e.parks = n
+	return parkedSince || e.b.isParked(e.d.UDID) || e.b.appOpBusy(e.d.UDID)
+}
 
 func (e *deviceIdle) snapshot() (idleSnapshot, error) {
 	// The frontmost app first: an app launched just before the process list is then in it.

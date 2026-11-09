@@ -90,6 +90,9 @@ type Backend struct {
 	parkScan sync.Once
 	// parkLocks serializes, per simulator, a park with a shutdown (park.go, parkLock).
 	parkLocks map[string]*sync.Mutex
+	// parks counts, per udid, the parks this daemon made (idle.go starts its counting again after
+	// one).
+	parks map[string]int
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc

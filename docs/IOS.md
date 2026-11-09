@@ -1154,7 +1154,10 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    daemons ignored it, and those then kept using a little CPU.) A pass does nothing, and the count
    starts again, while an agemu call acts on the device's apps (install, launch, open, push,
    uninstall, terminate, clear-data, reset, permissions, location) or the device is parked or being
-   parked, by `agemu park` or by auto-park (both mark the device before they stop anything). A pass
+   parked, by `agemu park` or by auto-park (both mark the device before they stop anything), and
+   the first pass after a resume does nothing either (a daemon frozen for the park used no CPU and
+   would otherwise count as idle for that interval: without this, a pass ended a daemon 0.25 s after
+   an auto-park's resume). A pass
    ends its daemons holding the device's park lock: a park that starts meanwhile waits for the pass
    (a few milliseconds), and a pass that finds a park or a shutdown holding the lock ends nothing,
    so no daemon is signalled while its simulator is being parked. A daemon that is running again at the next pass, or that turned busy before the SIGKILL,

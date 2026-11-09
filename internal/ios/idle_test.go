@@ -519,7 +519,7 @@ func TestIdlePassesSkipWhileParkLockHeld(t *testing.T) {
 func TestDeviceIdleExclusiveWithPark(t *testing.T) {
 	const udid = "11111111-2222-3333-4444-555555555555"
 	b := &Backend{parked: map[string]bool{}, parking: map[string]bool{}, appOps: map[string]int{}, appWork: map[string]time.Time{}}
-	e := &deviceIdle{deviceBackground{b: b, d: simDevice{UDID: udid, Name: "agemu-test"}}}
+	e := newDeviceIdle(b, simDevice{UDID: udid, Name: "agemu-test"}, 0)
 	if e.held() {
 		t.Fatal("held before any park")
 	}
@@ -559,5 +559,27 @@ func TestDeviceIdleExclusiveWithPark(t *testing.T) {
 		t.Fatal("exclusive failed after the park finished")
 	} else {
 		r()
+	}
+}
+
+// A park that began and ended between two held checks (the pass waited it out in waitUntil) still
+// holds the next check once, so the counting starts again after the resume: a daemon frozen for
+// the park used no CPU and must not count as idle for that interval.
+func TestDeviceIdleHeldOnceAfterAPark(t *testing.T) {
+	const udid = "11111111-2222-3333-4444-666666666666"
+	b := &Backend{parked: map[string]bool{}, parking: map[string]bool{}, appOps: map[string]int{}, appWork: map[string]time.Time{},
+		parks: map[string]int{udid: 2}} // parks before this boot do not count
+	e := newDeviceIdle(b, simDevice{UDID: udid, Name: "agemu-test"}, 0)
+	if e.held() {
+		t.Fatal("held with no park since the passes started")
+	}
+	b.mu.Lock()
+	b.parks[udid]++ // Park began (and the resume ended it) between two checks
+	b.mu.Unlock()
+	if !e.held() {
+		t.Fatal("a park since the last check must hold the pass")
+	}
+	if e.held() {
+		t.Fatal("held again with no new park")
 	}
 }

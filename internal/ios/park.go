@@ -204,6 +204,10 @@ func (b *Backend) Park(ctx context.Context, id string) error {
 	b.mu.Lock()
 	b.parked[d.UDID] = true
 	b.parking[d.UDID] = true
+	if b.parks == nil {
+		b.parks = map[string]int{}
+	}
+	b.parks[d.UDID]++
 	b.mu.Unlock()
 	start := time.Now()
 	stopped, err := stopTree(psTree, d.UDID, sysKill)
@@ -265,6 +269,13 @@ func (b *Backend) Parked(id string) bool {
 		return false
 	}
 	return b.isParked(udid)
+}
+
+// parkCount is how many parks of the simulator this daemon has begun.
+func (b *Backend) parkCount(udid string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.parks[udid]
 }
 
 func (b *Backend) isParked(udid string) bool {
