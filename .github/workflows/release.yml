@@ -77,4 +77,5 @@ jobs:
             echo "agentic-emulator@${VERSION#v} is already on npm"; exit 0
           fi
           tag="latest"; case "$VERSION" in *-*) tag="next";; esac
-          npm publish dist/agentic-emulator-*.tgz --access public --provenance --tag "$tag"
+          # ./ matters: npm reads dist/x.tgz as the GitHub repository github.com/dist/x.tgz.
+          npm publish ./dist/agentic-emulator-*.tgz --access public --provenance --tag "$tag"
