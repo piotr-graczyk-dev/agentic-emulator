@@ -7,9 +7,12 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -104,7 +107,7 @@ var tools = []tool{
 	{Name: "devices", method: "devices", Description: "List Android and iOS devices with state, profile and screen size.", InputSchema: obj(map[string]any{})},
 	{Name: "profiles", method: "profiles", Description: "List screen profiles (real device sizes) usable with set_profile.", InputSchema: obj(map[string]any{"platform": str("android or ios")})},
 	{Name: "create", method: "create", Description: "Create a new device.", InputSchema: obj(map[string]any{"platform": str("android or ios"), "name": str("Device name"), "profile": str("Profile name")}, "platform", "name")},
-	{Name: "boot", method: "boot", Description: "Boot a device to an agent-ready state (warm snapshot, seconds).", InputSchema: obj(map[string]any{"device": device, "cold": boolT("Force a cold boot")})},
+	{Name: "boot", method: "boot", Description: "Boot a device to an agent-ready state; from its baseline snapshot this takes seconds and returns state booted. The first boot of a new Android device (or a baseline retake after a GPU mode, AVD configuration or agemu upgrade) prepares the baseline once, which usually takes 7-8 minutes and never more than 20 (then the boot fails): boot then returns at once with state \"preparing\" and the phase; poll devices every 30-60 s (or call boot again) until the state is booted. Other calls on a preparing device fail at once with an error saying so.", InputSchema: obj(map[string]any{"device": device, "cold": boolT("Force a cold boot")})},
 	{Name: "shutdown", method: "shutdown", Description: "Shut a device down.", InputSchema: obj(map[string]any{"device": device})},
 	{Name: "reset", method: "reset", Description: "Restore a booted device to its clean baseline state (fast).", InputSchema: obj(map[string]any{"device": device})},
 	{Name: "park", method: "park", Description: "Park a booted device: stop it in place, so it uses no CPU and the host can reclaim its memory, keeping its apps and screen as they are. The next call on it resumes it (or use resume).", InputSchema: obj(map[string]any{"device": device})},
@@ -205,24 +208,171 @@ func permissionNames() string {
 	return strings.Join(names, ", ")
 }
 
-// Serve runs the MCP server until in is closed.
-func Serve(in io.Reader, out io.Writer) error {
-	var cl *client.Client
-	var clErr error
-	var once sync.Once
-	getClient := func() (*client.Client, error) {
-		once.Do(func() { cl, clErr = client.Dial() })
-		return cl, clErr
+// clientPool hands out daemon connections, one per call in flight: a client.Client serves one
+// request at a time, and the daemon serves every connection concurrently (its per-device locks
+// order the calls on one device).
+type clientPool struct {
+	mu   sync.Mutex
+	idle []*client.Client
+	dial func() (*client.Client, error)
+}
+
+func (p *clientPool) get() (*client.Client, error) {
+	p.mu.Lock()
+	if n := len(p.idle); n > 0 {
+		c := p.idle[n-1]
+		p.idle = p.idle[:n-1]
+		p.mu.Unlock()
+		return c, nil
 	}
+	p.mu.Unlock()
+	return p.dial()
+}
+
+// put returns c to the pool; broken is set when the call failed on the connection itself.
+func (p *clientPool) put(c *client.Client, broken bool) {
+	if broken {
+		_ = c.Close()
+		return
+	}
+	p.mu.Lock()
+	if len(p.idle) >= maxIdleConns {
+		p.mu.Unlock()
+		_ = c.Close() // a burst of concurrent calls does not leave its connections open
+		return
+	}
+	p.idle = append(p.idle, c)
+	p.mu.Unlock()
+}
+
+// maxIdleConns bounds the daemon connections the pool keeps between calls; maxInflight bounds the
+// requests read but not yet answered (when it is reached, the server reads the next request once
+// one is answered, as the sequential server did).
+const maxIdleConns, maxInflight = 8, 64
+
+func (p *clientPool) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.idle {
+		_ = c.Close()
+	}
+	p.idle = nil
+}
+
+// deviceOrder runs tool calls that target the same device in the order they arrived, while calls
+// on other devices, and calls on no device (devices, profiles, create), run concurrently. A call
+// with no device argument means "the only booted device", which may be any of them, so it waits
+// for every earlier device call and every later device call waits for it. (The daemon's
+// per-device locks serialize calls on a device but not in arrival order.)
+type deviceOrder struct {
+	mu      sync.Mutex
+	last    map[string]chan struct{} // the latest call per device
+	barrier chan struct{}            // the latest call on the implicit device
+}
+
+// noDeviceTools take no device argument and run at once.
+var noDeviceTools = map[string]bool{"devices": true, "profiles": true, "create": true}
+
+// orderKey returns the device a request targets: ok false for a request that runs unordered,
+// key "" for the implicit device.
+func orderKey(req rpcReq) (key string, ok bool) {
+	if req.Method != "tools/call" {
+		return "", false
+	}
+	var p struct {
+		Name      string `json:"name"`
+		Arguments struct {
+			Device string `json:"device"`
+		} `json:"arguments"`
+	}
+	if json.Unmarshal(req.Params, &p) != nil || noDeviceTools[p.Name] {
+		return "", false
+	}
+	return deviceKey(p.Arguments.Device), true
+}
+
+var udidRE = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+// deviceKey is the queue of a device argument. Every spelling of one device must land in one
+// queue, so only references whose device is known here get their own: a simulator's UDID (any
+// case) and an AVD name (`android:<name>`, any case; two AVDs differing only in case share a
+// queue, which only orders them). Anything else (a simulator's name, which other calls may give
+// as its UDID; a reference without a platform; no device) is "", the implicit device, ordered
+// against every call.
+func deviceKey(dev string) string {
+	dev = strings.TrimSpace(dev)
+	if name, ok := strings.CutPrefix(dev, string(api.Android)+":"); ok && name != "" {
+		return string(api.Android) + ":" + strings.ToLower(name)
+	}
+	if u := strings.TrimPrefix(dev, string(api.IOS)+":"); udidRE.MatchString(u) {
+		return string(api.IOS) + ":" + strings.ToUpper(u)
+	}
+	return ""
+}
+
+// enter registers a call on key (in arrival order) and returns what it must wait for and the
+// function that marks it done.
+func (o *deviceOrder) enter(key string) (wait []chan struct{}, done func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.last == nil {
+		o.last = map[string]chan struct{}{}
+	}
+	mine := make(chan struct{})
+	if o.barrier != nil {
+		wait = append(wait, o.barrier)
+	}
+	if key == "" {
+		for _, c := range o.last {
+			wait = append(wait, c)
+		}
+		o.last = map[string]chan struct{}{} // later calls wait for the barrier, which waits for these
+		o.barrier = mine
+	} else {
+		if c := o.last[key]; c != nil {
+			wait = append(wait, c)
+		}
+		o.last[key] = mine
+	}
+	return wait, func() {
+		close(mine)
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if key == "" && o.barrier == mine {
+			o.barrier = nil
+		} else if key != "" && o.last[key] == mine {
+			delete(o.last, key)
+		}
+	}
+}
+
+// Serve runs the MCP server until in is closed. Requests are handled concurrently (a boot that
+// prepares a baseline, or a wait on one device, does not hold up calls on other devices or
+// devices); calls on the same device run in the order they arrived (deviceOrder). Responses are
+// written one at a time, each as one line.
+func Serve(in io.Reader, out io.Writer) error {
+	return serve(in, out, client.Dial)
+}
+
+func serve(in io.Reader, out io.Writer, dial func() (*client.Client, error)) error {
+	pool := &clientPool{dial: dial}
+	defer pool.close()
 	r := bufio.NewReaderSize(in, 1<<20)
 	w := bufio.NewWriter(out)
+	var wmu sync.Mutex
 	write := func(resp rpcResp) {
 		resp.JSONRPC = "2.0"
 		b, _ := json.Marshal(resp)
+		wmu.Lock()
+		defer wmu.Unlock()
 		w.Write(b)
 		w.WriteByte('\n')
 		w.Flush()
 	}
+	var order deviceOrder
+	var inflight sync.WaitGroup
+	defer inflight.Wait() // answer every request read before stdin closed
+	slots := make(chan struct{}, maxInflight)
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(strings.TrimSpace(string(line))) > 0 {
@@ -230,12 +380,29 @@ func Serve(in io.Reader, out io.Writer) error {
 			if jerr := json.Unmarshal(line, &req); jerr != nil {
 				write(rpcResp{ID: json.RawMessage("null"), Error: &rpcErr{Code: -32700, Message: jerr.Error()}})
 			} else if len(req.ID) > 0 { // notifications (no id) get no response
-				res, rerr := handle(req, getClient)
-				if rerr != nil {
-					write(rpcResp{ID: req.ID, Error: rerr})
-				} else {
-					write(rpcResp{ID: req.ID, Result: res})
+				// Every request admitted earlier holds a slot and waits only for earlier ones, so
+				// the oldest always runs: a full table only delays reading the next request.
+				slots <- struct{}{}
+				inflight.Add(1)
+				var wait []chan struct{}
+				done := func() {}
+				if key, ordered := orderKey(req); ordered {
+					wait, done = order.enter(key) // in arrival order: this loop reads one line at a time
 				}
+				go func(req rpcReq) {
+					defer inflight.Done()
+					defer func() { <-slots }()
+					for _, c := range wait {
+						<-c
+					}
+					res, rerr := handle(req, pool)
+					done()
+					if rerr != nil {
+						write(rpcResp{ID: req.ID, Error: rerr})
+					} else {
+						write(rpcResp{ID: req.ID, Result: res})
+					}
+				}(req)
 			}
 		}
 		if err != nil {
@@ -247,7 +414,7 @@ func Serve(in io.Reader, out io.Writer) error {
 	}
 }
 
-func handle(req rpcReq, getClient func() (*client.Client, error)) (any, *rpcErr) {
+func handle(req rpcReq, pool *clientPool) (any, *rpcErr) {
 	switch req.Method {
 	case "initialize":
 		var p struct {
@@ -262,7 +429,7 @@ func handle(req rpcReq, getClient func() (*client.Client, error)) (any, *rpcErr)
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agemu", "version": daemon.Version},
-			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so.",
+			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -276,11 +443,23 @@ func handle(req rpcReq, getClient func() (*client.Client, error)) (any, *rpcErr)
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, &rpcErr{Code: -32602, Message: err.Error()}
 		}
-		cl, err := getClient()
+		cl, err := pool.get()
 		if err != nil {
 			return toolError(err), nil
 		}
-		return callTool(cl, p.Name, p.Arguments), nil
+		res, connErr := callToolConn(cl, p.Name, p.Arguments)
+		pool.put(cl, connErr != nil)
+		var send *client.SendError
+		if errors.As(connErr, &send) {
+			// The daemon never got the request (it was restarted, say): send it once more on a
+			// new connection, which starts the daemon again if needed.
+			if cl, err = pool.dial(); err != nil {
+				return toolError(err), nil
+			}
+			res, connErr = callToolConn(cl, p.Name, p.Arguments)
+			pool.put(cl, connErr != nil)
+		}
+		return res, nil
 	}
 	return nil, &rpcErr{Code: -32601, Message: "method not found: " + req.Method}
 }
@@ -293,7 +472,15 @@ func text(s string) map[string]any {
 	return map[string]any{"content": []map[string]any{{"type": "text", "text": s}}}
 }
 
+// callTool runs one tool.
 func callTool(cl *client.Client, name string, args map[string]json.RawMessage) map[string]any {
+	res, _ := callToolConn(cl, name, args)
+	return res
+}
+
+// callToolConn runs one tool; connErr is set when the daemon connection itself failed (not an
+// error the daemon answered).
+func callToolConn(cl *client.Client, name string, args map[string]json.RawMessage) (res map[string]any, connErr error) {
 	var t *tool
 	for i := range tools {
 		if tools[i].Name == name {
@@ -301,13 +488,13 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 		}
 	}
 	if t == nil {
-		return toolError(fmt.Errorf("unknown tool %q", name))
+		return toolError(fmt.Errorf("unknown tool %q", name)), nil
 	}
 	// Tool arguments use the daemon's field names; selector fields are folded into a selector.
 	b, _ := json.Marshal(args)
 	var p daemon.Params
 	if err := json.Unmarshal(b, &p); err != nil {
-		return toolError(err)
+		return toolError(err), nil
 	}
 	if t.selector {
 		var sel api.Selector
@@ -331,17 +518,34 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 		p.Scale = scale
 	}
 
+	if name == "boot" {
+		// A boot that prepares a baseline takes minutes: it returns state "preparing" at once
+		// and the agent polls devices (the tool description says so).
+		p.NoWait = true
+	}
+
 	reply, err := cl.Do(t.method, p)
 	if err != nil {
-		return toolError(err) // a crash that explains it is in the message
+		var derr *client.Error
+		if errors.As(err, &derr) {
+			return toolError(err), nil // a daemon error; a crash that explains it is in the message
+		}
+		return toolError(err), err // the connection broke
 	}
-	res := render(name, p, wantJSON, scale, reply.Result, reply.Ms)
+	res = render(name, p, wantJSON, scale, reply.Result, reply.Ms)
 	if c := reply.AppCrash; c != nil && res["isError"] != true {
 		// First, so the agent reads it before the result it explains.
 		note := map[string]any{"type": "text", "text": "NOTE: " + c.Summary()}
 		res["content"] = append([]map[string]any{note}, res["content"].([]map[string]any)...)
 	}
-	return res
+	if name == "boot" {
+		var dev api.Device
+		if json.Unmarshal(reply.Result, &dev) == nil && dev.State == api.StatePreparing && dev.Preparing != nil {
+			hint := map[string]any{"type": "text", "text": fmt.Sprintf("The device is preparing its baseline snapshot (once per device; %s, %.0fs so far, usually 7-8 min, at most %.0f min). Poll `devices` every 30-60 s until its state is booted, or call `boot` again; other calls on it fail at once until then.", dev.Preparing.Phase, dev.Preparing.ElapsedS, math.Ceil(dev.Preparing.MaxS/60))}
+			res["content"] = append(res["content"].([]map[string]any), hint)
+		}
+	}
+	return res, nil
 }
 
 // render turns a tool's raw result into MCP content.

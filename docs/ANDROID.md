@@ -26,7 +26,7 @@ agemu daemon (Go, internal/android)
 make android-build                                              # bin/android/{agemu,agemud,agemu-bench}
 export AGEMU_HOME=$HOME/.agemu-dev-android                      # optional, default ~/.agemu
 bin/android/agemu create --platform android --name pixel        # -> android:agemu-pixel (no download)
-bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (~1 min)
+bin/android/agemu boot android:agemu-pixel                      # first boot also builds the baseline (7-8 min, at most 20, once; progress on stderr)
 bin/android/agemu launch com.android.settings
 bin/android/agemu ui                                            # outline; --json for the full tree
 bin/android/agemu tap --text "Network & internet"
@@ -46,11 +46,15 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_GPU` | `host` | Emulator `-gpu` mode. `auto` picks software rendering (SwiftShader) without a window; see "Host GPU and lean devices". |
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: leave on the Google apps a lean baseline turns off (applies when a baseline is taken). |
 | `AGEMU_ANDROID_ANIMATIONS` | `1` | `0`: set the window, transition and animator scales to 0 after every boot and reset (screen changes finish at once). |
-| `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. |
+| `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. Less RAM saves host memory but changes what apps get; see "Guest RAM, vCPUs and display size" for the measured trade-off. |
+| `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`), 1 to 8 (the emulator boots no more; `create` refuses other values). `2` cut device CPU-seconds per flow by 11-19% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
 | `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
-| `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline snapshot. |
+| `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline steps (stylus, lean apps, keyboard). |
+| `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Before saving the baseline, wait until the guest has been up this long and has been quiet for a minute (CPU and network), so work it still had pending does not run again after every reset; see Quiet baseline. `0`: save right after the baseline steps (agemu before 2026-11-08). Applies when a baseline is taken. |
+| `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not repair an AVD whose first boot was interrupted before it ever completed (agemu otherwise boots it once with `-wipe-data`; see Quiet baseline). |
+| `AGEMU_ANDROID_BASELINE_ZERO_MB` | `0` | Opt-in: zero-fill this many MB of free guest memory just before the baseline is saved (capped 128 MB below MemAvailable). `ram.bin` gets smaller; the restored guest has a smaller page cache. See Quiet baseline. |
 | `AGEMU_ANDROID_STREAM` | `1` | `0`: no frame stream; every screenshot reads the framebuffer (`getScreenshot`). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Close the frame stream after this many seconds without a call to the device, if the screen is still posting frames then (at least one per 3 s over the last 10 s); the next call reopens it. `0`: keep it open. See Screenshots. |
 | `AGEMU_ANDROID_AGENT_TCP` | `1` | `0`: reach the agent through adb only (no console port redirection). |
@@ -58,6 +62,7 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_BOOT_LOAD` | `inplace` | `startup`: restore the baseline with `-snapshot` at emulator start. This corrupts guest memory on emulator 37.1 (see Guest restarts). |
 | `AGEMU_ANDROID_EMULATOR_FLAGS` | (none) | Extra emulator flags, e.g. `-show-kernel` to log the guest kernel console. Never pass `-feature`: the emulator deletes snapshots whose feature set differs. |
 | `AGEMU_ANDROID_LOGS` | `1` | `0`: no log capture: `logs` and `crashes` answer that capture is off, and calls carry no crash notice. See Logs and crashes. |
+| `AGEMU_AUTO_PARK` | off | A duration (at least 10 s): the daemon parks a device it serves after that long without a call; the next call resumes it. See Parking. |
 | `AGEMU_ANDROID_TAP_WAIT` | `1` | `0`: a tap by selector touches the element where the first tree read found it, without waiting for transitions or for it to stop moving (agemu before 2026-11-07). See Selector taps. |
 | `AGEMU_ANDROID_TRACE` | `0` | `1`: log whether each screenshot came from the frame stream, how long each selector tap waited, each crash record the log capture makes, and each answer of the app watcher. |
 
@@ -234,14 +239,18 @@ Any TCP failure falls back to adb.
   - phone hardware: `hw.keyboard=no`, `hw.mainKeys=no` (gesture navigation), no dpad, trackball or SD card;
   - quickboot auto-snapshots off.
 - **`boot`** runs `emulator -avd <name> -port 5580 -grpc 8580 -no-window -no-audio -no-boot-anim -gpu host -memory 2048 -lowram -no-snapshot-save -no-snapshot-load`.
-  - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (about 45 s once).
+  - A baseline taken under another `-gpu` mode does not load ("different renderer configured"). agemu then lets the guest finish its cold boot and retakes the baseline (a quiet baseline: see Quiet baseline for how long that takes).
+  - Neither does a baseline taken before the AVD's `hw.ramSize` or `hw.cpu.ncore` was changed in its `config.ini` ("different AVD configuration"); agemu retakes it the same way. Before 2026-11-08 every boot of such an AVD failed until the snapshot was deleted by hand.
+  - A retake (either kind) snapshots whatever the AVD's disk holds at that moment. With the default standby the disk is back at the baseline before the emulator powers off, so this matters after `AGEMU_ANDROID_STANDBY=0`, a crashed or killed emulator, or a host reboot: apps installed since the old baseline then go into the new one and survive every later `reset` (reproduced with `AGEMU_ANDROID_STANDBY=0`). The daemon log says so when it retakes.
+  - A `config.ini` edit made while the device is in standby takes effect only after a real power-off (`agemu shutdown` twice): `boot` resumes the paused VM first.
   - With a baseline, agemu restores it in place (gRPC `LoadSnapshot`) as soon as gRPC answers, before the cold boot gets anywhere. Restoring it at startup (`-snapshot`) corrupts guest memory on this emulator; see Guest restarts.
   - The process is detached from the daemon.
   - Ports are taken from 5580/8580 upward and skip ports used by any running emulator.
 - **Agent-ready** means `sys.boot_completed=1` **and** the on-device agent answers.
 - **Baseline.** On the first boot agemu waits 20 s for the device to settle, then:
-  - turns stylus handwriting off (see Caveats) and warms up the keyboard;
+  - turns stylus handwriting off (see Caveats), turns the lean apps off and warms up the keyboard;
   - clears recent tasks and goes home;
+  - waits until the guest has been up 7 minutes, has shown the home screen for a minute and its last minute was quiet (mean CPU below 15% of a vCPU, no 10 s sample at 30% or more, below 50 KB/s received; at most 5 minutes past the 7), then for the broadcast queue to drain (see Quiet baseline). A first boot therefore takes 7-8 minutes (430-455 s measured), never more than 20 (a hard bound), once; meanwhile the device is `preparing` and other calls on it fail at once;
   - deletes its console redirections and closes its agent connection (see Agent transport);
   - saves the one snapshot it keeps, `agemu-baseline`, with the agent running inside it. Every boot or reset from it is agent-ready at once.
   - If agemu is upgraded and the snapshot holds an older agent, it is retaken once.
@@ -607,6 +616,222 @@ in use) the emulator's `phys_footprint` exceeded the sum of its memory regions (
 The idle CPU rows above are single sessions on a busy host. The interleaved 30 s windows on the
 launcher home in the next section ranged from 5.8% to 93.4% of a core, as the guest's own
 background work comes and goes.
+
+### Quiet baseline (2026-11-08)
+
+A snapshot restores the guest exactly as it was saved, including work it still had pending. That
+work runs again after every reset and powered-off boot. agemu used to save the baseline 20 s after
+`sys.boot_completed` plus its baseline steps, so how much was pending depended on how far the guest
+had got: on this host a new device's baseline was saved at about 50-54 s of guest uptime, in the
+middle of its first-boot work; a retake of an older device at 49 s; one baseline on a very busy host
+at about 290 s.
+
+What a restored guest replayed (guest logs and `/proc` after a reset or boot, 2 GB guest, host GPU):
+- **Play Store jobs and updates.** With the baseline saved at 49 s of uptime, Play Store's daily
+  hygiene jobs started 23 s after every restore. One baseline was saved while Play Store was
+  auto-updating WebView (a 97 MB download at 29%): every restore resumed the download, installed
+  the update and ran its dexopt about 98 s later. A new device's first-boot baseline also replayed
+  1-7 MB/s of downloads.
+- **The app freezer.** Apps started for the boot were frozen and compacted again (`am_compact`)
+  10-50 s after every restore: 26-51 compactions per restore with an early baseline, 4-8 with a
+  settled one; 15-18 `am_kill` against 1 on a new device.
+- **Play services' flag push** (34 DeviceConfig namespaces; system_server logged about 1,350 lines,
+  as its flag mapper cannot reach the `aconfigd` sockets in this image): at about 136 s of uptime on
+  a new device, about 357 s on a retake. A baseline saved before it replayed it after every restore.
+- **The clock change.** The guest's clock jumps by the time since the save (`TIME_SET`), which starts
+  Settings' battery receiver, WorkManager rescheduling and wakes Play services. That is correct
+  behaviour and stays (see "Old baselines" below).
+
+**How agemu waits now.** Before the save, it waits until:
+- the guest has been up `AGEMU_ANDROID_BASELINE_UPTIME_S` (420 s);
+- the home screen has been shown for a minute;
+- the last minute was quiet, in six 10 s samples:
+  - mean CPU below 15% of one vCPU (`/proc/stat`);
+  - no sample at 30% or more (a job, an install or a dexopt shows as a burst);
+  - every sample below 50 KB/s received (`/proc/net/dev`; a download uses little CPU);
+- or, failing that, until 5 minutes past the uptime target (12 minutes of uptime).
+
+Then it waits for the broadcast queue to drain (`am wait-for-broadcast-idle`). Every guest sample has
+a 15 s timeout and the wait an overall deadline, so a stuck `adb` read cannot hold the boot.
+
+**Why this criterion.** Two earlier versions failed:
+- **CPU only, below 20% for 30 s.** It saved a baseline during the WebView download above and was as
+  busy after restores as the old default.
+- **Below 10% per sample for a minute.** It sits at the settled guest's own level: settled guests
+  read 4-11% per sample, more on a loaded host or with any extra guest work. On the skeptic's host
+  one guest-side sampler stretched a first boot from 452 s to 624 s, and the wait could run to its
+  then 10-minute cap (17-18 minutes in all).
+
+The mean and peak test replays no more than the 10% test did. Interleaved on `agemu-lab`, n=4 boots
+and 8 resets per arm (host load average 2-10):
+
+| | 10% per sample | mean < 15%, peak < 30% (agemu now) |
+|---|---|---|
+| emulator CPU in the 120 s after a reset | 10.82 CPU-s (10.14-11.96) | 10.53 (9.59-11.70) |
+| emulator CPU in the 120 s after a powered-off boot | 10.87 (10.43-11.66) | 10.46 (8.92-11.25) |
+| idle CPU afterwards (30 s windows) | 8.85% of a core (7.50-10.00) | 7.85% (7.40-8.50) |
+| reset (wall) | 1.57 s (1.52-1.96) | 1.77 s (1.31-1.84) |
+| powered-off boot to agent-ready | 5.35 s (4.95-5.52) | 5.24 s (5.03-5.41) |
+
+**The gain depends on when the old baseline was saved.** Emulator CPU in the 120 s after a reset, old
+default against quiet:
+
+| old baseline | old | quiet | gain per restore | source |
+|---|---|---|---|---|
+| a new device's first boot (saved at 50-54 s of uptime) | 154 CPU-s (140.5-177.6, n=4) | 17.1 (14.4-17.8, n=6) | **~137** | skeptic, own AVD |
+| a retake of an older device (saved at 49 s) | 54.0 (47.0-89.1, n=8) | 11.5 (9.4-12.1, n=8) | **~42** | `agemu-lab`, interleaved |
+| saved late on a very busy host (about 290 s) | 14-18 (n=3, not interleaved) | 10.5-11.5 | **~3-6** | `agemu-lab` |
+
+After a powered-off boot: 133.6 against 17.6 CPU-s (new device, n=4 and 6) and 47.4 against 11.9
+(retake, n=4 each). Idle CPU after a reset fell from 12.9-44% of a core to 7.85-9.1%.
+
+**Memory: no saving.** `phys_footprint` 120 s after a reset was 4.9-5.0 GB with an early baseline
+against 3.8-4.1 GB with a quiet one. That difference is in macOS's footprint ledger only:
+- `footprint`'s region total, dirty memory including compressed and swapped pages, was the same on
+  both arms: 3.04-3.20 GB, flat from 10 to 300 s after the reset (skeptic);
+- the guest RAM region was 2.11-2.13 GB in every arm;
+- the ledger gap is there 10 s after the load, before any replayed work runs.
+
+It is the accounting anomaly r2-a4 described (see Caveats); a quiet baseline does not free host
+memory.
+
+**First boot (or retake): how long, and how agemu handles it.**
+
+| run (agemu now, unless marked) | time to booted | host load average |
+|---|---|---|
+| retake of `agemu-lab` (baseline deleted), CLI | 436 s | 3.1-3.2 |
+| new AVD, first boot through MCP (client with a 60 s per-call timeout) | 450 s | 2.5-5.7 |
+| prepared again after the daemon was killed 120 s in (from the new `boot`) | 455 s (575 s from the first) | 3.6-5.0 |
+| AVD configuration retake (`hw.cpu.ncore` 4 -> 3), CLI, `agemu-lab` resetting every 8 s, daemon killed 61 s in | 432 s from the new `boot` (496 s from the first) | 2.5-5.8 |
+| first boot with a guest-side `device_config list` every 15 s, `agemu-lab` resetting every 8 s | 430 s | 8.8-12.1 |
+| skeptic, previous criterion (10% per sample, 10-minute cap): new device, CLI | 452 s | 19-35 |
+| skeptic, previous criterion: GPU-mode retake, MCP | 439 s | - |
+| skeptic, previous criterion: with a guest-side sampler every 15 s | 624 s | - |
+
+All five runs with the current criterion settled at 7 min 2-9 s of guest uptime, the first possible
+sample. The guest-side sampler stretched the previous criterion by 172 s; it no longer delays the
+save.
+
+**Bounds.**
+- **Settle wait:** `waitGuestSettled` saves at the latest at 12 minutes of guest uptime, a minute or
+  two more with slow samples.
+- **Guest calls:** every one in the baseline steps has a deadline (30 s each; 2 minutes to restart
+  the agent; 60 s for the broadcast queue).
+- **The whole boot, before the save,** runs under a 17-minute limit; the save then has 3 minutes.
+- **20 minutes (`maxS` 1200 s) is a hard bound.** A boot that reaches it fails, no baseline is saved,
+  and the next boot prepares again.
+- **Typical and worst case:** first boots took 430-455 s; a guest that never goes quiet would take
+  about 13-14 minutes.
+- **Samples:** a failed or slow guest sample counts as "not quiet" and the quiet minute starts over;
+  it no longer ends the wait.
+
+A boot that takes a baseline does not block clients:
+- **State.** The device shows state `preparing` in `devices`, with the phase (starting the emulator,
+  cold boot, baseline steps, settling, saving), the seconds so far and the bound.
+- **`boot` with `noWait`** (MCP, and the CLI underneath) returns as soon as the boot turns out to need
+  a baseline, or after 40 s; a boot from an existing baseline still returns `booted` in seconds.
+- **Other calls** on a preparing device fail at once with code `preparing` (CLI exit status 5); the
+  message names the phase and the time so far. A call that arrives while a boot is still finding out
+  whether it must take a baseline (a retake is known only after a failed snapshot load) waits for
+  that, at most 40 s, then fails the same way or goes ahead.
+- **A second `boot`** returns the state, or without `noWait` waits for the end.
+- **`shutdown`** cancels the preparation in every phase and powers off (not standby: a half-booted
+  guest has no agent); an emulator that was just starting is stopped too. A shutdown after the
+  baseline was saved is not a failed preparation: the device goes to standby on it, and the next
+  boot loads it. Measured: `boot --no-wait`, then `shutdown` 0, 0.5, 2 and 10 s later
+  (twice each) returned in 0.08-4.3 s with no emulator left. A save in progress finishes first: a
+  `shutdown` sent during `saving` returned after 6.4 s, and the saved baseline loaded at the next
+  boot (5.1 s).
+- **A preparation that fails by itself** (the guest never finishes booting, the 20-minute bound)
+  powers the emulator off. `devices` then shows the device shut down with the reason in
+  `prepareError`.
+- **Interrupted first boots are repaired.** When the very first cold boot of a new AVD is
+  interrupted about 10 s in, twice in a row, the guest's `/data` is left broken: system_server
+  crash-loops (zygote restarted 279 times in 3 minutes) and adbd never starts. Every later boot then
+  fails with "device offline".
+  - **Measured:** 4 of 4 with agemu's `shutdown`, a gRPC power-off or SIGTERM, and with agemu before
+    2026-11-08 after a daemon kill. One interruption at 10, 20 or 40 s, two at 20 s, and 8 kills in
+    the first 0.3-2.5 s did no harm.
+  - **The cure:** one boot with `-wipe-data`.
+  - **How agemu applies it:** before the first launch of an AVD that no emulator has ever started (no
+    `userdata-qemu.img.qcow2`, no baseline, no completed boot), agemu writes
+    `agemu-first-boot-incomplete` into the AVD folder. When a boot completes, it writes
+    `agemu-booted` first and then removes the marker. It does the same when the device's agent first
+    answers (a guest that finished booting while no daemon watched it), and before every power-off of
+    a marked AVD it pauses the VM and asks the emulator (gRPC `getStatus`, which reports the guest's
+    boot completion) whether the guest has booted. Only the emulator answering, with the VM paused,
+    that it has not keeps the AVD eligible for the repair (paused, the guest cannot finish booting
+    before the power-off); if the VM cannot be paused or the emulator not asked, agemu records the
+    boot, so a guest that may hold data is never wiped automatically. A boot that finds the marker, no `agemu-booted`
+    and no baseline adds `-wipe-data`, logs it, and shows it in `devices` as the preparation's
+    `note`.
+  - **Nothing can be lost:** that guest never finished booting, so nothing was ever installed in it.
+    An AVD that completed a boot, or that an older agemu or another tool has started, is never marked
+    and never wiped.
+  - **Opt-out:** `AGEMU_ANDROID_FIRSTBOOT_REPAIR=0` turns the repair off.
+- **CLI.** `agemu boot` waits by polling `devices` and prints the phase on stderr; `--no-wait`
+  returns at once.
+- **MCP.** The server handles tool calls concurrently, so `devices` answers while another call runs.
+  Calls on the same device run in the order they arrived. A call without a device argument (the only
+  booted device) waits for earlier device calls, and later ones wait for it: queued behind a long
+  call on one device (a `wait_for` with a long timeout), it holds back calls on other devices
+  until it has run. Agents that drive several devices should pass `device` on every call.
+  `notifications/cancelled` is ignored: a cancelled call still runs. At most 64 requests are in
+  flight at once; beyond that the server reads the next request when one is answered. A device has its own queue
+  only when the server can tell which device it is: `android:<avd>` (any case) or a simulator's
+  UDID (`ios:<UDID>` or bare, any case). Any other reference (a simulator's name, an AVD name
+  without `android:`) is ordered like a call without a device argument, because other calls may
+  name the same device another way.
+- **A daemon stopped or restarted mid-preparation** leaves the emulator running without a baseline.
+  `devices` then shows it `booted` with `noBaseline: true` and a `prepareError` saying to call
+  `boot`. The next `boot` powers it off and prepares again, and `reset` says so instead of failing
+  with an emulator error. An agent polling `devices` should call `boot` again when it sees
+  `noBaseline`.
+
+**Old baselines.** Guest elapsed realtime does not advance across a restore, so no JobScheduler job
+becomes due because the baseline is old: right after a restore all 109 jobs had elapsed-relative
+deadlines. Work keyed to the wall clock does see the jump. The skeptic set the guest's clock 3 days
+ahead after a reset (as a 3-day-old baseline would be), interleaved, n=4 each:
+- 24.6 against 18.0 CPU-s in the first 120 s, **~+6.6 CPU-s per restore**;
+- WorkManager log lines 380-430 against 253-256;
+- `am_compact` 18-20 against 8;
+- the extra jobs were Play Store's scheduler and WorkManager, Dialer workers and partnersetup.
+
+- **Existing devices keep their baseline** until it is retaken. agemu retakes it by itself on an
+  agent upgrade, a GPU mode change or an AVD configuration change. To retake it now, power the device
+  off (`shutdown` twice), delete `~/.android/avd/<avd>.avd/snapshots/agemu-baseline`, and `boot`.
+- **Not measured:** an offline host. Received bytes stay at 0, so the wait ends as usual; Play
+  updates and the flag push would then run after every restore once online, as with the old
+  default. A Play Store update that starts in the last seconds before the save is still captured.
+- **Fidelity** (current build, quiet baseline on `agemu-lab`):
+  - `scripts/e2e-android.sh agemu-lab` passed 44/44.
+  - Play services ran, the WebView provider was valid, Gboard was the default keyboard, Play Store
+    opened, Settings search typed through the keyboard, Bluetooth was on, and Chrome loaded
+    example.com once its first-run screens were dismissed.
+  - In three 10-minute idle soaks after a reset (two on the earlier build), the Bluetooth stack
+    aborted once in two of them ("hci_layer.cc:589 on_hardware_error ... 0x42"). The default baseline
+    did the same in its soak, and so did one older baseline 19.5 s after a boot: it predates the
+    quiet baseline (see Parking).
+  - Once, a reset right after Chrome had run crashed the emulator (`hvf_map_safe: FATAL ... while it
+    was mapped`). The android-size round saw the same crash on its own baselines; it is an emulator
+    37.1 problem with Vulkan host memory across a snapshot load, and its rate is unknown.
+
+**Explored and not shipped:**
+- **Auto-rotate off** (`accelerometer_rotation 0`): idle 8.65% (5.7-9.6) against 9.8% (8.1-14.2)
+  of a core, 6 ABBA pairs of 30 s windows in one running device; 4 of 6 pairs lower. The
+  accelerometer stays on anyway for system_server's `FaceDownDetector`. No measurable gain.
+- **Zero-filled free memory** (`AGEMU_ANDROID_BASELINE_ZERO_MB`, opt-in). The emulator saves an
+  all-zero guest page as an index entry and restores it by leaving a zero host page alone
+  (`RamLoader::zeroOutPage` calls `isBufferZeroed` before `bzero`); pages the guest kernel freed
+  still hold old data. A shell `dd` that reads 400 MB of `/dev/zero` into one buffer and frees it
+  (0.15 s; no process killed for it) before the save gave `ram.bin` 0.67 GB against 0.87-0.95 GB
+  with the same procedure. Against such a baseline (2 blocks each, interleaved, 6 resets): emulator
+  CPU per load 2.93 CPU-s (2.75-4.21) against 3.65 (3.10-5.10), reset 1.31-1.67 s against
+  1.29-4.58 s, `phys_footprint` 15 s after a reset the same (3.87-4.64 against 3.94-4.64 GB), cold
+  launch after a reset not slower (Settings 0.31-0.42 s against 0.30-1.41 s, Chrome 0.24-0.27 s
+  against 0.28-1.02 s). The restored guest's page cache is 200 MB smaller (597 -> 396 MB). Footprint
+  under host memory pressure, where zero pages compress to nothing, was not measured; n is small, so
+  it stays opt-in.
 
 ### Frame stream idle stop (2026-11-06, night)
 
@@ -1377,6 +1602,167 @@ the emulator was gone (`elapsedRealtime` gap 2.6-3.7 s for 29-31 s of wall time)
 one seen firing). It
 writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu parks instead.
 
+**Auto-park** (`AGEMU_AUTO_PARK=<duration>`, off by default; 2026-11-08, agemu-lab, host load
+average 2.5-3.7, `.lab/r6/autopark`): the daemon parks a device it has served once it has had no
+call for that long, only while it is running (not booting, not preparing a baseline or repairing
+an interrupted first boot, not in standby, not parked); see the README's Auto-park. A park (an
+agent's or auto-park's) waits for a boot in progress only until its own deadline, and a device
+that is preparing refuses it. Parking touches neither the first-boot marker nor the completed-boot
+record: a device can only be parked after a boot completed, so it has the record and is never
+wiped. It sees only its own calls (not another daemon's, `adb`'s or a person's): a
+device another daemon drives after this one's last call is paused under it, and the park marker
+is in this daemon's `AGEMU_HOME`, so the other daemon does not know to resume it (what its calls
+then answer was not measured on Android; on iOS they failed). Ids
+are compared in the AVD file's spelling, so `android:Agemu-Lab` shares agemu-lab's count, lock and
+park state on a case-insensitive disk. With `AGEMU_AUTO_PARK=15s`:
+- Parked 15.2-15.8 s after the last call (n=5); the first `ui` after it took 9-17 ms. The park
+  itself took 0-1 ms.
+- 18 of 18 calls of every kind resumed the device and worked (a screenshot right after a resume
+  327 ms, as after any resume); logs, crashes and park left it parked. No park during a 45 s
+  `wait`; 12 rounds of 6 calls at once at gaps around the threshold: 72 calls, no error, 5 parks
+  (iOS: another 72, 4 parks).
+- The daemon killed with SIGKILL: the device stayed paused, the next daemon listed it `parked` and
+  its first call resumed it (14 ms); with SIGTERM the daemon resumed it before exiting (0.14 s).
+- Emulator CPU running idle 10.4% of a core (10.2-10.4, n=4), auto-parked 1.5% (1.4-1.6, n=4),
+  windows of 30 s alternated: 5.3 CPU-s saved per idle device-minute.
+- Android's Bluetooth stack crashed once (the same "hci_layer.cc:589 on_hardware_error ... code
+  0x42") in 36 park and resume cycles, 8 s after a resume, while the device ran. The probe's
+  Park screen was not used (it needs `am start`); clocks, the TCP stream and alarms behave as in
+  the parks above, which are the same call.
+
+### Guest RAM, vCPUs and display size (2026-11-08)
+
+Can a smaller device, with less guest RAM, fewer vCPUs or a smaller screen, cost the host less
+without the app under test noticing? Every snapshot load makes all guest RAM resident, so guest
+RAM is host memory.
+
+**Method.** One AVD (`agemu-r6-android-size`, emulator 37.1, host GPU, lean, compressed baseline),
+reconfigured between blocks: `hw.ramSize`, `hw.cpu.ncore`, display, then a new baseline. 22
+blocks, arms interleaved. Each block ran:
+- memory 40 s after a reset and after the flows: the emulator's region sum from `footprint`, the
+  memory the host gets back when the emulator exits (round 2 kill tests); `phys_footprint`
+  overstates it by 1.3-2.1 GB;
+- two 30 s idle windows;
+- 3-4 rounds of timed flows, each with the emulator's CPU-seconds: agent step (find + tap + wait
+  + screenshot in Settings), Settings cold and warm launch, a cold launch of the Agemu Shop, and
+  the agent-race task (`examples/agent-race`, 18 steps, about 35 CLI calls);
+- 4 resets and 3 powered-off boots;
+- 1-2 fidelity runs, each from a fresh emulator process.
+
+A fidelity run does the shop task, then home, Settings, a page in Chrome and the Play Store, then
+back to the shop (is its process the same?). Then the same with a WebView page that holds 300
+MB, then 600 MB, of JavaScript memory (`.lab/r6/android-size/heavyapp`). Kills are read from
+logcat (lmkd's `lowmemorykiller` lines, `am_kill` without force-stops), and the pids of 14 system
+processes are compared. The host was shared (load average 2-139, 4.0-7.8 GB of swap in use).
+Medians, (range), n. Scripts and every record are in `.lab/r6/android-size/` (`runs.jsonl`,
+`analyze.py`, `stats.py`; p values are two-sided Mann-Whitney).
+
+**Guest RAM** (4 vCPUs, `pixel-9`):
+
+| | 2048 MB (default) | 1792 MB | 1536 MB | 1280 MB | 1024 MB |
+|---|---|---|---|---|---|
+| host memory, region sum, 40 s after a reset | 3264 MB (3173-3326, n=6) | 3069 (3057-3083, n=4): **-195** | 2813 (n=2): -451 | 2592 (n=2): -672 | 2350 (n=1): -914 |
+| of it: guest RAM / GPU / MALLOC_LARGE | 2178 / 328 / 587 | 1916 / 368 / 627 | 1660 / 368 / 625 | 1404 / 392 / 645 | 1152 / 395 / 648 |
+| `ram.bin` (compressed) | 778-816 MB | 700-733 | 628-632 | 521-564 | 428 |
+| guest MemTotal / MemAvailable after a cold boot | 1994 / 567-620 MB | 1739 / 424-453 | 1484 / 321-327 | 1229 / 195-202 | 977 / 106 |
+| `dalvik.vm.heapsize` (large memory class) | 512m | **448m** | 384m | 336m | 336m |
+| Settings cold launch | 345 ms (n=20) | 338 (n=12) | 415 (n=6), p=0.03 | 604 (n=5) | 1103 (n=3) |
+| shop cold launch | 206 ms | 210 | 216 | 245 | 380 |
+| agent step | 736 ms | 766, p=0.31 | 783, p=0.03 | 883 | 1699 |
+| shop task | 10.87 s (n=18) | 10.87 (n=10) | 10.93 (n=5) | 11.65 (n=4) | 12.05 (n=2) |
+| reset | 1.55 s (n=30) | 1.38 (n=20), p=0.02 | 1.38 | 1.22 | 1.11 |
+| powered-off boot | 4.96 s | 4.91 | 4.91 | 4.82 | 4.68 |
+
+- At 1792 MB host memory falls about 1:1 with guest RAM. The independent re-check (round 6
+  skeptic, its own AVD, 4 interleaved blocks per arm, a new baseline each) measured 3284 MB
+  (3255-3313) against 3030 MB (3011-3085) 40 s after a reset, **-254 MB** (p=0.029), and -259 MB
+  40 s after a powered-off boot (p=0.014): 0.99-1.01 MB per MB. The figures in the table above
+  (n=4 against 6, other holds) gave -195 MB, within noise of that (bootstrap 95% interval
+  0.51-1.03 MB per MB). In this run GPU and MALLOC_LARGE were 38-67 MB higher in every arm below
+  2048; the re-check did not see that at 1792. The 1536, 1280 and 1024 MB columns rest on 2, 2
+  and 1 blocks.
+- `dalvik.vm.heapgrowthlimit` (the normal memory class, 192m), `ro.config.low_ram` (empty) and
+  `nproc` (4) did not change. `dalvik.vm.heapsize`, the heap an app with `largeHeap` gets, did:
+  the emulator sets it from the RAM size. The AVD's `vm.heapSize=256` does not apply.
+- **Fidelity** (runs per arm: 2048 7, 1792 5, 1536 2, 1024 1; at 1280 no run completed, see below):
+  - At 2048 MB the app under test kept its process in every phase of every run. lmkd killed only
+    cached processes (oom adj 900+), except the 600 MB page, which once also restarted Gboard
+    and the Play Store.
+  - 1792 MB looked the same: the app kept its process 5/5, no kill below the cached range before
+    the 600 MB page. The 300 MB page had a median of 0 lmkd kills (0-5; 2048: 0, 0-2). At the
+    600 MB page lmkd killed more (median 31, 16-34, against 0, 0-34), `android.process.acore`
+    was gone once, and one WebView renderer was killed below the cached range.
+  - 1536 MB killed the app under test at the 600 MB page in 2 of 2 runs (2048: 0 of 7) and
+    restarted GMS (once also `gms.persistent`), Gboard and the launcher. The 300 MB page made
+    lmkd kill 20-26 processes (2048: 0-2), once `android.process.acore`.
+  - 1024 MB killed the app under test after Settings, Chrome and the Play Store, restarted GMS
+    and Gboard during the shop task itself, and never finished the 300 MB page (60 s).
+- **Verdict:** the default stays 2048. 1792 MB is the only size below it with no measurably
+  slower flow and no kill of the app under test (n=5). It saves about 250 MB of host memory per
+  device (8%), but it is not the same device: apps see a smaller large heap (448m), about 25% less
+  available memory (MemAvailable after a cold boot, medians 437 against 582 MB), and under a 600 MB page lmkd kills more. Set `AGEMU_ANDROID_RAM_MB=1792` for
+  new AVDs if that trade suits the app. 1536 and below are slower and lose app processes.
+
+**vCPUs** (2048 MB, `pixel-9`; 2 cores: 3 blocks, 3 cores: 2, 4 cores: 6):
+
+| | 4 (default) | 3 | 2 |
+|---|---|---|---|
+| device CPU-s: agent step | 1.20 (n=20) | 1.11 (n=8) | **1.00** (n=12), -17% |
+| device CPU-s: Settings cold launch / shop task / reset | 1.04 / 11.19 / 4.11 | 0.91 / 10.55 / 3.50 | **0.85 / 9.23** / 3.26 (-19 / -18%; reset see below) |
+| agent step / Settings cold launch | 736 / 345 ms | 725 / 315 | 748 / 339 (p=0.70 / 0.64) |
+| **shop cold launch** | 206 ms (194-236) | 218 (200-224) | **221 (201-283), +7%, p=0.014** |
+| shop task / reset / powered-off boot | 10.87 / 1.55 / 4.96 s | 10.73 / 1.42 / 5.02 | 10.85 / 1.41 / 4.93 |
+| idle (% of a core, 30 s) | 13.9 (9.4-115.4, n=18) | 9.5 (5.6-12.8, n=6) | 11.8 (9.2-27.1, n=9) |
+| host memory (region sum) | 3264 MB | 3264 | 3305 |
+
+- Fewer vCPUs do the same guest work in less host CPU time: compared block by block (3 blocks
+  against 6), every 2-core block used less CPU than every 4-core block for the agent step (-17%),
+  the Settings cold launch (-19%), the shop task (-18%) and the shop cold launch (-11%). Reset is
+  not shown: the pooled 4.11 CPU-s at 4 cores comes from two slow blocks, and block medians
+  differ by about 3% (p=0.55). The idle windows overlap too much to show a saving at rest.
+- The shop's cold launch was slower at 2 cores (block medians 211, 216 and 249 ms against 197-213
+  ms at 4; one 2-core block is below the slowest 4-core block; block-level p=0.048). Apps see 2 processors (`nproc`, `Runtime.availableProcessors()`), and thread
+  pools sized from it shrink. Fidelity runs (4 at 2 cores, 2 at 3) killed nothing below the
+  cached range.
+- `scripts/e2e-android.sh` passed 44/44 at 2 cores and at 4.
+- **Verdict:** not a default (one flow slower, and the guest differs). `AGEMU_ANDROID_CORES=2`
+  applies to new AVDs, like the RAM. The cores are fixed when the AVD is created, because the
+  baseline snapshot holds them.
+
+**Display size** (`small-phone` 720x1600@320 created as the AVD's native profile, against
+`pixel-9` 1080x2424@420; 2 blocks against 6):
+- Host memory (region sum) 40 s after a reset: 2990 MB (2986-2993) against 3264. GPU 179
+  against 328 MB, MALLOC_LARGE 472 against 587 MB: **-274 MB**; -303 MB after the flows.
+- Reset 1.15 s against 1.40 s (about -18%), device CPU per reset 2.95 against 3.43 CPU-s (-14%),
+  against the `pixel-9` blocks of the same session (2 blocks each, so no block-level p below
+  0.07). Against all `pixel-9` blocks, which include two slow ones from other sessions, it would
+  read 1.15 against 1.55 s. Powered-off boot 4.69 against 4.96 s.
+- Agent step 737 against 736 ms, with 11% fewer device CPU-seconds (1.07 against 1.20); agemud's
+  own CPU per shop task 0.30 against 0.33 CPU-s. The shop task itself took longer (11.6 s), only
+  because the smaller screen needs more scrolling to reach its product.
+- A profile is the user's choice of device, so this is not a default: a screen the size of a
+  budget phone (`agemu create --profile small-phone`) costs about 0.27 GB less per device.
+
+**Seen on the way:**
+- **Emulator crash on a snapshot load after Chrome.** One reset (2048 MB, the reference) crashed
+  the emulator: `hvf_map_safe: FATAL: tried to map [0x9fbff8000 0x9fc000000) ... while it was
+  mapped to [0x9faffc000 0x9fbffc000)`. It came after a session in which Chrome had created a
+  Vulkan device and a WebView page had run. agemu then waited for the restored agent until the
+  CLI's 3-minute limit, without noticing that the emulator was gone. Afterwards, every fidelity
+  run started from a fresh emulator process and the emulator was powered off after it, so a
+  snapshot load after Chrome was not tried again; how often it crashes is not known.
+- **A tap on a text field, then `type`, can type into the previous field.** In 17 of 102 runs of
+  the shop task, on every arm (2048/4: 3 of 28), the text typed right after a tap on a field went
+  into the field focused before it: City into Street ("12 Analytical StLondon"), and in the
+  dumps also Postal code into City (4 of 9). The order was then refused. It is not caused by this
+  round's changes: the skeptic reproduced it on the base commit (2 of 20 shop tasks, once Street
+  into Full name). Waiting until the
+  tapped field reported focus before typing (fidelity runs only) avoided it in 7 of 7 runs; before
+  that wait, 5 of 21 fidelity runs had stopped on it. agemu's `tap` returns once the touch is
+  queued (see Caveats), so the next call can act before the app has moved focus.
+- **Installed apps survive a new baseline.** Deleting the baseline keeps `userdata`, so apps
+  installed earlier go into the next baseline.
+
 ### End-to-end run
 
 Round 5's merge (2026-11-07, agemu-lab, compressed baseline, load average 2.9-5.9):
@@ -1391,6 +1777,7 @@ and a "keeps stopping" dialog covered the lab screen after the second crash.
   - On this emulator `-lowram` does **not** set `ro.config.low_ram` in the guest. Verified: the property is empty, and `dumpsys meminfo` reports `Total RAM: 2,041,792K` with `Tuning: ... (high-end-gfx)`, not low-ram. So the device behaves like a normal 2 GB phone.
   - agemu re-checks `ro.config.low_ram` after every cold boot and logs a warning if it is ever set.
   - `AGEMU_ANDROID_RAM_MB=4096` drops the flag. The snapshot then grows from about 2 GB to about 4 GB.
+  - The emulator sets `dalvik.vm.heapsize` (an app's large heap) from the RAM size: 512m at 2048 MB, 448m at 1792, 384m at 1536, 336m at 1280 and below. `heapgrowthlimit` stays 192m. See "Guest RAM, vCPUs and display size".
 - **Non-native profiles are resampled.** Only the AVD's native profile is pixel-exact; see Screen profiles.
   - For larger profiles (fold, tablet, pixel-9-pro on a 1080x2424 AVD) the framebuffer has fewer pixels than the profile, so screenshots are upscaled and slightly soft.
   - Taps land within one framebuffer pixel, which is up to 2 profile pixels for the fold profile.

@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
@@ -175,10 +180,133 @@ func TestExitCodes(t *testing.T) {
 		{&client.Error{Message: "x", Code: daemon.CodeAppCrashed}, 4},
 		{&client.Error{Message: "x", Code: daemon.CodeNotImplemented}, 3},
 		{&api.AppCrashedError{Err: api.NotImplemented(api.IOS, "crashes", "")}, 3},
+		{&api.PreparingError{Device: "android:x", Phase: "settling"}, 5},
+		{&client.Error{Message: "x", Code: daemon.CodePreparing}, 5},
 	}
 	for _, c := range cases {
 		if got := exitCode(c.err); got != c.want {
 			t.Fatalf("%v: exit %d, want %d", c.err, got, c.want)
 		}
+	}
+}
+
+// fakeDaemon answers devices with the states in turn, and boot with booted.
+func fakeDaemon(t *testing.T, conn net.Conn, states []api.Device) {
+	r := bufio.NewReader(conn)
+	i := 0
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req daemon.Request
+		_ = json.Unmarshal(line, &req)
+		var res any
+		switch req.Method {
+		case "devices":
+			res = []api.Device{states[i]}
+			if i < len(states)-1 {
+				i++
+			}
+		case "boot":
+			res = api.Device{ID: "android:x", State: "booted"}
+		}
+		b, _ := json.Marshal(res)
+		out, _ := json.Marshal(daemon.Response{ID: req.ID, Result: b})
+		conn.Write(append(out, '\n'))
+	}
+}
+
+func TestBootWaitsForThePreparationWithProgress(t *testing.T) {
+	old1, old2 := prepPoll, prepReport
+	prepPoll, prepReport = time.Millisecond, time.Hour
+	defer func() { prepPoll, prepReport = old1, old2 }()
+	a, b := net.Pipe()
+	defer a.Close()
+	prep := func(phase string) api.Device {
+		return api.Device{ID: "android:x", State: api.StatePreparing, Preparing: &api.Preparing{Phase: phase, ElapsedS: 10, MaxS: 870}}
+	}
+	go fakeDaemon(t, b, []api.Device{prep("cold boot"), prep("settling"), prep("settling"), {ID: "android:x", State: "booted"}})
+	cl := client.New(a)
+	first, _ := json.Marshal(prep("cold boot"))
+	var progress bytes.Buffer
+	raw, err := waitPrepared(cl, daemon.Params{Device: "android:x", NoWait: true}, first, &progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dev api.Device
+	_ = json.Unmarshal(raw, &dev)
+	if dev.State != "booted" {
+		t.Fatalf("final %s", raw)
+	}
+	out := progress.String()
+	for _, want := range []string{"cold boot", "settling", "at most ~15 min", "baseline ready"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("progress %q lacks %q", out, want)
+		}
+	}
+	if strings.Count(out, "settling") != 1 {
+		t.Fatalf("a phase is printed once (until prepReport): %q", out)
+	}
+}
+
+func TestBootReportsAFailedPreparation(t *testing.T) {
+	old := prepPoll
+	prepPoll = time.Millisecond
+	defer func() { prepPoll = old }()
+	a, b := net.Pipe()
+	defer a.Close()
+	go fakeDaemon(t, b, []api.Device{{ID: "android:x", State: "shutdown", PrepareError: "cancelled by shutdown"}})
+	first, _ := json.Marshal(api.Device{ID: "android:x", State: api.StatePreparing, Preparing: &api.Preparing{Phase: "settling"}})
+	_, err := waitPrepared(client.New(a), daemon.Params{Device: "android:x"}, first, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cancelled by shutdown") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestBootOfABootedDeviceDoesNotPoll(t *testing.T) {
+	raw, _ := json.Marshal(api.Device{ID: "android:x", State: "booted"})
+	got, err := waitPrepared(nil, daemon.Params{}, raw, io.Discard)
+	if err != nil || string(got) != string(raw) {
+		t.Fatalf("%s %v", got, err)
+	}
+}
+
+// `boot --cold` of a device that prepared its baseline: the preparation was the cold boot, so the
+// final call that reads the booted device must not ask for another one.
+func TestBootColdDoesNotColdBootAgainAfterThePreparation(t *testing.T) {
+	old := prepPoll
+	prepPoll = time.Millisecond
+	defer func() { prepPoll = old }()
+	a, b := net.Pipe()
+	defer a.Close()
+	boots := make(chan daemon.Params, 4)
+	go func() {
+		r := bufio.NewReader(b)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req daemon.Request
+			_ = json.Unmarshal(line, &req)
+			var res any = []api.Device{{ID: "android:x", State: "booted"}}
+			if req.Method == "boot" {
+				var p daemon.Params
+				_ = json.Unmarshal(req.Params, &p)
+				boots <- p
+				res = api.Device{ID: "android:x", State: "booted"}
+			}
+			bs, _ := json.Marshal(res)
+			out, _ := json.Marshal(daemon.Response{ID: req.ID, Result: bs})
+			b.Write(append(out, '\n'))
+		}
+	}()
+	first, _ := json.Marshal(api.Device{ID: "android:x", State: api.StatePreparing, Preparing: &api.Preparing{Phase: "cold boot"}})
+	if _, err := waitPrepared(client.New(a), daemon.Params{Device: "android:x", Cold: true, NoWait: true}, first, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if p := <-boots; p.Cold || p.NoWait {
+		t.Fatalf("the final boot asked for cold=%v noWait=%v", p.Cold, p.NoWait)
 	}
 }

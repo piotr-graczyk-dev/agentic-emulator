@@ -192,10 +192,14 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 	}
 	if _, err := c.conn.Write(req); err != nil {
 		if c.redial == nil {
-			return Reply{}, err
+			// Not sent, and this client cannot reconnect: the caller may send it again on a new
+			// connection (the MCP server does, once).
+			return Reply{}, &SendError{Err: err}
 		}
 		// The daemon closed this connection before the request went out (it stopped or
-		// restarted), so nothing ran: send it again on a new connection.
+		// restarted), so nothing ran: send it again on a new connection. This is the only resend
+		// for a client from Dial; a failure here is a plain error, not a SendError, so no caller
+		// sends it a third time.
 		if err := c.reconnect(); err != nil {
 			return Reply{}, err
 		}
@@ -222,12 +226,20 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 	return Reply{Result: resp.Result, Ms: resp.Ms, AppCrash: resp.AppCrash}, nil
 }
 
+// SendError is a request that could not be written to the daemon (the connection is broken, e.g.
+// the daemon was restarted). The daemon did not get it, so it is safe to send it again on a new
+// connection.
+type SendError struct{ Err error }
+
+func (e *SendError) Error() string { return "sending to the agemu daemon: " + e.Err.Error() }
+func (e *SendError) Unwrap() error { return e.Err }
+
 // Error is an error the daemon answered. It matches (errors.Is) api.ErrNotImplemented or
 // api.ErrAppCrashed when the daemon marked it so: the capability has no implementation on the
 // device's platform, or the call failed while the app the agent launched was down after a crash.
 type Error struct {
 	Message string
-	Code    string        // daemon.CodeNotImplemented, daemon.CodeAppCrashed or ""
+	Code    string        // daemon.CodeNotImplemented, daemon.CodeAppCrashed, daemon.CodePreparing or ""
 	Crash   *api.AppCrash // the crash, with code app_crashed
 }
 
@@ -239,6 +251,8 @@ func (e *Error) Unwrap() error {
 		return api.ErrNotImplemented
 	case daemon.CodeAppCrashed:
 		return api.ErrAppCrashed
+	case daemon.CodePreparing:
+		return api.ErrPreparing
 	}
 	return nil
 }

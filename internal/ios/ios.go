@@ -80,7 +80,20 @@ type Backend struct {
 	// processes this daemon's park stopped (the only ones its resume continues).
 	parked, parking map[string]bool
 	stoppedPids     map[string]map[int]bool
-	parkScan        sync.Once
+	// appOps counts, per udid, the agemu calls in flight that act on apps or app-facing state
+	// (install, launch, open, push, uninstall, terminate, clear-data, reset, permissions,
+	// location; idle.go holds its passes meanwhile); appWork is, per udid, when the first call that
+	// can start app work (install, launch, open, push, clear-data) began in the current boot (idle.go's
+	// cut-off).
+	appOps   map[string]int
+	appWork  map[string]time.Time
+	appGates map[string]*sync.RWMutex // appGate
+	parkScan sync.Once
+	// parkLocks serializes, per simulator, a park with a shutdown (park.go, parkLock).
+	parkLocks map[string]*sync.Mutex
+	// parks counts, per udid, the parks this daemon made (idle.go starts its counting again after
+	// one).
+	parks map[string]int
 	// bg is cancelled by Close; bgWG tracks the background work that uses it.
 	bg     context.Context
 	stopBg context.CancelFunc
@@ -95,7 +108,7 @@ func New() *Backend {
 	b := &Backend{lastUse: map[string]time.Time{}, apps: map[string]map[int]string{}, systemAppCache: map[string][]string{},
 		lean: map[string]bool{}, leaning: map[string]bool{}, leanAgain: map[string]bool{}, bootGen: map[string]int{},
 		anim: map[string]float64{}, logs: map[string]*deviceLogs{}, reports: newReportDir(), seen: map[string]*seenElements{},
-		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}}
+		parked: map[string]bool{}, parking: map[string]bool{}, stoppedPids: map[string]map[int]bool{}, appOps: map[string]int{}, appWork: map[string]time.Time{}}
 	b.bg, b.stopBg = context.WithCancel(context.Background())
 	if os.Getenv("AGEMU_IOS_PRESTART") != "0" {
 		go func() {
@@ -183,6 +196,16 @@ func udidOf(id string) (string, error) {
 	return u, nil
 }
 
+// CanonicalID spells a simulator's id as CoreSimulator does: the UDID in upper case. The helper
+// matches UDIDs in any case, so ios:<lower-case udid> names the same simulator.
+func (b *Backend) CanonicalID(id string) string {
+	u, err := udidOf(id)
+	if err != nil || len(u) != 36 {
+		return id
+	}
+	return string(api.IOS) + ":" + strings.ToUpper(u)
+}
+
 func managed(name string) bool { return strings.HasPrefix(name, NamePrefix) }
 
 func envOn(name string) bool {
@@ -192,6 +215,19 @@ func envOn(name string) bool {
 
 // target resolves a device id and refuses non-agemu simulators unless explicitly allowed.
 func (b *Backend) target(ctx context.Context, id string) (simDevice, error) {
+	d, err := b.lookup(ctx, id)
+	if err != nil {
+		return simDevice{}, err
+	}
+	b.mu.Lock()
+	b.lastUse[d.UDID] = time.Now()
+	b.mu.Unlock()
+	return d, nil
+}
+
+// lookup is target without counting the call as a use of the device (park: parking does not move
+// the simulator to most recently used, so it keeps its place in the shutdown order).
+func (b *Backend) lookup(ctx context.Context, id string) (simDevice, error) {
 	udid, err := udidOf(id)
 	if err != nil {
 		return simDevice{}, err
@@ -203,9 +239,6 @@ func (b *Backend) target(ctx context.Context, id string) (simDevice, error) {
 	if !managed(d.Name) && !envOn("AGEMU_IOS_ALLOW_FOREIGN") {
 		return simDevice{}, fmt.Errorf("refusing to act on simulator %q (%s): agemu only drives simulators named %s* (set AGEMU_IOS_ALLOW_FOREIGN=1 to override)", d.Name, d.UDID, NamePrefix)
 	}
-	b.mu.Lock()
-	b.lastUse[d.UDID] = time.Now()
-	b.mu.Unlock()
 	return d, nil
 }
 
@@ -588,6 +621,11 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 }
 
 func (b *Backend) shutdown(ctx context.Context, udid string) error {
+	// A park of the same simulator (the daemon's auto-park of an eviction victim) finishes
+	// first, or waits until the shutdown is done and then finds the simulator shut down.
+	pl := b.parkLock(udid)
+	pl.Lock()
+	defer pl.Unlock()
 	// A parked simulator (an eviction victim, say) is continued first: its stopped launchd_sim
 	// cannot take part in the shutdown.
 	if _, _, err := b.unpark(udid); err != nil {
@@ -675,6 +713,14 @@ func (b *Backend) SetProfile(ctx context.Context, id string, p api.Profile) (api
 	b.mu.Lock()
 	b.lastUse[d.UDID] = time.Now()
 	b.mu.Unlock()
+	// The simulator switched to can be parked (by an agent, or by the daemon's auto-park while
+	// the agent used another one): continue it first, as the daemon does for the device a call
+	// names, or the boot would wait on its stopped processes.
+	if d.UDID != cur.UDID && b.isParked(d.UDID) {
+		if _, err := b.Resume(ctx, string(api.IOS)+":"+d.UDID); err != nil {
+			return api.Device{}, fmt.Errorf("resuming the parked %s before the switch: %w", d.Name, err)
+		}
+	}
 	ready, err := b.bootMakingRoom(ctx, d.UDID, d.StateCode == stateBooted)
 	if err != nil {
 		return api.Device{}, err
@@ -1011,6 +1057,7 @@ func (b *Backend) Install(ctx context.Context, id, path string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, true)()
 	if !strings.HasSuffix(strings.TrimSuffix(path, "/"), ".app") {
 		return fmt.Errorf("install needs a simulator .app bundle, got %s", path)
 	}
@@ -1050,6 +1097,7 @@ func (b *Backend) LaunchWith(ctx context.Context, id, app string, o backend.Laun
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, true)()
 	// A device this daemon has not booted gets AGEMU_IOS_ANIMATIONS before its first launch.
 	b.animateDevice(ctx, d, false)
 	// Capture the app's startup lines: the stream starts before the launch. The first launch or
@@ -1138,7 +1186,63 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 	if err != nil {
 		return err
 	}
+	defer b.appOp(d.UDID, false)()
 	defer b.expectExits(d.UDID, app)(0)
 	b.noteInput(d.UDID)
 	return b.call(ctx, "terminate", map[string]any{"udid": d.UDID, "bundleId": app}, nil)
+}
+
+// appOp marks an agemu call on udid that acts on apps as in flight until the returned func runs.
+// work: the call can start app work (install, launch, open, push, clear-data); the first one of a boot sets
+// the idle stop's cut-off (appWorkSince).
+func (b *Backend) appOp(udid string, work bool) func() {
+	// An idle pass that is ending daemons holds the gate (idle.go, exclusive): the call starts
+	// once those ends are done, and a pass sees it as busy before any later end.
+	g := b.appGate(udid)
+	g.RLock()
+	b.mu.Lock()
+	b.appOps[udid]++
+	if _, ok := b.appWork[udid]; work && !ok {
+		b.appWork[udid] = time.Now()
+	}
+	b.mu.Unlock()
+	g.RUnlock()
+	return func() {
+		b.mu.Lock()
+		if b.appOps[udid]--; b.appOps[udid] <= 0 {
+			delete(b.appOps, udid)
+		}
+		b.mu.Unlock()
+	}
+}
+
+// appGate orders the registration of app calls on udid (appOp, shared) with an idle pass's final
+// busy check and SIGKILLs (exclusive).
+func (b *Backend) appGate(udid string) *sync.RWMutex {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appGates == nil {
+		b.appGates = map[string]*sync.RWMutex{}
+	}
+	g, ok := b.appGates[udid]
+	if !ok {
+		g = &sync.RWMutex{}
+		b.appGates[udid] = g
+	}
+	return g
+}
+
+// appOpBusy reports whether an agemu call that acts on apps is in flight on udid.
+func (b *Backend) appOpBusy(udid string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.appOps[udid] > 0
+}
+
+// appWorkSince is when the first install, launch, open, push or clear-data of the current boot began on
+// udid (zero: none yet).
+func (b *Backend) appWorkSince(udid string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.appWork[udid]
 }

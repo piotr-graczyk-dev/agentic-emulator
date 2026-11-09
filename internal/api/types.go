@@ -9,6 +9,8 @@ package api
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 )
 
@@ -134,11 +136,57 @@ type Device struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Platform  Platform `json:"platform"`
-	State     string   `json:"state"` // "shutdown" | "booting" | "booted" | "parked"
+	State     string   `json:"state"` // "shutdown" | "booting" | "booted" | "parked" | "preparing"
 	Profile   string   `json:"profile,omitempty"`
 	Screen    *Screen  `json:"screen,omitempty"`
 	OSVersion string   `json:"osVersion,omitempty"`
+	// Preparing is set while the device is in StatePreparing.
+	Preparing *Preparing `json:"preparing,omitempty"`
+	// PrepareError is why the last preparation failed (or was cancelled), until the next boot.
+	PrepareError string `json:"prepareError,omitempty"`
+	// NoBaseline: the device runs but has no baseline snapshot (a daemon stopped or was
+	// restarted while preparing it). Calls work, but reset cannot; `boot` prepares it again.
+	NoBaseline bool `json:"noBaseline,omitempty"`
 }
+
+// StatePreparing is the state of a device whose boot takes a baseline snapshot (a new Android
+// device, or a retake): the boot goes on in the daemon, other calls on the device fail at once
+// with a PreparingError, and `devices` shows the phase and the time so far.
+const StatePreparing = "preparing"
+
+// Preparing describes a preparation in progress.
+type Preparing struct {
+	Phase    string  `json:"phase"`    // e.g. "cold boot", "settling", "saving"
+	ElapsedS float64 `json:"elapsedS"` // seconds since the boot started
+	// MaxS is the longest the preparation can take, in seconds (its bound).
+	MaxS float64 `json:"maxS,omitempty"`
+	Hint string  `json:"hint,omitempty"`
+	// Note says something unusual about this preparation (e.g. an interrupted first boot being
+	// repaired with -wipe-data).
+	Note string `json:"note,omitempty"`
+}
+
+// ErrPreparing matches (errors.Is) the error of a call on a device that is preparing its baseline,
+// also after a round trip through the daemon socket (code "preparing").
+var ErrPreparing = errors.New("the device is preparing its baseline")
+
+// PreparingError is returned at once for a call on a preparing device.
+type PreparingError struct {
+	Device  string
+	Phase   string
+	Elapsed float64 // seconds
+	MaxS    float64 // seconds; 0 if unknown
+}
+
+func (e *PreparingError) Error() string {
+	s := fmt.Sprintf("%s is preparing its baseline snapshot (%s, %.0fs so far", e.Device, e.Phase, e.Elapsed)
+	if e.MaxS > 0 {
+		s += fmt.Sprintf(", at most about %.0f min in all", math.Ceil(e.MaxS/60))
+	}
+	return s + "; this happens once per device): poll `devices` until it is booted, or call `boot` again"
+}
+
+func (e *PreparingError) Unwrap() error { return ErrPreparing }
 
 // StateParked is the state of a booted device that `park` stopped in place
 // (backend.Parker); the next call on it resumes it.
@@ -222,6 +270,10 @@ type CreateRequest struct {
 type BootOptions struct {
 	// Cold forces a full boot, bypassing snapshots (used for baselines).
 	Cold bool `json:"cold,omitempty"`
+	// NoWait returns as soon as the boot turns out to need a baseline snapshot (state
+	// StatePreparing; the boot goes on in the daemon), or after a short bound. A boot from an
+	// existing baseline still returns booted.
+	NoWait bool `json:"noWait,omitempty"`
 }
 
 type ScreenshotOptions struct {

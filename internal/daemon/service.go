@@ -26,6 +26,7 @@ type Params struct {
 	Name     string       `json:"name,omitempty"`
 	Profile  string       `json:"profile,omitempty"`
 	Cold     bool         `json:"cold,omitempty"`
+	NoWait   bool         `json:"noWait,omitempty"` // boot: return once it is preparing (api.BootOptions)
 
 	// set_profile custom size (Android)
 	Width   int `json:"width,omitempty"`
@@ -94,17 +95,28 @@ type Service struct {
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 	states   map[string]*devState // logs, crashes and the crash notice (logs.go)
+	// ap is the auto-parker (autopark.go; nil when off); activity counts each device's calls for it.
+	ap       *autoParker
+	actMu    sync.Mutex
+	activity map[string]*devActivity
+	// switching counts the profile switches in flight per platform (autopark.go).
+	switching map[api.Platform]int
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {
-	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}}
+	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}, activity: map[string]*devActivity{}, switching: map[api.Platform]int{}}
 	for _, b := range bs {
 		s.backends[b.Platform()] = b
+	}
+	if d := autoParkFromEnv(); d > 0 {
+		s.startAutoPark(d, autoParkTick(d))
 	}
 	return s
 }
 
+// Close stops the auto-parker and resumes the devices it parked, then closes the backends.
 func (s *Service) Close() {
+	s.stopAutoPark()
 	for _, b := range s.backends {
 		_ = b.Close()
 	}
@@ -160,7 +172,7 @@ func (s *Service) listAll(ctx context.Context) ([]api.Device, error) {
 // into a full device id. Empty means "the only booted device".
 func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 	if strings.HasPrefix(ref, string(api.Android)+":") || strings.HasPrefix(ref, string(api.IOS)+":") {
-		return ref, nil
+		return s.canonical(ref), nil
 	}
 	devs, err := s.listAll(ctx)
 	if err != nil {
@@ -178,6 +190,20 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 		case 1:
 			return booted[0], nil
 		case 0:
+			// A device that is preparing its baseline is the one meant: the call then fails with
+			// the preparing error (poll devices) instead of "no booted device".
+			var preparing []string
+			for _, d := range devs {
+				if d.State == api.StatePreparing {
+					preparing = append(preparing, d.ID)
+				}
+			}
+			if len(preparing) == 1 {
+				return preparing[0], nil
+			}
+			if len(preparing) > 1 {
+				return "", fmt.Errorf("no booted device; %s are preparing their baselines (poll `devices`)", strings.Join(preparing, ", "))
+			}
 			return "", fmt.Errorf("no booted device; boot one with `agemu boot <device>`")
 		default:
 			return "", fmt.Errorf("several devices are booted, pass one with -d: %s", strings.Join(booted, ", "))
@@ -189,6 +215,20 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unknown device %q", ref)
+}
+
+// canonical returns the one spelling of a device id its backend lists (backend.IDNormalizer),
+// so that every key the daemon keeps per device (device lock, logs state, auto-park activity)
+// and every id it passes to a backend is the same for one device.
+func (s *Service) canonical(id string) string {
+	b, err := s.backendFor(id)
+	if err != nil {
+		return id
+	}
+	if n, ok := b.(backend.IDNormalizer); ok {
+		return n.CanonicalID(id)
+	}
+	return id
 }
 
 // Call dispatches one method. It drops the crash notice; Handle returns it.
@@ -246,6 +286,12 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err != nil {
 		return nil, nil, err
 	}
+	// The call counts as activity on the device until it returns (autopark.go): no auto-park
+	// while it runs, and a park in progress finishes before the wake below.
+	if err := s.beginCall(ctx, id, method); err != nil {
+		return nil, nil, err
+	}
+	defer s.endCall(id, method)
 	// Arguments are checked before the device lock and the backend: a bad call fails at once.
 	if err := checkCapability(method, &p); err != nil {
 		return nil, nil, err
@@ -253,16 +299,69 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
 	}
+	// A device preparing its baseline answers at once (before any resume: a preparing device is
+	// never parked, and the call must not wait behind the preparation).
+	if err := checkPreparing(ctx, b, id, method); err != nil {
+		return nil, nil, err
+	}
+	if method == "set_profile" {
+		if _, err := switchProfile(b.Platform(), p); err != nil {
+			return nil, nil, err
+		}
+		// An iOS profile switch moves to another simulator, which may be one this daemon
+		// auto-parked: resume those first. An Android switch stays on this AVD, which wake
+		// below resumes.
+		if b.Platform() == api.IOS {
+			if err := s.resumeAutoParked(ctx, api.IOS); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if err := s.wake(ctx, b, id, method); err != nil {
 		return nil, nil, err
 	}
 
 	res, err = s.onDevice(ctx, b, id, method, p)
+	if d, isDev := res.(api.Device); isDev && err == nil && d.ID != id {
+		s.touch(d.ID) // an iOS profile switch moves to another simulator
+	}
 	switch method {
 	case "boot", "shutdown", "reset", "crashes", "park": // they end the watch or report crashes themselves; a parked app reports nothing
 		return res, nil, err
 	}
 	return s.report(ctx, b, id, res, err)
+}
+
+// checkPreparing answers a call on a device that is preparing its baseline at once, instead of
+// letting it wait for minutes behind the boot (backend.Preparer). Boot (which returns the state or
+// waits), shutdown (which cancels the preparation) and the reads of what was captured go through.
+func checkPreparing(ctx context.Context, b backend.Backend, id, method string) error {
+	pr, ok := b.(backend.Preparer)
+	if !ok {
+		return nil
+	}
+	switch method {
+	case "boot", "shutdown", "logs", "crashes":
+		return nil
+	}
+	p := pr.AwaitDecision(ctx, id)
+	if p == nil {
+		return nil
+	}
+	return &api.PreparingError{Device: id, Phase: p.Phase, Elapsed: p.ElapsedS, MaxS: p.MaxS}
+}
+
+// preparingNow is checkPreparing without the wait (after the device lock: a boot that held it
+// may have become a preparation meanwhile).
+func preparingNow(b backend.Backend, id string) error {
+	pr, ok := b.(backend.Preparer)
+	if !ok {
+		return nil
+	}
+	if p := pr.Preparing(id); p != nil {
+		return &api.PreparingError{Device: id, Phase: p.Phase, Elapsed: p.ElapsedS, MaxS: p.MaxS}
+	}
+	return nil
 }
 
 // wake resumes a parked device (backend.Parker) before a call that needs it running: every call
@@ -287,7 +386,28 @@ func (s *Service) wake(ctx context.Context, b backend.Backend, id, method string
 	if _, err := pk.Resume(ctx, id); err != nil {
 		return fmt.Errorf("resuming the parked device before %s: %w", method, err)
 	}
+	s.disown(id)
 	return nil
+}
+
+// switchProfile is the profile a set_profile call asks for, checked against the device's platform.
+func switchProfile(plat api.Platform, p Params) (api.Profile, error) {
+	var prof api.Profile
+	switch {
+	case p.Profile != "":
+		var err error
+		if prof, err = profiles.Get(p.Profile); err != nil {
+			return api.Profile{}, err
+		}
+	case p.Width > 0 && p.Height > 0 && p.Density > 0:
+		prof = profiles.Custom(p.Width, p.Height, p.Density)
+	default:
+		return api.Profile{}, fmt.Errorf("set_profile needs profile or width+height+density")
+	}
+	if prof.Platform != plat {
+		return api.Profile{}, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, plat)
+	}
+	return prof, nil
 }
 
 // onDevice runs one method on a resolved device whose arguments were checked.
@@ -325,9 +445,21 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 		return s.crashes(ctx, b, id, p)
 	}
 
+	if method == "shutdown" {
+		// A boot that is preparing a baseline can hold the device lock for minutes (a boot
+		// without NoWait); the backend cancels the preparation and orders the rest itself.
+		if pr, ok := b.(backend.Preparer); ok && pr.Preparing(id) != nil {
+			return ok2(b.Shutdown(ctx, id))
+		}
+	}
 	l := s.deviceLock(id)
 	l.Lock()
 	defer l.Unlock()
+	if method != "boot" && method != "shutdown" {
+		if err := preparingNow(b, id); err != nil {
+			return nil, err
+		}
+	}
 
 	if method == "launch" {
 		s.launching(id, appOf(p.App), p.start) // a crash during the launch counts
@@ -362,11 +494,9 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 
 // act runs one device action (the caller holds the device lock).
 func (s *Service) act(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
-	var err error
-
 	switch method {
 	case "boot":
-		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
+		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold, NoWait: p.NoWait})
 	case "shutdown":
 		return ok(b.Shutdown(ctx, id))
 	case "reset":
@@ -385,19 +515,9 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		}
 		return map[string]any{"ok": true, "resumed": resumed}, nil
 	case "set_profile":
-		var prof api.Profile
-		if p.Profile != "" {
-			prof, err = profiles.Get(p.Profile)
-			if err != nil {
-				return nil, err
-			}
-		} else if p.Width > 0 && p.Height > 0 && p.Density > 0 {
-			prof = profiles.Custom(p.Width, p.Height, p.Density)
-		} else {
-			return nil, fmt.Errorf("set_profile needs profile or width+height+density")
-		}
-		if prof.Platform != b.Platform() {
-			return nil, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, b.Platform())
+		prof, err := switchProfile(b.Platform(), p)
+		if err != nil {
+			return nil, err
 		}
 		return b.SetProfile(ctx, id, prof)
 	case "tap":
@@ -457,6 +577,8 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 type keyTyper interface {
 	TypeKeys(ctx context.Context, id, text string) error
 }
+
+func ok2(err error) (any, error) { return ok(err) }
 
 func ok(err error) (any, error) {
 	if err != nil {

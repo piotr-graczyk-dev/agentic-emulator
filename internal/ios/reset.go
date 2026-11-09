@@ -55,6 +55,7 @@ func (b *Backend) reset(ctx context.Context, id string) (ResetReport, error) {
 	if err != nil {
 		return rep, err
 	}
+	defer b.appOp(d.UDID, false)()
 	if d.StateCode != stateBooted {
 		if d, err = b.bootReady(ctx, d.UDID); err != nil {
 			return rep, err
