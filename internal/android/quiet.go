@@ -1,15 +1,16 @@
 package android
 
 // Quiet baselines. A snapshot restores the guest exactly as it was saved, so work the guest had
-// pending at the save runs again after every reset and boot: Play Store's daily hygiene jobs,
-// the compaction of apps the freezer had not yet frozen, Play services' flag push (about 6
-// minutes after a cold boot). A baseline saved 49 s after a cold boot (agemu's 20 s settle on a
-// quiet host) replayed about 38 CPU-seconds of that in the 2 minutes after each reset; one saved
-// after the guest had finished it replayed almost none. agemu therefore waits, before it saves the
-// baseline, until the guest has been up AGEMU_ANDROID_BASELINE_UPTIME_S (default 420) and its CPU
-// has been quiet for a while. This costs a few minutes once per baseline (a new device, or a
-// retake); boots and resets from it are unchanged in speed. AGEMU_ANDROID_BASELINE_UPTIME_S=0
-// saves as soon as the baseline steps are done (agemu before 2026-11-08).
+// pending at the save runs again after every reset and boot: Play Store's daily hygiene jobs and
+// app updates, the compaction of apps the freezer had not yet frozen, Play services' flag push.
+// Emulator CPU in the 2 minutes after a reset: 154 CPU-s with a new device's old-style baseline
+// (saved about 50 s after boot), 54 with a retake saved at 49 s, 10-17 with a settled one. agemu
+// therefore waits, before it saves the baseline, until the guest has been up
+// AGEMU_ANDROID_BASELINE_UPTIME_S (default 420) and its last minute was quiet (CPU and network).
+// That makes a first boot (or a retake) take 7-8 minutes, at most about 15 (prepMax); the boot
+// goes on in the background meanwhile (prepare.go). Boots and resets from the baseline are
+// unchanged in speed. AGEMU_ANDROID_BASELINE_UPTIME_S=0 saves as soon as the baseline steps are
+// done (agemu before 2026-11-08).
 
 import (
 	"context"

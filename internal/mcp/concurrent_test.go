@@ -159,3 +159,34 @@ func TestBootOfAPreparingDeviceReturnsAtOnceWithAHint(t *testing.T) {
 		t.Fatal("a call on a preparing device blocked")
 	}
 }
+
+func TestACallIsResentAfterTheDaemonRestarted(t *testing.T) {
+	sb := &slowBackend{release: make(chan struct{})}
+	close(sb.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := daemon.NewService(t.TempDir(), sb)
+	dials := 0
+	dial := func() (*client.Client, error) {
+		dials++
+		c1, c2 := net.Pipe()
+		if dials == 1 {
+			c2.Close() // the daemon behind this connection is gone
+		} else {
+			go daemon.ServeConn(ctx, svc, c2)
+		}
+		return client.New(c1), nil
+	}
+	pool := &clientPool{dial: dial}
+	res, rerr := handle(rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: json.RawMessage(`{"name":"devices","arguments":{}}`)}, pool)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	b, _ := json.Marshal(res)
+	if strings.Contains(string(b), `"isError":true`) || !strings.Contains(string(b), "android:x") {
+		t.Fatalf("devices after a daemon restart: %s", b)
+	}
+	if dials != 2 {
+		t.Fatalf("dials %d, want 2 (the broken connection, then a new one)", dials)
+	}
+}

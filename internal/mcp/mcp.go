@@ -333,8 +333,18 @@ func handle(req rpcReq, pool *clientPool) (any, *rpcErr) {
 		if err != nil {
 			return toolError(err), nil
 		}
-		res, broken := callToolConn(cl, p.Name, p.Arguments)
-		pool.put(cl, broken)
+		res, connErr := callToolConn(cl, p.Name, p.Arguments)
+		pool.put(cl, connErr != nil)
+		var send *client.SendError
+		if errors.As(connErr, &send) {
+			// The daemon never got the request (it was restarted, say): send it once more on a
+			// new connection, which starts the daemon again if needed.
+			if cl, err = pool.dial(); err != nil {
+				return toolError(err), nil
+			}
+			res, connErr = callToolConn(cl, p.Name, p.Arguments)
+			pool.put(cl, connErr != nil)
+		}
 		return res, nil
 	}
 	return nil, &rpcErr{Code: -32601, Message: "method not found: " + req.Method}
@@ -354,8 +364,9 @@ func callTool(cl *client.Client, name string, args map[string]json.RawMessage) m
 	return res
 }
 
-// callToolConn runs one tool; broken reports a failure of the daemon connection itself.
-func callToolConn(cl *client.Client, name string, args map[string]json.RawMessage) (map[string]any, bool) {
+// callToolConn runs one tool; connErr is set when the daemon connection itself failed (not an
+// error the daemon answered).
+func callToolConn(cl *client.Client, name string, args map[string]json.RawMessage) (res map[string]any, connErr error) {
 	var t *tool
 	for i := range tools {
 		if tools[i].Name == name {
@@ -363,13 +374,13 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 		}
 	}
 	if t == nil {
-		return toolError(fmt.Errorf("unknown tool %q", name)), false
+		return toolError(fmt.Errorf("unknown tool %q", name)), nil
 	}
 	// Tool arguments use the daemon's field names; selector fields are folded into a selector.
 	b, _ := json.Marshal(args)
 	var p daemon.Params
 	if err := json.Unmarshal(b, &p); err != nil {
-		return toolError(err), false
+		return toolError(err), nil
 	}
 	if t.selector {
 		var sel api.Selector
@@ -402,10 +413,12 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 	reply, err := cl.Do(t.method, p)
 	if err != nil {
 		var derr *client.Error
-		// A daemon error leaves the connection usable; anything else broke it.
-		return toolError(err), !errors.As(err, &derr) // a crash that explains it is in the message
+		if errors.As(err, &derr) {
+			return toolError(err), nil // a daemon error; a crash that explains it is in the message
+		}
+		return toolError(err), err // the connection broke
 	}
-	res := render(name, p, wantJSON, scale, reply.Result, reply.Ms)
+	res = render(name, p, wantJSON, scale, reply.Result, reply.Ms)
 	if c := reply.AppCrash; c != nil && res["isError"] != true {
 		// First, so the agent reads it before the result it explains.
 		note := map[string]any{"type": "text", "text": "NOTE: " + c.Summary()}
@@ -418,7 +431,7 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 			res["content"] = append(res["content"].([]map[string]any), hint)
 		}
 	}
-	return res, false
+	return res, nil
 }
 
 // render turns a tool's raw result into MCP content.

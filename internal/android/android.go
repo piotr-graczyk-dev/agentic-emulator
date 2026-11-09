@@ -713,12 +713,14 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
 			d.markNeeded()
+			d.dropUnusableBaseline(ctx, e)
 		case err != nil && configMismatch(err):
 			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
 			// taken. Refused the same way, before the guest is touched; retaken below.
 			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
 			d.markNeeded()
+			d.dropUnusableBaseline(ctx, e)
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
 		default:
@@ -794,6 +796,18 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 	d.applyAnimations(ctx)
 	d.setBooting(false)
 	return b.device(id)
+}
+
+// dropUnusableBaseline deletes a baseline the emulator refused (another GPU mode or AVD
+// configuration): it can never load again, and without it a daemon that stops during the retake
+// leaves an emulator without a baseline, which the next boot recognises and prepares again,
+// instead of an emulator whose old snapshot every reset fails to load.
+func (d *device) dropUnusableBaseline(ctx context.Context, e *emuClient) {
+	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := e.deleteSnapshot(dctx, baselineSnapshot); err != nil {
+		logf("%s: could not delete the unusable %s (%v); the retake replaces it", d.name, baselineSnapshot, err)
+	}
 }
 
 func (d *device) setBooting(v bool) {

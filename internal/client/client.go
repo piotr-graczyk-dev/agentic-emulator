@@ -142,7 +142,7 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 	req, _ := json.Marshal(daemon.Request{ID: c.next, Method: method, Params: p})
 	req = append(req, '\n')
 	if _, err := c.conn.Write(req); err != nil {
-		return Reply{}, err
+		return Reply{}, &SendError{Err: err}
 	}
 	line, err := c.r.ReadBytes('\n')
 	if err != nil {
@@ -157,6 +157,14 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 	}
 	return Reply{Result: resp.Result, Ms: resp.Ms, AppCrash: resp.AppCrash}, nil
 }
+
+// SendError is a request that could not be written to the daemon (the connection is broken, e.g.
+// the daemon was restarted). The daemon did not get it, so it is safe to send it again on a new
+// connection.
+type SendError struct{ Err error }
+
+func (e *SendError) Error() string { return "sending to the agemu daemon: " + e.Err.Error() }
+func (e *SendError) Unwrap() error { return e.Err }
 
 // Error is an error the daemon answered. It matches (errors.Is) api.ErrNotImplemented or
 // api.ErrAppCrashed when the daemon marked it so: the capability has no implementation on the
