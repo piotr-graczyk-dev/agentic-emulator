@@ -525,7 +525,8 @@ is. The resume continues only what the park stopped: a process that was stopped 
 debugger, say) stays stopped, except after a daemon restart, which does not know them. Shutting
 down a parked simulator, also to make room for another boot, continues it first. A post-boot
 lean pass that falls into a park waits for the resume, and the passes after it move by as long.
-Parking is opt-in: nothing parks a device by itself.
+By default nothing parks a device by itself; `AGEMU_AUTO_PARK=<duration>` makes the daemon park
+the devices it serves after that long without a call (see Auto-park below).
 
 Measured on agemu-iphone-17-pro (iOS 26.5) with the test app's Park screen (`-park`: a counter,
 a 0.5 s timer, a TCP connection to a host server that writes a line a second, and a local
@@ -583,6 +584,79 @@ memory was already compressed.
 
 `agemu shutdown` frees all of a simulator's memory; parking keeps the app as it is and is
 agent-ready 70x sooner than a cold boot plus the app's launch.
+
+#### Auto-park (2026-11-08)
+
+With `AGEMU_AUTO_PARK=<duration>` (at least 10 s) the daemon counts every call on a device from its
+start to its end and parks a simulator it has served once it has had no call for that long; it
+looks every duration/20 (1-10 s). It parks only booted simulators named `agemu-*` (not booting,
+not parked already) that it has served since it started; it does not see another daemon's,
+`simctl`'s, Simulator.app's or a person's use of a simulator, so one driven that way after this
+daemon's last call to it is parked under them, and their calls then fail until this daemon
+resumes it (a second daemon calling `ui` every 2 s: parked after 10.6 s, its 5 later calls each
+failed after 5.0 s, "accessibility service did not answer"; one run by the review). `logs` and `crashes` reset the idle time but
+do not resume. A call that starts while the parker stops the simulator waits for it (74-127 ms,
+median 93, n=47 parks) and resumes it. Device ids are compared in CoreSimulator's spelling (the
+UDID upper case), so `ios:<lower-case udid>` shares the count, lock and park state. While a
+profile switch runs, no simulator is parked (it may boot any of them); before it the daemon
+resumes the simulators it parked, and the switch resumes the simulator it switches to if it is
+parked (also after an agent's `agemu park`; before, the switch waited on its stopped processes). A park no longer counts as a use of the simulator for the
+least-recently-used order that a boot shuts simulators down by (before, a park moved it to most
+recently used); a park and a shutdown of the same simulator wait for each other. Before that, a park
+started at the same moment as a shutdown (offsets -30 to +250 ms, the opt-in
+`TestIntegrationParkDuringShutdown`, run by this lane and by an independent review on 3
+simulators) hung the shutdown for 33 s in 3 of 19 rounds on 00106a2, against 0 of 24 with the lock
+(Fisher one-sided p ≈ 0.08; the base rounds ran at higher host load, 51-53 against about 3 in one
+pair of blocks, load the test's own boots make). After both hangs in the review the simulator
+never became agent-ready again: one had `containermanagerd` crash on every later boot (25
+reports), the other ended each of 2 later boots with no frontmost application after 180 s, and
+both were deleted. Why is not established; CoreSimulator force-killing processes that are still
+stopped when its shutdown times out is a suspicion. On 00106a2 without auto-park this needs an
+agent's `agemu park` to overlap a boot that shuts the same simulator down to make room. Stopping the daemon
+(SIGTERM) resumes the simulators it parked; after a SIGKILL they stay stopped and the next
+daemon finds them parked (a stopped `launchd_sim`), as after `agemu park`.
+
+Measured on agemu-r6-autopark-a (iPhone 17 Pro, iOS 26.5, lean), host load average 2.5-8
+(`.lab/r6/autopark`):
+- Parked 15.0-16.0 s after the last call with `AGEMU_AUTO_PARK=15s` (n=6), every child of
+  `launchd_sim` stopped (166-178); the first `ui` after it took 66-94 ms.
+- 18 of 18 calls of every kind (ui, find, screenshot, wait, tap, apps, appearance, clipboard, key,
+  launch, terminate, boot, resume) resumed the simulator and worked; logs, crashes and park left
+  it parked. No park during a 45 s `wait`; parked 15.8 s after it. 12 rounds of 6 calls at once
+  at gaps of 14.5-16.1 s: 72 calls, no error, 4 parks (Android: another 72, 5 parks).
+- On the test app's Park screen (50 s without a call), auto-park against `agemu park` 20 s into
+  the wait, alternated: back to the app's screen in 155 ms (108-181) against 150 ms (115-215), n=4
+  each; count, pids (the app, SpringBoard, backboardd, `launchd_sim`) and the TCP connection to
+  the host (0 reconnects) kept in 8 of 8; no crash, no watchdog or "has not checked in" line;
+  0.0 CPU-s while parked in both arms.
+- Device CPU running idle, 0 parked: on the home screen 0.9-2.1% of a core per simulator (two
+  iPhone 17 Pro, 1.48 CPU-s per minute together, 1.16-2.49, 4 blocks) and 2.5-4.4% on an iPhone
+  16e (the review, n=3, one more window of 78.7% a minute after a boot left out); with the test
+  app in front 4.4% (4.2-4.7, n=4, 20 s windows alternated, a new iPhone 17 Pro; an earlier 8.3%,
+  7.4-8.4, n=3, came from the simulator later damaged by the base race runs); r5-s2's Park screen,
+  with a 0.5 s timer and a TCP stream, 12.5%. So auto-park saves about 0.5-7.5 CPU-s per idle
+  simulator-minute, depending on the device and what its screen runs.
+- It did not speed up a simulator in use: with two idle simulators parked or not (4 blocks of 5
+  flows per arm, alternated, `AGEMU_AUTO_PARK=30s`), the active one's flow took 7.31 s against
+  7.22 s (block medians, 7.25-7.52 and 7.16-7.44), 4.44 against 4.28 CPU-s per flow, host CPU 4.17
+  against 4.15 busy cores; footprints, free memory and swap-ins did not change.
+- Profile switches onto a parked simulator (a new iPhone 17 Pro and iPhone Air, the only agemu
+  simulators of their types; switching to the profile iphone-air from the 17 Pro): with
+  `AGEMU_AUTO_PARK=10s`, the Air parked 10.2-11.1 s after its last call while the 17 Pro was in
+  use, and the switch resumed it and returned in 60-125 ms (4 of 4; the daemon's resume before the
+  switch); with auto-park off and the Air parked by `agemu park`, 52-59 ms (3 of 3; the backend's
+  resume). Each time the Air was running afterwards and its screenshot was 1260x2736. Before the
+  fix such a switch was still waiting after 60 s (2 of 2, the review).
+- `ios:<lower-case udid>`: a call under it resumed a park made under the upper-case id (131-196
+  ms, 3 of 3), and a 25 s `wait` under it held off the park (0 stopped samples in 44 polls, 3 of 3).
+- `scripts/e2e-ios.sh` with the device names changed to the lane's simulator and the profile
+  switches left out (they use the shared agemu-iphone-se-3 and agemu-ipad-mini): 85 of 85 with
+  auto-park off (twice) and with `AGEMU_AUTO_PARK=10s` (twice); one more run with 10 s failed 2
+  checks when the tap on General hit an "Apple Intelligence & Siri" row inserted above it (see
+  "Taps on a list that changes after the read"), with no park in that run until its end.
+
+It stays opt-in: the CPU it frees did not make the devices in use faster, and a park changes what
+the app sees (clocks, timers, see above) without the agent asking.
 
 ### Bounded calls
 

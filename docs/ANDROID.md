@@ -58,6 +58,7 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_BOOT_LOAD` | `inplace` | `startup`: restore the baseline with `-snapshot` at emulator start. This corrupts guest memory on emulator 37.1 (see Guest restarts). |
 | `AGEMU_ANDROID_EMULATOR_FLAGS` | (none) | Extra emulator flags, e.g. `-show-kernel` to log the guest kernel console. Never pass `-feature`: the emulator deletes snapshots whose feature set differs. |
 | `AGEMU_ANDROID_LOGS` | `1` | `0`: no log capture: `logs` and `crashes` answer that capture is off, and calls carry no crash notice. See Logs and crashes. |
+| `AGEMU_AUTO_PARK` | off | A duration (at least 10 s): the daemon parks a device it serves after that long without a call; the next call resumes it. See Parking. |
 | `AGEMU_ANDROID_TAP_WAIT` | `1` | `0`: a tap by selector touches the element where the first tree read found it, without waiting for transitions or for it to stop moving (agemu before 2026-11-07). See Selector taps. |
 | `AGEMU_ANDROID_TRACE` | `0` | `1`: log whether each screenshot came from the frame stream, how long each selector tap waited, each crash record the log capture makes, and each answer of the app watcher. |
 
@@ -1376,6 +1377,30 @@ the emulator was gone (`elapsedRealtime` gap 2.6-3.7 s for 29-31 s of wall time)
 `elapsedRealtime` alarm fired on time by the guest's clock and 30 s late by the wall clock (the
 one seen firing). It
 writes about 0.8 GB per hibernate and resumes 20x slower than a park, so agemu parks instead.
+
+**Auto-park** (`AGEMU_AUTO_PARK=<duration>`, off by default; 2026-11-08, agemu-lab, host load
+average 2.5-3.7, `.lab/r6/autopark`): the daemon parks a device it has served once it has had no
+call for that long, only while it is running (not booting, not in standby, not parked); see the
+README's Auto-park. It sees only its own calls (not another daemon's, `adb`'s or a person's): a
+device another daemon drives after this one's last call is paused under it, and the park marker
+is in this daemon's `AGEMU_HOME`, so the other daemon does not know to resume it (what its calls
+then answer was not measured on Android; on iOS they failed). Ids
+are compared in the AVD file's spelling, so `android:Agemu-Lab` shares agemu-lab's count, lock and
+park state on a case-insensitive disk. With `AGEMU_AUTO_PARK=15s`:
+- Parked 15.2-15.8 s after the last call (n=5); the first `ui` after it took 9-17 ms. The park
+  itself took 0-1 ms.
+- 18 of 18 calls of every kind resumed the device and worked (a screenshot right after a resume
+  327 ms, as after any resume); logs, crashes and park left it parked. No park during a 45 s
+  `wait`; 12 rounds of 6 calls at once at gaps around the threshold: 72 calls, no error, 5 parks
+  (iOS: another 72, 4 parks).
+- The daemon killed with SIGKILL: the device stayed paused, the next daemon listed it `parked` and
+  its first call resumed it (14 ms); with SIGTERM the daemon resumed it before exiting (0.14 s).
+- Emulator CPU running idle 10.4% of a core (10.2-10.4, n=4), auto-parked 1.5% (1.4-1.6, n=4),
+  windows of 30 s alternated: 5.3 CPU-s saved per idle device-minute.
+- Android's Bluetooth stack crashed once (the same "hci_layer.cc:589 on_hardware_error ... code
+  0x42") in 36 park and resume cycles, 8 s after a resume, while the device ran. The probe's
+  Park screen was not used (it needs `am start`); clocks, the TCP stream and alarms behave as in
+  the parks above, which are the same call.
 
 ### End-to-end run
 

@@ -221,6 +221,49 @@ func avdName(id string) (string, error) {
 	return name, nil
 }
 
+// canonicalNames holds the AVD names CanonicalID found spelled as their .ini file.
+var canonicalNames sync.Map
+
+// CanonicalID spells an AVD's id as its .ini file is named. On a case-insensitive disk (the
+// macOS default) android:Agemu-Lab opens agemu-lab's files, so it must also share agemu-lab's
+// device state and lock. An exact match wins (a case-sensitive disk can hold both).
+func (b *Backend) CanonicalID(id string) string {
+	name, ok := strings.CutPrefix(id, string(api.Android)+":")
+	if !ok || name == "" {
+		return id
+	}
+	// Names already found spelled as their file are not looked up again (a directory read
+	// is about 20 µs per call; the agent's ids rarely change).
+	if _, known := canonicalNames.Load(name); known {
+		return id
+	}
+	ents, err := os.ReadDir(avdHome())
+	if err != nil {
+		return id
+	}
+	match := ""
+	for _, e := range ents {
+		n, isINI := strings.CutSuffix(e.Name(), ".ini")
+		if !isINI || e.IsDir() {
+			continue
+		}
+		if n == name {
+			canonicalNames.Store(name, true)
+			return id
+		}
+		if strings.EqualFold(n, name) {
+			if match != "" {
+				return id // two AVDs differ only in case: leave it to the exact name
+			}
+			match = n
+		}
+	}
+	if match == "" {
+		return id
+	}
+	return string(api.Android) + ":" + match
+}
+
 func (b *Backend) dev(name string) *device {
 	b.mu.Lock()
 	defer b.mu.Unlock()

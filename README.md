@@ -205,7 +205,8 @@ each); the wait then cost +84-91 ms (1 s, 3 of 4 scenarios) or nothing (3 s).
   Android device in standby keeps its 2 GB of guest RAM until a second `shutdown`.
 - **Parking frees CPU, not memory**: on this swapping host it freed about 0.1 GB more than leaving
   a simulator idle (n=3), and timers that come due during a park fire at the resume (about 41 s
-  late after 60 s parks). [Parking](#parking-idle-devices).
+  late after 60 s parks). Parking two idle simulators automatically did not speed up a third one
+  in use (7.31 against 7.22 s per flow). [Parking](#parking-idle-devices).
 - **The compressed Android snapshot costs CPU**: 3.99 against 2.06 emulator CPU-seconds per
   reset. Its faster resets (1.75 against 2.28 s) were measured on a disk other sessions shared;
   on a quiet disk raw resets took 1.36 s, so the gain can vanish or reverse. [Android](#android).
@@ -483,6 +484,7 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_AVDS` | `agemu-` | AVD name prefixes agemu manages. |
 | `AGEMU_IOS_ALL_DEVICES`, `AGEMU_IOS_ALLOW_FOREIGN` | off | `1`: list every simulator (read-only); also act on them. |
+| `AGEMU_AUTO_PARK` | off | A duration (`10m`, `90s`; at least 10 s): park a device the daemon serves once it has had no call for that long; the next call resumes it. See [Parking](#parking-idle-devices). |
 
 ## Parking idle devices
 
@@ -490,8 +492,9 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 `launchd_sim` and its children), Android pauses the VM without restoring the baseline (unlike
 `shutdown`, which goes to standby at the baseline). Nothing in the guest runs or touches its
 memory, and the app keeps its process, state and screen. `agemu resume`, or the next call on the
-device (`logs` and `crashes` excepted), continues it. Nothing parks a device by itself: it is
-opt-in, for an agent that leaves a device idle. Measured with a test app showing a counter, a
+device (`logs` and `crashes` excepted), continues it. With `AGEMU_AUTO_PARK=<duration>` the daemon
+parks a device by itself once it has had no call for that long (see Auto-park below); by default
+nothing parks a device. Measured with a test app showing a counter, a
 timer, a TCP connection to the host and a pending local notification (60 s parks, arms
 interleaved; details in [docs/IOS.md](docs/IOS.md#parking) and
 [docs/ANDROID.md](docs/ANDROID.md#parking-2026-11-07)):
@@ -524,6 +527,53 @@ by a lab script, not `agemu park`), a parked emulator 0.011 GB against 0.14 GB (
 On iOS `shutdown` frees it all. On Android `shutdown` goes to standby (the VM paused at the
 baseline, its memory kept); a second `shutdown` powers the emulator off and frees it
 (`AGEMU_ANDROID_STANDBY=0`: always).
+
+### Auto-park
+
+`AGEMU_AUTO_PARK=<duration>` (off by default; at least 10 s) makes the daemon park a device once it
+has had no call for that long; the next call resumes it as after `agemu park`, the first call
+taking the resume's time. Only devices this daemon has served a call on since it started are
+parked, and only while they are booted and agemu's. The daemon sees only its own calls: a device
+it served that is then driven by another daemon (another `AGEMU_HOME`), by `simctl` or `adb`, in
+Simulator.app or by a person is parked under them once this daemon's own calls stop, and their
+calls then fail until a call through this daemon resumes it (a second daemon calling `ui` every
+2 s on a simulator the first one parked: 5 of 5 calls failed after about 5 s each, one run). With
+auto-park on, drive each device through one daemon. A call counts from its start
+to its end, so a long `wait`, an install, a boot or a profile switch is never cut short (while a
+profile switch runs, no device of its platform is parked, since it may boot any of them; the
+daemon resumes the devices of that platform it parked before the switch, and a simulator an
+agent parked is resumed when the switch picks it); `logs` and `crashes` count too (an agent
+polling them keeps the device running) but still do not resume a parked device. A call that
+comes during the park waits for it (0-1 ms on Android, 74-127 ms on iOS, median 93, n=47) and then
+resumes the device. Stopping the daemon (SIGTERM, `pkill -x agemud`) resumes the devices it parked
+by itself; an agent's own parks stay. A daemon killed with SIGKILL leaves them parked, and the
+next one resumes them on the first call.
+
+Measured on 2026-11-08 (agemu-lab and an iPhone 17 Pro simulator, iOS 26.5; host load average
+2.5-8, `.lab/r6/autopark`):
+
+| | iOS | Android |
+|---|---|---|
+| parked after the last call, `AGEMU_AUTO_PARK=15s` | 15.0-16.0 s (n=6) | 15.2-15.8 s (n=5) |
+| first call after it: `ui` | 66-94 ms (n=6) | 9-17 ms (n=5) |
+| device CPU, running idle / auto-parked | home screen: 0.9-4.4% of a core (two iPhone 17 Pro, 4 blocks of about 36 s: 0.9-2.1%; an iPhone 16e, n=3: 2.5-4.4%); the test app in front: 4.4% (4.2-4.7, n=4) / 0 | 10.4% (10.2-10.4, n=4) / 1.5% (1.4-1.6, n=4) |
+| saved per idle device-minute | 0.5-2.6 CPU-s (home screen, test app) | 5.3 CPU-s |
+
+- **It did not make an active device faster.** One simulator ran r5-s1's Settings and test-app
+  flow while two idle simulators were parked or not (4 blocks of 5 flows per arm, alternated):
+  7.31 s against 7.22 s per flow (block medians, ranges 7.25-7.52 and 7.16-7.44), host CPU 4.17
+  against 4.15 busy cores, the same memory. The two idle simulators had used 1.48 CPU-s per
+  minute together (1.16-2.49).
+- **The first call after an auto-park is the one after a manual park**: on the test app's Park
+  screen 155 ms (108-181) against 150 ms (115-215) to the app's screen, n=4 each; the app's state,
+  its pid, SpringBoard's and its TCP connection to the host were kept in 8 of 8.
+- Every kind of call resumed the device and worked on both platforms (18 of 18 each); no park
+  came during a 45 s `wait`; 6 clients calling at once at gaps around the threshold made 72 calls
+  per platform (144 in all) without an error across 9 parks (4 iOS, 5 Android).
+- **It is opt-in** because it changes what an app under test sees without the agent asking (the
+  clocks jump, timers fire late; Android's Bluetooth stack crashed once in 36 auto-park cycles),
+  an app that works while its agent waits outside agemu longer than the threshold is frozen, and
+  the CPU it saves did not speed up the devices in use.
 
 ## Reliability
 

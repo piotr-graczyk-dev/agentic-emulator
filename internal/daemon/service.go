@@ -93,17 +93,28 @@ type Service struct {
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 	states   map[string]*devState // logs, crashes and the crash notice (logs.go)
+	// ap is the auto-parker (autopark.go; nil when off); activity counts each device's calls for it.
+	ap       *autoParker
+	actMu    sync.Mutex
+	activity map[string]*devActivity
+	// switching counts the profile switches in flight per platform (autopark.go).
+	switching map[api.Platform]int
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {
-	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}}
+	s := &Service{backends: map[api.Platform]backend.Backend{}, tmpDir: tmpDir, locks: map[string]*sync.Mutex{}, states: map[string]*devState{}, activity: map[string]*devActivity{}, switching: map[api.Platform]int{}}
 	for _, b := range bs {
 		s.backends[b.Platform()] = b
+	}
+	if d := autoParkFromEnv(); d > 0 {
+		s.startAutoPark(d, autoParkTick(d))
 	}
 	return s
 }
 
+// Close stops the auto-parker and resumes the devices it parked, then closes the backends.
 func (s *Service) Close() {
+	s.stopAutoPark()
 	for _, b := range s.backends {
 		_ = b.Close()
 	}
@@ -159,7 +170,7 @@ func (s *Service) listAll(ctx context.Context) ([]api.Device, error) {
 // into a full device id. Empty means "the only booted device".
 func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 	if strings.HasPrefix(ref, string(api.Android)+":") || strings.HasPrefix(ref, string(api.IOS)+":") {
-		return ref, nil
+		return s.canonical(ref), nil
 	}
 	devs, err := s.listAll(ctx)
 	if err != nil {
@@ -188,6 +199,20 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unknown device %q", ref)
+}
+
+// canonical returns the one spelling of a device id its backend lists (backend.IDNormalizer),
+// so that every key the daemon keeps per device (device lock, logs state, auto-park activity)
+// and every id it passes to a backend is the same for one device.
+func (s *Service) canonical(id string) string {
+	b, err := s.backendFor(id)
+	if err != nil {
+		return id
+	}
+	if n, ok := b.(backend.IDNormalizer); ok {
+		return n.CanonicalID(id)
+	}
+	return id
 }
 
 // Call dispatches one method. It drops the crash notice; Handle returns it.
@@ -239,6 +264,12 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err != nil {
 		return nil, nil, err
 	}
+	// The call counts as activity on the device until it returns (autopark.go): no auto-park
+	// while it runs, and a park in progress finishes before the wake below.
+	if err := s.beginCall(ctx, id, method); err != nil {
+		return nil, nil, err
+	}
+	defer s.endCall(id, method)
 	// Arguments are checked before the device lock and the backend: a bad call fails at once.
 	if err := checkCapability(method, &p); err != nil {
 		return nil, nil, err
@@ -246,11 +277,27 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if err := s.checkObserve(id, method, &p); err != nil {
 		return nil, nil, err
 	}
+	if method == "set_profile" {
+		if _, err := switchProfile(b.Platform(), p); err != nil {
+			return nil, nil, err
+		}
+		// An iOS profile switch moves to another simulator, which may be one this daemon
+		// auto-parked: resume those first. An Android switch stays on this AVD, which wake
+		// below resumes.
+		if b.Platform() == api.IOS {
+			if err := s.resumeAutoParked(ctx, api.IOS); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if err := s.wake(ctx, b, id, method); err != nil {
 		return nil, nil, err
 	}
 
 	res, err = s.onDevice(ctx, b, id, method, p)
+	if d, isDev := res.(api.Device); isDev && err == nil && d.ID != id {
+		s.touch(d.ID) // an iOS profile switch moves to another simulator
+	}
 	switch method {
 	case "boot", "shutdown", "reset", "crashes", "park": // they end the watch or report crashes themselves; a parked app reports nothing
 		return res, nil, err
@@ -281,6 +328,26 @@ func (s *Service) wake(ctx context.Context, b backend.Backend, id, method string
 		return fmt.Errorf("resuming the parked device before %s: %w", method, err)
 	}
 	return nil
+}
+
+// switchProfile is the profile a set_profile call asks for, checked against the device's platform.
+func switchProfile(plat api.Platform, p Params) (api.Profile, error) {
+	var prof api.Profile
+	switch {
+	case p.Profile != "":
+		var err error
+		if prof, err = profiles.Get(p.Profile); err != nil {
+			return api.Profile{}, err
+		}
+	case p.Width > 0 && p.Height > 0 && p.Density > 0:
+		prof = profiles.Custom(p.Width, p.Height, p.Density)
+	default:
+		return api.Profile{}, fmt.Errorf("set_profile needs profile or width+height+density")
+	}
+	if prof.Platform != plat {
+		return api.Profile{}, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, plat)
+	}
+	return prof, nil
 }
 
 // onDevice runs one method on a resolved device whose arguments were checked.
@@ -355,8 +422,6 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 
 // act runs one device action (the caller holds the device lock).
 func (s *Service) act(ctx context.Context, b backend.Backend, id, method string, p Params) (any, error) {
-	var err error
-
 	switch method {
 	case "boot":
 		return b.Boot(ctx, id, api.BootOptions{Cold: p.Cold})
@@ -378,19 +443,9 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		}
 		return map[string]any{"ok": true, "resumed": resumed}, nil
 	case "set_profile":
-		var prof api.Profile
-		if p.Profile != "" {
-			prof, err = profiles.Get(p.Profile)
-			if err != nil {
-				return nil, err
-			}
-		} else if p.Width > 0 && p.Height > 0 && p.Density > 0 {
-			prof = profiles.Custom(p.Width, p.Height, p.Density)
-		} else {
-			return nil, fmt.Errorf("set_profile needs profile or width+height+density")
-		}
-		if prof.Platform != b.Platform() {
-			return nil, fmt.Errorf("profile %s is for %s, device is %s", prof.Name, prof.Platform, b.Platform())
+		prof, err := switchProfile(b.Platform(), p)
+		if err != nil {
+			return nil, err
 		}
 		return b.SetProfile(ctx, id, prof)
 	case "tap":
