@@ -135,6 +135,9 @@ func daemonCommand(args []string) error {
 			fmt.Println("  binary:", p.Exe)
 		}
 		fmt.Println("  log:   ", client.LogPath())
+		if len(p.Preparing) > 0 {
+			fmt.Printf("  preparing: %s (a stop or restart now cancels it; the next boot starts over)\n", strings.Join(p.Preparing, ", "))
+		}
 		if r := staleReason(p); r != "" {
 			fmt.Printf("  out of date: %s; run `agemu daemon restart`\n", r)
 		}
@@ -142,6 +145,7 @@ func daemonCommand(args []string) error {
 	case "start":
 		return startDaemon()
 	case "stop":
+		warnPreparing()
 		stopped, err := stopDaemon()
 		if err != nil {
 			return err
@@ -153,11 +157,19 @@ func daemonCommand(args []string) error {
 		}
 		return nil
 	case "restart":
-		// --if-running: only restart a daemon that runs (make install uses it).
+		// --if-running: only restart a daemon that runs, and not while it prepares a device (make
+		// install and install.sh use it; an unasked restart must not cancel minutes of work).
 		if parse(args[1:]).flags["if-running"] == "true" {
-			if _, state := probeDaemon(); state == daemonAbsent {
+			p, state := probeDaemon()
+			if state == daemonAbsent {
 				return nil
 			}
+			if len(p.Preparing) > 0 {
+				fmt.Printf("agemud not restarted: %s. Run `agemu daemon restart` once it is done (agemu mcp also restarts an older daemon then).\n", preparingText(p))
+				return nil
+			}
+		} else {
+			warnPreparing()
 		}
 		if _, err := stopDaemon(); err != nil {
 			return err
@@ -199,8 +211,26 @@ func stopDaemon() (bool, error) {
 	return true, stopPID(p.PID)
 }
 
-// stopGrace is how long a daemon gets to exit after SIGTERM before it is killed.
-var stopGrace = 20 * time.Second
+// stopGrace is how long a daemon gets to exit after SIGTERM before it is killed. It exceeds the
+// bound on resuming the devices the daemon auto-parked (30 s, internal/daemon/autopark.go), which
+// it does on its way out.
+var stopGrace = 35 * time.Second
+
+// preparingText names the devices a running daemon is preparing.
+func preparingText(p daemon.Ping) string {
+	verb := "is"
+	if len(p.Preparing) > 1 {
+		verb = "are"
+	}
+	return fmt.Sprintf("%s %s preparing a baseline", strings.Join(p.Preparing, ", "), verb)
+}
+
+// warnPreparing says what an asked-for stop costs: it cancels the preparations in progress.
+func warnPreparing() {
+	if p, ok := runningDaemon(); ok && len(p.Preparing) > 0 {
+		fmt.Fprintf(os.Stderr, "agemu: %s; stopping agemud cancels it and the next boot starts over\n", preparingText(p))
+	}
+}
 
 // stopPID stops the daemon with this pid and no other: when another session has already
 // replaced it, the lock file names the new daemon and there is nothing to do.
@@ -303,6 +333,11 @@ func restartIfOutdated() {
 		return
 	}
 	if _, restart := staleness(p); !restart {
+		return
+	}
+	if len(p.Preparing) > 0 {
+		// A restart would cancel minutes of work; the next session restarts it instead.
+		fmt.Fprintf(os.Stderr, "agemu: agemud %s (pid %d) is older than %s but not restarted: %s\n", p.Version, p.PID, daemon.Version, preparingText(p))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "agemu: restarting agemud %s (pid %d) on %s\n", p.Version, p.PID, daemon.Version)

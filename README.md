@@ -347,7 +347,9 @@ prints.
 
 `install.sh` and `make install` restart a running daemon on the new build; after an npm update,
 the next MCP session does it, or `agemu daemon restart` at once. MCP sessions reconnect by
-themselves and devices keep running. Uninstalling leaves the devices you created: `agemu-*` AVDs
+themselves and devices keep running. None of these restart a daemon while it prepares a new
+Android device's baseline, since that would cancel the preparation; `agemu daemon status` lists
+such devices. Uninstalling leaves the devices you created: `agemu-*` AVDs
 (`avdmanager delete avd -n agemu-pixel`) and `agemu-*` simulators (`xcrun simctl delete <udid>`),
 and the state in `~/.agemu`.
 

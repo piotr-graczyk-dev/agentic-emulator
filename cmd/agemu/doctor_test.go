@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -242,5 +243,75 @@ func TestStopAHungDaemon(t *testing.T) {
 	}
 	if _, state := probeDaemon(); state != daemonAbsent {
 		t.Fatalf("after stop: state = %v", state)
+	}
+}
+
+// fakePingDaemon answers ping with p on $AGEMU_HOME's socket until the test ends.
+func fakePingDaemon(t *testing.T, p daemon.Ping) {
+	t.Helper()
+	ln, err := net.Listen("unix", daemon.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				dec := json.NewDecoder(conn)
+				for {
+					var req daemon.Request
+					if dec.Decode(&req) != nil {
+						return
+					}
+					res, _ := json.Marshal(p)
+					resp, _ := json.Marshal(daemon.Response{ID: req.ID, Result: res})
+					if _, err := conn.Write(append(resp, '\n')); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+}
+
+// An agemu mcp session does not restart an older daemon while it prepares a device: that would
+// cancel minutes of work. Without a preparation it does.
+func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
+	defer func(v string) { daemon.Version = v }(daemon.Version)
+	daemon.Version = "v0.2.0"
+	for _, preparing := range [][]string{{"android:agemu-pixel-9"}, nil} {
+		home, err := os.MkdirTemp("/tmp", "agemu-prep") // unix socket paths are limited to 104 bytes
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(home)
+		t.Setenv("AGEMU_HOME", home)
+		t.Setenv("AGEMU_DAEMON", filepath.Join(home, "agemud"))
+		old := exec.Command("sleep", "30") // stands in for the old daemon's process
+		if err := old.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan struct{})
+		go func() { old.Wait(); close(exited) }()
+		fakePingDaemon(t, daemon.Ping{OK: true, PID: old.Process.Pid, Version: "v0.1.0", Exe: "/elsewhere/agemud",
+			Started: time.Now(), Preparing: preparing})
+
+		restartIfOutdated()
+		select {
+		case <-exited:
+			if preparing != nil {
+				t.Fatalf("restarted a daemon preparing %v", preparing)
+			}
+		case <-time.After(300 * time.Millisecond):
+			if preparing == nil {
+				t.Fatal("did not restart an older daemon")
+			}
+			old.Process.Kill()
+		}
 	}
 }

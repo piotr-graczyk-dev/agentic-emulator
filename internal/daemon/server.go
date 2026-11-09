@@ -81,6 +81,9 @@ type Ping struct {
 	Platforms []api.Platform `json:"platforms,omitempty"`
 	// AndroidSDK is the SDK the daemon uses, from the environment it started in.
 	AndroidSDK string `json:"androidSdk,omitempty"`
+	// Preparing names the devices preparing their baselines: stopping the daemon now cancels
+	// those preparations (the next boot starts them again).
+	Preparing []string `json:"preparing,omitempty"`
 }
 
 // The daemon's own binary and start time, reported by ping.
@@ -181,7 +184,9 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 	w := bufio.NewWriter(conn)
 	for {
 		line, err := r.ReadBytes('\n')
-		if len(line) == 0 && err != nil {
+		if err != nil {
+			// Also a final line without its newline: the client saw its write fail and may send
+			// the request again, so running it here could run it twice.
 			return
 		}
 		var req Request

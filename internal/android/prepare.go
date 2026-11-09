@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,6 +159,24 @@ func (b *Backend) Preparing(id string) *api.Preparing {
 		return p.info()
 	}
 	return nil
+}
+
+// PreparingIDs implements backend.PreparingLister.
+func (b *Backend) PreparingIDs() []string {
+	b.mu.Lock()
+	devs := make(map[string]*device, len(b.devs))
+	for name, d := range b.devs {
+		devs[name] = d
+	}
+	b.mu.Unlock()
+	var ids []string
+	for name, d := range devs {
+		if d.preparing() != nil {
+			ids = append(ids, string(api.Android)+":"+name)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // AwaitDecision implements backend.Preparer: for a boot in progress that has not yet shown

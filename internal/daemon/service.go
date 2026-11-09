@@ -255,8 +255,13 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	case "ping":
 		ping := Ping{OK: true, PID: os.Getpid(), Version: Version, Exe: exePath, Started: started, AndroidSDK: toolchain.AndroidSDK()}
 		for _, plat := range []api.Platform{api.Android, api.IOS} {
-			if _, ok := s.backends[plat]; ok {
-				ping.Platforms = append(ping.Platforms, plat)
+			b, ok := s.backends[plat]
+			if !ok {
+				continue
+			}
+			ping.Platforms = append(ping.Platforms, plat)
+			if pl, ok := b.(backend.PreparingLister); ok {
+				ping.Preparing = append(ping.Preparing, pl.PreparingIDs()...)
 			}
 		}
 		return ping, nil, nil

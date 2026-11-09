@@ -207,12 +207,21 @@ func coreChecks(d daemonInfo) doctorSection {
 	} else if d.state == daemonHung {
 		s.add(check{Name: "daemon", Status: statusFail, Detail: hungMessage(), Fix: []string{agemuCmd() + " daemon restart    # devices keep running"}})
 	} else if r := staleReason(p); r != "" {
-		s.add(check{Name: "daemon", Status: statusWarn, Detail: fmt.Sprintf("pid %d is out of date: %s", p.PID, r), Fix: []string{agemuCmd() + " daemon restart    # devices keep running"}})
+		fix := agemuCmd() + " daemon restart    # devices keep running"
+		if len(p.Preparing) > 0 {
+			fix = agemuCmd() + " daemon restart    # once the preparation is done; now it would cancel it"
+			r += "; " + preparingText(p)
+		}
+		s.add(check{Name: "daemon", Status: statusWarn, Detail: fmt.Sprintf("pid %d is out of date: %s", p.PID, r), Fix: []string{fix}})
 	} else if versionOlder(daemon.Version, p.Version) {
 		s.add(check{Name: "daemon", Status: statusWarn, Detail: fmt.Sprintf("pid %d runs %s, newer than this agemu (%s)", p.PID, p.Version, daemon.Version),
 			Fix: []string{"npm install -g agentic-emulator@latest    # or update the agemu you run"}})
 	} else {
-		s.add(check{Name: "daemon", Status: statusOK, Detail: fmt.Sprintf("running, pid %d, version %s", p.PID, p.Version)})
+		detail := fmt.Sprintf("running, pid %d, version %s", p.PID, p.Version)
+		if len(p.Preparing) > 0 {
+			detail += "; " + preparingText(p)
+		}
+		s.add(check{Name: "daemon", Status: statusOK, Detail: detail})
 	}
 
 	self := selfPath()

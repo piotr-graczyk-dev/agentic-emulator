@@ -149,6 +149,12 @@ type Preparer interface {
 	AwaitDecision(ctx context.Context, id string) *api.Preparing
 }
 
+// PreparingLister is implemented by backends that can name their preparing devices without
+// listing them (ping reports them, so that a restart does not cancel a preparation unasked).
+type PreparingLister interface {
+	PreparingIDs() []string
+}
+
 // FrameWaiter is implemented by backends that can block until the screen shows a new frame.
 // The daemon's wait re-reads the UI tree as soon as the screen has changed instead of polling
 // on a timer. WaitFrame with mark 0 returns the current mark at once; otherwise it returns
