@@ -13,14 +13,14 @@ import (
 	"syscall"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
 // Defaults, overridable with environment variables (read by the daemon process).
 const (
-	defaultSystemImage = "system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a"
-	defaultAVDPrefix   = "agemu-"
-	defaultRAMMB       = 2048
-	baselineSnapshot   = "agemu-baseline"
+	defaultAVDPrefix = "agemu-"
+	defaultRAMMB     = 2048
+	baselineSnapshot = "agemu-baseline"
 )
 
 func env(name, def string) string {
@@ -37,17 +37,7 @@ func envInt(name string, def int) int {
 	return def
 }
 
-func sdkRoot() string {
-	for _, k := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Android", "sdk")
-}
-
-func sdkTool(parts ...string) string { return filepath.Join(append([]string{sdkRoot()}, parts...)...) }
+func sdkTool(parts ...string) string { return toolchain.AndroidTool(parts...) }
 
 func avdHome() string {
 	if v := os.Getenv("ANDROID_AVD_HOME"); v != "" {
@@ -166,10 +156,10 @@ func loadAVD(name string) (avdInfo, error) {
 // createAVD makes a new AVD from the (already installed) system image with a screen of
 // the given profile and patches its config for headless agent use.
 func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, error) {
-	img := env("AGEMU_ANDROID_IMAGE", defaultSystemImage)
-	imgDir := sdkTool(strings.Split(img, ";")...)
+	img := toolchain.AndroidImage()
+	imgDir := toolchain.AndroidImageDir(img)
 	if _, err := os.Stat(filepath.Join(imgDir, "system.img")); err != nil {
-		return avdInfo{}, fmt.Errorf("system image %s is not installed (%s missing); agemu does not download images", img, imgDir)
+		return avdInfo{}, fmt.Errorf("system image %s is not installed (%s missing); agemu does not download images, `agemu doctor` prints the command that installs it", img, imgDir)
 	}
 	if _, err := os.Stat(filepath.Join(avdHome(), name+".ini")); err == nil {
 		return avdInfo{}, fmt.Errorf("AVD %s already exists", name)
@@ -180,6 +170,7 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	avdmanager := sdkTool("cmdline-tools", "latest", "bin", "avdmanager")
 	cmd := exec.CommandContext(ctx, avdmanager, "create", "avd", "-n", name, "-k", img)
 	cmd.Stdin = strings.NewReader("no\n") // "Do you wish to create a custom hardware profile?"
+	cmd.Env = toolchain.JavaEnv()         // avdmanager is a Java tool; Android Studio's runtime will do
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return avdInfo{}, fmt.Errorf("avdmanager create avd: %v: %s", err, lastLines(string(out), 5))
 	}

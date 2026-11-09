@@ -428,7 +428,7 @@ func handle(req rpcReq, pool *clientPool) (any, *rpcErr) {
 		return map[string]any{
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "agemu", "version": "0.1.0"},
+			"serverInfo":      map[string]any{"name": "agemu", "version": daemon.Version},
 			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
 		}, nil
 	case "ping":

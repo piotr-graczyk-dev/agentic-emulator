@@ -16,6 +16,7 @@ import (
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/backend"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
 // Params is the union of all request parameters. Each method reads the fields it needs.
@@ -252,7 +253,18 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	}
 	switch method {
 	case "ping":
-		return map[string]any{"ok": true, "pid": os.Getpid()}, nil, nil
+		ping := Ping{OK: true, PID: os.Getpid(), Version: Version, Exe: exePath, Started: started, AndroidSDK: toolchain.AndroidSDK()}
+		for _, plat := range []api.Platform{api.Android, api.IOS} {
+			b, ok := s.backends[plat]
+			if !ok {
+				continue
+			}
+			ping.Platforms = append(ping.Platforms, plat)
+			if pl, ok := b.(backend.PreparingLister); ok {
+				ping.Preparing = append(ping.Preparing, pl.PreparingIDs()...)
+			}
+		}
+		return ping, nil, nil
 	case "devices":
 		res, err = s.listAll(ctx)
 		return res, nil, err

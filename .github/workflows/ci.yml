@@ -24,11 +24,17 @@ jobs:
       - name: unit tests
         run: go test -count=1 ./...
       - name: build (agemu, agemud, agemu-bench, agemu-ios-helper)
-        run: make build
+        run: make build VERSION=v0.0.0-ci
+      - name: package (release tarball and npm package)
+        run: |
+          sh -n install.sh
+          scripts/package.sh v0.0.0-ci dist
       - name: smoke test the CLI and MCP server
         run: |
           export AGEMU_HOME="$(mktemp -d /tmp/agemu-ci.XXXX)"
           bin/agemu ping
+          bin/agemu version
+          bin/agemu doctor --json > /dev/null || [ $? -eq 1 ]   # 1: no platform ready on the runner
           bin/agemu profiles --platform ios | grep -q iphone-se-3
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | bin/agemu mcp | grep -q '"name":"screenshot"'

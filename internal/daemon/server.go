@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -64,6 +65,42 @@ func errorCode(err error) string {
 	return ""
 }
 
+// Version is the build's version, set with -ldflags "-X .../internal/daemon.Version=..." by
+// make; agemu and agemud each carry their own.
+var Version = "dev"
+
+// Ping is the result of the ping method: enough for agemu to tell whether the running daemon
+// is the agemud binary it would start now (doctor, daemon status).
+type Ping struct {
+	OK      bool      `json:"ok"`
+	PID     int       `json:"pid"`
+	Version string    `json:"version"`
+	Exe     string    `json:"exe,omitempty"`
+	Started time.Time `json:"started"`
+	// Platforms the daemon was built with (a noios or noandroid build lacks one).
+	Platforms []api.Platform `json:"platforms,omitempty"`
+	// AndroidSDK is the SDK the daemon uses, from the environment it started in.
+	AndroidSDK string `json:"androidSdk,omitempty"`
+	// Preparing names the devices preparing their baselines: stopping the daemon now cancels
+	// those preparations (the next boot starts them again).
+	Preparing []string `json:"preparing,omitempty"`
+}
+
+// The daemon's own binary and start time, reported by ping.
+var (
+	started = time.Now()
+	exePath = func() string {
+		p, err := os.Executable()
+		if err != nil {
+			return ""
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}()
+)
+
 // Home returns the agemu state directory ($AGEMU_HOME or ~/.agemu).
 func Home() string {
 	if h := os.Getenv("AGEMU_HOME"); h != "" {
@@ -75,6 +112,9 @@ func Home() string {
 
 func SocketPath() string { return filepath.Join(Home(), "agemu.sock") }
 
+// LockPath is the file the running daemon holds an exclusive flock on; it contains its pid.
+func LockPath() string { return filepath.Join(Home(), "agemud.lock") }
+
 // Serve listens on the unix socket until ctx is cancelled.
 func Serve(ctx context.Context, svc *Service) error {
 	if err := os.MkdirAll(Home(), 0o755); err != nil {
@@ -82,7 +122,7 @@ func Serve(ctx context.Context, svc *Service) error {
 	}
 	// Two agemu processes can both find no socket and each start a daemon. The second must
 	// not unlink the first one's socket, or two daemons would drive the same devices.
-	lock, err := os.OpenFile(filepath.Join(Home(), "agemud.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := os.OpenFile(LockPath(), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
@@ -90,6 +130,11 @@ func Serve(ctx context.Context, svc *Service) error {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return errors.New("another agemud already runs for " + Home())
 	}
+	// The lock file names the daemon that holds it, so `agemu daemon stop` can stop one that
+	// accepts connections but no longer answers. Emptied again on a clean exit.
+	_ = lock.Truncate(0)
+	_, _ = lock.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	defer lock.Truncate(0)
 	sock := SocketPath()
 	if c, err := net.DialTimeout("unix", sock, 200*time.Millisecond); err == nil {
 		c.Close()
@@ -139,7 +184,9 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 	w := bufio.NewWriter(conn)
 	for {
 		line, err := r.ReadBytes('\n')
-		if len(line) == 0 && err != nil {
+		if err != nil {
+			// Also a final line without its newline: the client saw its write fail and may send
+			// the request again, so running it here could run it twice.
 			return
 		}
 		var req Request

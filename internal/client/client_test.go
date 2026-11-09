@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -88,5 +90,57 @@ func TestTheCrashNoticeSurvivesTheSocket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "com.app crashed at") {
 		t.Fatalf("message %q", err)
+	}
+}
+
+// A daemon that restarts between two calls must not break a long-lived client (an MCP session):
+// the request found the old connection closed, so it is sent again on a new one.
+func TestClientReconnectsAfterTheDaemonRestarts(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "agemu-client") // unix socket paths are limited to 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := daemon.NewService(t.TempDir(), bare{})
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns <- c
+			go daemon.ServeConn(ctx, svc, c)
+		}
+	}()
+	dial := func() (net.Conn, error) { return net.Dial("unix", sock) }
+	conn, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := New(conn)
+	cl.redial = dial
+	defer cl.Close()
+
+	if _, err := cl.Do("ping", nil); err != nil {
+		t.Fatal(err)
+	}
+	(<-conns).Close() // the daemon goes away
+	time.Sleep(20 * time.Millisecond)
+	if _, err := cl.Do("ping", nil); err != nil {
+		t.Fatalf("after the daemon closed the connection: %v", err)
+	}
+	select {
+	case <-conns:
+	default:
+		t.Fatal("the client did not open a new connection")
 	}
 }
