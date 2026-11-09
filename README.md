@@ -445,6 +445,9 @@ launch rows are
   - a new device's first boot: 154 -> 17.1 CPU-s (n=4, 6);
   - a retake of an older device: 54.0 -> 11.5 (n=8 each, interleaved);
   - a baseline saved late on a very busy host: 14-18 -> about 11 (n=3, not interleaved).
+  - the merged round-6 build against main, a new AVD each with its own default baseline (8 resets
+    per arm, interleaved): 183 (52-197) -> 12.6 (12.3-13.0); idle afterwards 14.9% -> 9.6% of a core.
+    main's figure grew with the baseline's age: 52 two minutes after it was saved, 178-197 later.
 
   Resets, boots and the agent step were not slower. There is no memory saving: `phys_footprint` read
   0.9-1.1 GB lower, but the emulator's region footprint was the same on both (3.0-3.2 GB).
