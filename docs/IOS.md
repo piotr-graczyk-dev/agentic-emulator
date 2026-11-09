@@ -1128,6 +1128,80 @@ app under test does not use, so agemu turns them off in its own simulators (`age
    found Calendar, tapping its icon opened the day view (a cold launch now), `AVSpeechSynthesizer`
    spoke, an app saved and read back an EventKit event (after which `calaccessd` opened Calendar in
    the background again), and `calshow:` opened Calendar on the event.
+5. **Daemons that stay idle after boot are ended, as a phone's jetsam would end them**
+   (`internal/ios/idle.go`). Most of iOS's on-demand daemons tell launchd they may be ended when
+   idle (`EnablePressuredExit` in their job), and the kernel's dirty tracking says when they are:
+   "tracked, allows idle exit, clean" (no open transaction, not being launched). The simulator's
+   processes are Mac processes, so agemu reads that state on the host (`proc_info`, as libproc's
+   `proc_get_dirty` does), and their CPU time and start time too (`proc_pid_rusage`). A phone ends
+   such clean daemons first when it needs memory (`JETSAM_REASON_MEMORY_IDLE_EXIT`), and launchd
+   starts them again at the next request; launchd_sim does the same only when the Mac runs short of
+   memory (the idle exits below). After a cold boot iOS starts about 60 of them for one-off work,
+   and they then sit idle at 6-24 MB each. agemu looks every 30 s from 1 to 5 minutes after the
+   device is ready. A daemon of the simulator runtime is ended when 3 passes in a row (60 s) found
+   it idle-exitable and its CPU time, read in the kernel's own units, did not change at all between
+   them: serving an app's call costs CPU, so a daemon that an app calls more often than once a
+   minute is never ended. Only daemons that started before a cut-off may be ended at all; the
+   cut-off is the earliest of the first agemu call of this boot that can start app work (`install`,
+   `launch`, `open`, `push`), and the earliest app process a pass saw: an installed app's or its
+   extension's, or the frontmost app's when that is not SpringBoard (a system app such as Safari or
+   Settings, also one opened from its icon). So nothing an install, a launch, an opened URL or an
+   app brought up, or that iOS started after them, is ended. (An app opened from its icon and
+   closed again between two passes leaves no mark; the daemons it started can then be ended once
+   idle.) Ending is SIGKILL, as jetsam's idle exit and launchd's pressured exit do, sent right
+   after a recheck has found the same process (its start time) still idle-exitable and with no CPU
+   used since the pass, milliseconds earlier. (An earlier version sent SIGTERM first: most of these
+   daemons ignored it, and those then kept using a little CPU.) A pass does nothing, and the count
+   starts again, while an agemu call acts on the device's apps (install, launch, open, push,
+   uninstall, terminate, clear-data, reset, permissions, location) or the device is parked or being
+   parked, by `agemu park` or by auto-park (both mark the device before they stop anything). A pass
+   ends its daemons holding the device's park lock: a park that starts meanwhile waits for the pass
+   (a few milliseconds), and a pass that finds a park or a shutdown holding the lock ends nothing,
+   so no daemon is signalled while its simulator is being parked. A daemon that is running again at the next pass, or that turned busy before the SIGKILL,
+   is left alone for the rest of the boot; one that comes back later (device management's on-reboot
+   task at +120..200 s starts about 20 of them again) may be ended again once it is idle, at most 3
+   times per boot. The passes belong to the boot agemu made: when the simulator's launchd_sim
+   changes (it was shut down and booted again outside agemu, by `simctl` or Xcode, within those 5
+   minutes) or is gone, they stop. The daemon log lists what each pass ended. Which daemons: by
+   default all idle daemons except the never-ended ones and the `appFacing` list in `idle.go`, the
+   daemons found to serve a public API an app can call (Contacts, EventKit, HealthKit,
+   UserNotifications, MapKit, privacy prompts, keychain and TLS trust, UIPasteboard, AlarmKit,
+   ActivityKit, Focus status, WatchConnectivity and the Watch pairing stack, GameKit, App Intents
+   and INInteraction donations, speech voices, CallKit, Now Playing, CloudKit and the iCloud
+   key-value store, StoreKit and account daemons, CoreSpotlight, Photos, FinanceKit, file
+   coordination, File Provider and iCloud Drive, WeatherKit, AdServices, ManagedSettings and
+   FamilyControls, Verify with Wallet, Background Assets, Extensible SSO, GSS, AccessorySetupKit,
+   App Clips, launch snapshots, WebKit's privacy daemon, VideoSubscriberAccount, managed app
+   configuration, Live Caller ID Lookup, app installs). That leaves daemons such as maild,
+   jetpackassetd, managedassetsd, appleaccountd, cdpd, budd, remotemanagementd (device management),
+   sleepd, parsecd, peopled, systemstatusd, countryd, featureaccessd and localizationswitcherd.
+   Some of the daemons that are ended may still serve a public API that was not identified; for the
+   13 public APIs a probe app called (AdServices, SKAdNetwork, WeatherKit, ManagedSettings,
+   FamilyControls, iCloud ubiquity, File Provider, Verify with Wallet, INInteraction, Sign in with
+   Apple state, Focus status, CoreLocation, EventKit sources) the first call after their daemons
+   had been ended at +90 s by an earlier, wider build was not slower. Ended app-facing daemons did
+   cost time: an app's first call waits for launchd to start the daemon again, and Contacts and
+   EventKit took about 2 s instead of 0.15 s, StoreKit, WatchConnectivity and the speech voice list
+   about 0.9 s, MapKit directions up to 3 s (one probe run each way; the probe reads its result
+   about every 0.7 s). `AGEMU_IOS_IDLE_EXIT=all` ends the `appFacing` daemons too, for the lowest
+   memory when that first-call delay does not matter (with axassetsd gone, the 4 speech synthesis
+   extensions, 38 MB, that its retries kept starting go too, and with callservicesd the FaceTime
+   and CallKit helpers). Not touched in either mode: SpringBoard, backboardd, PosterBoard and its
+   lock screen extension, passd, locationd, runningboardd, apsd, sharingd, apps and their
+   extensions, WebKit's processes and the other processes that do not allow idle exit or are busy.
+   `AGEMU_IOS_IDLE_KEEP=name,...` keeps more, `AGEMU_IOS_IDLE_EXIT=0` keeps them all running. Never
+   ended in either mode: `diagnosticd` and `logd_helper` (agemu's log stream; they came back within
+   seconds); `dasd` (it schedules background tasks, an app's `BGTaskScheduler` work among them:
+   ended, it came back 6 minutes later and iOS's deferred boot work, device management's task among
+   it, ran at +567 s instead of +131..197 s, after the background stop's window); `followupd`
+   (Settings' follow-up rows: Settings started it again and its "Ready for Apple Intelligence" row
+   came in above General after the list had drawn, so a tap on General landed on that row, 2 of 2
+   flows; the same race failed 13 of 570 agent flows in an earlier density run without this stop: a
+   tap by selector does not check that the element is still where it was read); `iconservicesagent`
+   (ended, the home key from Settings took 0.3 s longer, 8 of 8 boots); and `gamecontrollerd`
+   (started again at once, it then used 0.17-0.19 s of CPU a minute, with diagnosticd and
+   backboardd 0.3 s more, in 4 of 4 boots; the original process is sometimes busy like that too,
+   with or without the stop). See "Ending idle daemons" below for what was checked and measured.
 
 **What a lean simulator does not do.** These need `AGEMU_IOS_LEAN=0`; the jobs are back from the
 next boot:
@@ -1295,6 +1369,106 @@ The first boot of a new device is not changed: PosterBoard builds the gallery in
 setting comes only at its end (new devices, first boot: 165.1 and 146.1 s of first-minute CPU
 before, 161.6 s with it; 2.42-2.49 GB at 2 minutes in all three). The second boot of the device
 whose first boot set it took 42.4 s and started only the lock screen's provider.
+
+**Ending idle daemons** (item 5) against the same lean setting without it
+(`AGEMU_IOS_IDLE_EXIT=0`), on one `iphone-17-pro` simulator after its first boot (build bc11fc1;
+the shipped one differs in when it may end a daemon after an app was installed, launched or opened,
+and in sending SIGKILL without SIGTERM first, and ended the same 15 daemons in 2 boots without an
+app), 4 pairs of cold boots in ABBA order with a freshly started daemon for each
+(2026-11-08, 22:03-22:42; host load 3.1-4.2 at the start of a boot, 5.2 GB of swap in use;
+medians, range in brackets; the experiments' meter); AgemuTestApp launched at +300 s, then a timed
+agent flow (Settings: General, About, back; home; AgemuTestApp: two taps, typing, a screenshot and
+a UI tree) at +315 s:
+
+| | without (n=4) | idle daemons ended (n=4) |
+|---|---|---|
+| memory 2 min after agent-ready | 1.74 GB [1.73-1.74] | 1.69 GB [1.69-1.70] |
+| memory 4 min after agent-ready | 1.76 GB [1.76-1.77] | **1.62 GB** [1.61-1.62] (-8%) |
+| processes 4 min after agent-ready | 117.5 [117-118] | 103 |
+| memory, AgemuTestApp open (+315 s) | 1.84 GB [1.84-1.85] | **1.69 GB** [1.69-1.70] |
+| simulator CPU in the first minute after agent-ready | 35.7 s [32.7-39.9] | 33.5 s [28.3-37.2] |
+| simulator CPU +240..300 s (% of a core) | 2.8 [2.7-2.8] | 2.8 [2.3-3.3] |
+| agent flows that passed | 4 of 4 | 4 of 4 |
+| cold boot until agent-ready | 7.2 s [6.8-8.1] | 7.7 s [7.1-8.4] |
+
+Per pair -149 MB [-150 to -144] at 4 minutes and -147 MB [-149 to -145] with the app open; every
+boot with the stop was at least 140 MB below every boot without it. It ended the same 15 daemons
+in each boot (appleaccountd, appprotectiond, budd, cdpd, containermanagerd_system, countryd,
+featureaccessd, ind, localizationswitcherd, managedassetsd, parsecd, peopled, remotemanagementd,
+sleepd, systemstatusd), at +120..210 s. The first minute is not changed by design (the first end
+is at +120 s), nor the boot until agent-ready, which the stop does not reach (per pair +0.2 s
+[-0.1 to +1.2], the ranges overlap). The agent flow took 10.5 s [10.3-10.9] against 11.0 s
+[9.4-11.6]; no difference is claimed.
+
+The build an independent re-check measured first (bb2bb8c: no CPU rule beyond < 20 ms between two
+passes, a shorter keep list) took 1.64 GB [1.64-1.64] against 2.01 GB [2.00-2.04] on its own
+device (4 pairs), -0.37 GB. It also ended daemons an app was using: with a probe app calling 16
+public APIs every 20 s, the pass after its launch ended `fileproviderd` and `coreidvd` in 4 of 4
+boots, and the next File Provider and Verify with Wallet calls took 236-749 ms instead of 0-10 ms;
+it ended daemons behind public APIs too (WeatherKit, AdServices, ManagedSettings, ...). The
+present rules come from that: the CPU must not change at all over 60 s, nothing that started
+after an app is ended, and those daemons are kept by name. That costs about 0.15 GB of the
+saving: about 110 MB for the daemons now kept by name and about 33 MB for those that the stricter
+test finds busy (maild, jetpackassetd, geoanalyticsd, biomesyncd; sizes at 4 minutes without the
+stop).
+
+With the same probe app (`.lab` copy of the re-check's SkepProbe, its call interval made
+configurable), 5 cold boots of the shipped build: the app installed and launched at +245 s with
+calls every 20 s; at +100 s with calls every 20 s and every 50 s; and with
+`AGEMU_IOS_IDLE_EXIT=all` at +40 s with calls every 20 s and every 50 s. No call was slower than
+150 ms where that call's median was under 20 ms (0 such calls of 16 kinds in all 5 boots; File
+Provider 0-2 ms, Verify with Wallet 1-17 ms, ManagedSettings 1-12 ms, AdServices 0 ms), and
+nothing was ended after the app started in the default runs. In the two `all` runs, with the app
+calling from +40 s, the passes still ended about 45 daemons per boot (weatherd, FamilyControlsAgent,
+dataaccessd, bird, biomed, healthd, contactsd, ...): their CPU had not changed, so they were not
+serving the app's calls, and no call got slower; `fileproviderd` and `coreidvd`, which the app
+used, were not ended.
+
+Also with the shipped build: a 15-minute soak without interaction took 1.66 GB at 4 and 5 minutes
+and 1.69 GB at 10 and 15 (one boot; the soak without the stop ran on another simulator of the same
+type earlier, 1.77-1.79 GB, so this is no comparison); no process but `xpcproxy_sim` started more
+than once, no crash report came from the simulator, and the same 15 daemons were ended. The
+end-to-end run on this device (`E2E_IOS_DEVICE`, profile switches skipped with
+`E2E_IOS_PROFILES=0`), started after the passes: 85 of 85. The probe app (`testapps/ios/LeanProbe`,
+40 checks plus work started 15 s after agent-ready and checked at +330 s): a local notification
+due at +165 s was delivered, an AlarmKit timer due at +195 s alerted, a Live Activity stayed active
+and the pasteboard kept its text across the passes; HealthKit authorization and a step-count write
+and read, the document picker (open and save), "Save to Files" from the share sheet,
+`PHPickerViewController`, data detectors, CoreSpotlight, `WKWebView`, MapKit, ActivityKit,
+AlarmKit, Focus status, notifications, Contacts, EventKit, speech, typing, PassKit, StoreKit and
+`WCSession` worked. Four sheet steps of the probe's own driver (coordinate taps into system sheets)
+missed in one run at host load 21-24 (sheet not up yet, a notification banner over a button, the
+picker reopened in a folder) and passed when run again on a new boot.
+
+On a new iPhone SE (bb2bb8c, one boot each way): 1.47 GB against 1.74 GB 4 minutes after
+agent-ready. The iPad mini was not checked.
+
+A second re-check found daemons ended under an app in bc11fc1: two that `agemu install` started
+before the app's process existed (privacyaccountingd, mapssyncd, ended at +150/+210 s in 2 of 2
+boots), and three that Safari started after `agemu open` (com.apple.Safari.History,
+contentlinkingd, nanosystemsettingsd; Safari.History was running again about 1 s after its end).
+Hence the cut-off at the first install, launch, open or push, and the frontmost app counting as an
+app. The shipped build, 2 cold boots each way, with the re-check's watcher (every 2 s: each
+process's start time and CPU): with the probe app installed at +70 s and launched (calls every
+75 s), 41 and 38 daemons started after the install and none was ended (mapssyncd, started at
++75 s, ran to the end of the watch on one pid); with Safari opened at +65 s and Settings launched
+at +130 s, 102 and 55 daemons started after the open and none was ended (com.apple.Safari.History,
+contentlinkingd, nanosystemsettingsd and medialibraryd each ran to the end on one pid). The 13
+daemons ended in each of those boots had all started before the boot was ready. The end-to-end
+run passed 85 of 85 on the shipped build from a cold boot and again after the passes.
+
+With `AGEMU_IOS_IDLE_EXIT=all`, measured only on an earlier build (which also ended
+`iconservicesagent`, `gamecontrollerd`, `nanoregistrylaunchd` and `brookcompaniond`; not
+re-measured): 0.99 GB [0.95-1.08] against 1.76 GB [1.76-1.77] 4 minutes after agent-ready, 8 pairs,
+and an app's first call to an ended app-facing daemon was slower (Contacts and EventKit about 2 s
+against 0.15 s). Earlier builds of this round also showed why the never-ended daemons are kept
+(item 5): with `followupd` ended, 2 of 2 agent flows tapped "Apple Intelligence & Siri" instead of
+General; with `iconservicesagent` ended, the home key from Settings took 1.48 s [1.44-1.57]
+against 1.19 s [1.15-1.25] (8 boots each), 1.15 and 1.16 s in 2 boots with it kept; with
+`nanoregistrylaunchd` and `brookcompaniond` ended, `pairedsyncd` started and exited 4 times
+between +600 and +900 s (about 14 s of CPU). `gamecontrollerd`, kept, was sometimes busy (0.17-0.2
+s of CPU a minute, logging about 40 lines a minute) on builds with and without the stop alike (1 of
+4 boots each in the re-check).
 
 Turning off 18 more jobs (Game Center, weather, Mail, Exchange accounts, sleep
 schedule, family, Managed Settings, Watch pairing, ...) brought it to 1.57 GB but broke the

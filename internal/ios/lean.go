@@ -89,8 +89,8 @@ func leanOn() bool {
 // launchctl runs per job; 36 s on a busy host), and the device works meanwhile. A device is
 // checked once per daemon and again after every cold boot; a request that arrives while the
 // device is being reconciled runs once that finishes. After a cold boot of a lean device the
-// wallpaper gallery and what iOS starts in the background are stopped too, each on its own
-// schedule (a newer boot restarts them), and PosterBoard's gallery is kept from starting at later
+// wallpaper gallery, what iOS starts in the background and the daemons that then stay idle
+// (idle.go) are stopped too, each on its own schedule (a newer boot restarts them), and PosterBoard's gallery is kept from starting at later
 // boots (see posterboard.go; galleryBefore is its newest update entry before this boot). Failures
 // are logged and leave the device unchecked, so the next boot tries again: a device that is not
 // lean still works.
@@ -105,6 +105,7 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 		return
 	}
 	if on && cold {
+		delete(b.appWork, d.UDID) // a new boot: its cut-off starts unset
 		b.bootGen[d.UDID]++
 		gen := b.bootGen[d.UDID]
 		b.bgWG.Add(2)
@@ -116,6 +117,13 @@ func (b *Backend) leanDevice(d simDevice, cold bool, galleryBefore string) {
 			defer b.bgWG.Done()
 			b.stopBackgroundApps(d, gen)
 		}()
+		if idleExitOn() {
+			b.bgWG.Add(1)
+			go func() {
+				defer b.bgWG.Done()
+				b.stopIdleDaemons(d, gen)
+			}()
+		}
 	}
 	if state, checked := b.lean[d.UDID]; checked && state == on && !cold {
 		return
@@ -441,12 +449,18 @@ type simProc struct {
 // simulator's launchd_sim started, and the device's data directory (from launchd_sim's
 // argument).
 func simChildren(ps, udid string) (children []simProc, data string) {
+	_, children, data = simRootChildren(ps, udid)
+	return children, data
+}
+
+// simRootChildren is simChildren that also returns launchd_sim's pid (0 when the simulator is not
+// running).
+func simRootChildren(ps, udid string) (root int, children []simProc, data string) {
 	type proc struct {
 		ppid int
 		cmd  string
 	}
 	procs := map[int]proc{}
-	root := 0
 	for _, line := range strings.Split(ps, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 3 {
@@ -470,14 +484,14 @@ func simChildren(ps, udid string) (children []simProc, data string) {
 		}
 	}
 	if root == 0 {
-		return nil, ""
+		return 0, nil, ""
 	}
 	for pid, p := range procs {
 		if p.ppid == root {
 			children = append(children, simProc{pid, p.cmd})
 		}
 	}
-	return children, data
+	return root, children, data
 }
 
 var launchArguments = regexp.MustCompile(`-LaunchArguments ([A-Za-z0-9+/=_-]+)`)

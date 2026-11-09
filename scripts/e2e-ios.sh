@@ -3,6 +3,9 @@
 #
 #   scripts/e2e-ios.sh                      # uses bin/ios/agemu, state in ~/.agemu-dev-ios
 #   AGEMU_BIN=bin/agemu scripts/e2e-ios.sh  # (make ios-e2e)
+#   E2E_IOS_DEVICE=agemu-mine E2E_IOS_PROFILES=0 scripts/e2e-ios.sh
+#                                           # another iPhone 17 Pro simulator; skip the profile
+#                                           # switches (they boot agemu-iphone-se-3 and agemu-ipad-mini)
 #
 # It creates (if missing) and boots agemu-* simulators only, and exits non-zero if any
 # check fails. Screenshots and UI dumps go to $E2E_OUT (a temp dir by default).
@@ -14,6 +17,7 @@ export AGEMU_HOME="${AGEMU_HOME:-$HOME/.agemu-dev-ios}"
 OUT="${E2E_OUT:-$(mktemp -d -t agemu-e2e-ios)}"
 mkdir -p "$OUT"
 unset AGEMU_DEVICE
+DEVICE="${E2E_IOS_DEVICE:-agemu-iphone-17-pro}"
 
 CHECKS=0
 FAILS=0
@@ -79,8 +83,8 @@ else
   TESTAPP=""
 fi
 
-step "create (if missing) and boot agemu-iphone-17-pro"
-expect "create" create --platform ios --profile iphone-17-pro
+step "create (if missing) and boot $DEVICE"
+expect "create" create --platform ios --name "$DEVICE" --profile iphone-17-pro
 ID=$(json '["id"]')
 expect "boot to agent-ready" boot "$ID"
 [[ "$(json '["state"]')" == booted ]] && ok "state is booted" || bad "state: $LAST"
@@ -178,6 +182,9 @@ if [[ -n "$TESTAPP" ]]; then
   expect "terminate the test app" terminate dev.agemu.testapp
 fi
 
+if [[ "${E2E_IOS_PROFILES:-1}" == 0 ]]; then
+  step "screen profiles: skipped (E2E_IOS_PROFILES=0)"
+else
 step "screen profiles: screenshot pixels equal the profile size"
 ag profiles --platform ios
 PROFILES="$LAST"
@@ -259,8 +266,9 @@ for P in iphone-se-3 ipad-mini iphone-17-pro; do
     expect "SE: back on the root" wait --id About --gone --timeout-ms 10000
   fi
 done
+fi
 
-step "reset and verify the clean state (agemu-iphone-17-pro)"
+step "reset and verify the clean state ($DEVICE)"
 export AGEMU_DEVICE="$ID"
 if [[ -n "$TESTAPP" ]]; then
   expect "install the test app (dirty state)" install "$TESTAPP"
