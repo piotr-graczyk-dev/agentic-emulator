@@ -63,7 +63,7 @@ What the numbers show:
   selector tap waits for a still screen. It has half the calls of Argent (35 against 66); with
   model think time each call is one more agent turn.
 - **iOS memory.** agemu's lean simulator held about half the memory of the standard one, as in
-  agemu's [own measurements](../../README.md#ios). On Android the emulator's `phys_footprint`
+  agemu's [own measurements](../../docs/IOS.md#lean-simulators). On Android the emulator's `phys_footprint`
   moved between series of the same device (agemu-lab measured 3.1, 3.4 and 4.2 GB in three
   series on the same day), so the Android memory is not compared here.
 - **Host processes.** On iOS, agent-device's XCTest runner and Argent's accessibility service run
