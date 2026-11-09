@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -39,10 +40,25 @@ import (
 type Backend struct {
 	mu   sync.Mutex
 	devs map[string]*device
+
+	bg       context.Context // boots run on it (prepare.go); Close cancels it
+	bgCancel context.CancelFunc
+	// bootHook replaces bootSync in tests of the preparation state machine.
+	bootHook func(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error)
 }
 
 // New is cheap: it spawns nothing and connects to nothing until a device is used.
-func New() *Backend { return &Backend{devs: map[string]*device{}} }
+func New() *Backend {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Backend{devs: map[string]*device{}, bg: ctx, bgCancel: cancel}
+}
+
+func (b *Backend) background() context.Context {
+	if b.bg == nil {
+		return context.Background()
+	}
+	return b.bg
+}
 
 func (b *Backend) Platform() api.Platform { return api.Android }
 
@@ -59,9 +75,11 @@ type device struct {
 	agent   *agentClient
 	disp    displayInfo // last known logical display
 	dispAt  time.Time
-	proc    *exec.Cmd // emulator we launched (reaped by a goroutine)
-	retook  bool      // baseline already retaken by this daemon
-	agentOK bool      // agent version checked on the current connection
+	proc    *exec.Cmd  // emulator we launched (reaped by a goroutine)
+	retook  bool       // baseline already retaken by this daemon
+	agentOK bool       // agent version checked on the current connection
+	prep    *prepState // the boot in progress (prepare.go)
+	prepErr string     // why the last preparation failed, until the next boot
 
 	// lastInput is when agemu last sent input (unix ns); screenshots taken right after an
 	// input wait for the frame that shows its effect (see frameStream.get).
@@ -221,6 +239,49 @@ func avdName(id string) (string, error) {
 	return name, nil
 }
 
+// canonicalNames holds the AVD names CanonicalID found spelled as their .ini file.
+var canonicalNames sync.Map
+
+// CanonicalID spells an AVD's id as its .ini file is named. On a case-insensitive disk (the
+// macOS default) android:Agemu-Lab opens agemu-lab's files, so it must also share agemu-lab's
+// device state and lock. An exact match wins (a case-sensitive disk can hold both).
+func (b *Backend) CanonicalID(id string) string {
+	name, ok := strings.CutPrefix(id, string(api.Android)+":")
+	if !ok || name == "" {
+		return id
+	}
+	// Names already found spelled as their file are not looked up again (a directory read
+	// is about 20 µs per call; the agent's ids rarely change).
+	if _, known := canonicalNames.Load(name); known {
+		return id
+	}
+	ents, err := os.ReadDir(avdHome())
+	if err != nil {
+		return id
+	}
+	match := ""
+	for _, e := range ents {
+		n, isINI := strings.CutSuffix(e.Name(), ".ini")
+		if !isINI || e.IsDir() {
+			continue
+		}
+		if n == name {
+			canonicalNames.Store(name, true)
+			return id
+		}
+		if strings.EqualFold(n, name) {
+			if match != "" {
+				return id // two AVDs differ only in case: leave it to the exact name
+			}
+			match = n
+		}
+	}
+	if match == "" {
+		return id
+	}
+	return string(api.Android) + ":" + match
+}
+
 func (b *Backend) dev(name string) *device {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -269,6 +330,9 @@ func (d *device) conn(ctx context.Context) (*emuClient, *agentClient, error) {
 		d.mu.Lock()
 		d.agentOK = true
 		d.mu.Unlock()
+		// The agent runs only in a guest that has finished booting: from now on calls can put
+		// apps and data in it, so its first boot counts as completed (firstboot.go).
+		recordBootedIfMarked(d.name)
 	}
 	// Every operation goes through here before it sends input: reopen a frame stream stopped
 	// after idle now, so the frames of that input are seen.
@@ -437,9 +501,25 @@ func (b *Backend) describe(a avdInfo, run map[string]runningEmu) api.Device {
 	if !d.dispAt.IsZero() {
 		scr = api.Screen{Width: d.disp.W, Height: d.disp.H, Density: d.disp.Density}
 	}
+	dev.PrepareError = d.prepErr
 	d.mu.Unlock()
+	if p := d.preparing(); p != nil {
+		dev.State = api.StatePreparing
+		dev.Preparing = p.info()
+		dev.Screen = &scr
+		dev.Profile = profileName(scr)
+		return dev
+	}
 	if _, ok := run[a.Name]; ok {
 		dev.State = "booted"
+		if !a.hasBaseline() && !booting {
+			// A daemon stopped mid-preparation left the emulator running without a baseline
+			// (a boot in progress would show as preparing or booting).
+			dev.NoBaseline = true
+			if dev.PrepareError == "" {
+				dev.PrepareError = "the device runs without a baseline snapshot (a daemon stopped or was restarted while preparing it): call boot to prepare it again; reset fails until then"
+			}
+		}
 		if d.parked() {
 			dev.State = api.StateParked // paused in place (park.go)
 		} else if standbyEnabled() && d.inStandby(context.Background()) {
@@ -554,7 +634,7 @@ func logDir() string {
 
 // emulatorArgs builds the command line. Snapshot handling: agemu keeps one named snapshot
 // (the baseline) and never auto-saves (-no-snapshot-save), so snapshots do not pile up.
-func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
+func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []string {
 	ram := a.intCfg("hw.ramSize")
 	if ram <= 0 {
 		ram = envInt("AGEMU_ANDROID_RAM_MB", defaultRAMMB)
@@ -574,6 +654,9 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline bool) []string {
 		args = append(args, "-snapshot", baselineSnapshot)
 	} else {
 		args = append(args, "-no-snapshot-load")
+	}
+	if wipe {
+		args = append(args, "-wipe-data") // firstboot.go: only an AVD whose first boot never completed
 	}
 	// Extra emulator flags, e.g. "-show-kernel". Not "-feature ...": the emulator deletes a
 	// snapshot saved with another feature set, and with OnDemandSnapshotLoad both loads tried on
@@ -616,16 +699,22 @@ func emulatorEnv(environ []string) []string {
 // restores the old behaviour.
 func inPlaceBootLoad() bool { return env("AGEMU_ANDROID_BOOT_LOAD", "inplace") != "startup" }
 
-func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (api.Device, error) {
-	d, err := b.devFor(id)
-	if err != nil {
-		return api.Device{}, err
-	}
+// bootSync boots the device to agent-ready, taking the baseline when it has none or the old one
+// cannot be used. It runs in the goroutine Boot starts (prepare.go).
+func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.BootOptions) (api.Device, error) {
 	d.life.Lock()
 	defer d.life.Unlock()
 	a, err := loadAVD(d.name)
 	if err != nil {
 		return api.Device{}, fmt.Errorf("unknown device %s: %w", id, err)
+	}
+	if _, ok := findRunning(d.name); ok && !opts.Cold && !a.hasBaseline() {
+		// An emulator runs but there is no baseline: a previous daemon stopped (or was
+		// restarted) while it prepared one. Start over: power it off and prepare it again.
+		logf("%s: boot: the emulator runs without %s (a previous daemon stopped while preparing it?); powering it off and preparing it again", d.name, baselineSnapshot)
+		if err := d.shutdown(ctx); err != nil {
+			return api.Device{}, err
+		}
 	}
 	if _, ok := findRunning(d.name); ok {
 		if !opts.Cold && d.inStandby(ctx) {
@@ -661,8 +750,25 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 
 	loadBaseline := !opts.Cold && a.hasBaseline()
 	retake := false
+	if !a.hasBaseline() {
+		d.markNeeded()
+	}
+	wipe := false
+	if !loadBaseline {
+		if needsWipe(a) && !firstBootRepair() {
+			logf("%s: boot: the AVD's first boot was interrupted before it ever completed; AGEMU_ANDROID_FIRSTBOOT_REPAIR=0, so it is not wiped (if it never finishes booting, unset it)", d.name)
+		} else if needsWipe(a) {
+			wipe = true
+			logf("%s: boot: REPAIRING AN INTERRUPTED FIRST BOOT: the AVD's first cold boot was interrupted before it ever completed (%s is there, no completed boot, no baseline); booting it with -wipe-data (nothing was ever installed in it)", d.name, firstBootMarker)
+			d.setNote("an interrupted first boot is being repaired: the AVD's user data, which never finished its first boot, is wiped (-wipe-data)")
+		} else if marked, err := markFirstBoot(a); err != nil {
+			logf("%s: could not write %s: %v", d.name, firstBootMarker, err)
+		} else if marked {
+			logf("%s: boot: first boot of this AVD (%s written; removed when the boot completes)", d.name, firstBootMarker)
+		}
+	}
 	t0 := time.Now()
-	if err := d.launch(ctx, a, loadBaseline); err != nil {
+	if err := d.launch(ctx, a, loadBaseline, wipe); err != nil {
 		return api.Device{}, err
 	}
 	t1 := time.Now()
@@ -676,8 +782,19 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 			// The baseline was taken with another -gpu mode (AGEMU_ANDROID_GPU changed, or an
 			// agemu upgrade changed the default). The emulator refuses it before touching the
 			// guest, which keeps cold-booting (-no-snapshot-load); the baseline is retaken below.
-			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it", d.name, baselineSnapshot, err)
+			logf("%s: boot: %s was taken with another GPU mode (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
 			loadBaseline, retake = false, true
+			d.markNeeded()
+			d.setPhase(phaseColdBoot)
+			d.dropUnusableBaseline(ctx, e)
+		case err != nil && configMismatch(err):
+			// The AVD's hardware (hw.ramSize, hw.cpu.ncore, ...) changed since the baseline was
+			// taken. Refused the same way, before the guest is touched; retaken below.
+			logf("%s: boot: %s was taken with another AVD configuration (%v); cold-booting and retaking it (whatever the disk holds now, such as apps installed since the old baseline, goes into the new one)", d.name, baselineSnapshot, err)
+			loadBaseline, retake = false, true
+			d.markNeeded()
+			d.setPhase(phaseColdBoot)
+			d.dropUnusableBaseline(ctx, e)
 		case err != nil:
 			return api.Device{}, fmt.Errorf("restoring %s: %w", baselineSnapshot, err)
 		default:
@@ -687,12 +804,18 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	if loadBaseline {
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
 	} else {
+		d.setPhase(phaseColdBoot)
 		err = d.waitBooted(ctx, 180*time.Second)
 	}
 	if err != nil {
 		return api.Device{}, err
 	}
 	logf("%s: boot: emulator gRPC up %v, then guest ready %v later", d.name, t1.Sub(t0).Round(time.Millisecond), time.Since(t1).Round(time.Millisecond))
+	if removed, rerr := recordBooted(a); rerr != nil {
+		logf("%s: could not record the completed boot: %v", d.name, rerr)
+	} else if removed {
+		logf("%s: boot: the AVD's first boot completed (%s removed)", d.name, firstBootMarker)
+	}
 	_, ag, err := d.connRaw(ctx)
 	if err != nil {
 		return api.Device{}, err
@@ -736,6 +859,7 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	d.mu.Unlock()
 	if stale {
 		logf("%s: %s has no current agent; retaking it", d.name, baselineSnapshot)
+		d.markNeeded()
 	}
 	if !loadBaseline || restarted {
 		d.checkGuest(ctx)
@@ -753,6 +877,20 @@ func (b *Backend) Boot(ctx context.Context, id string, opts api.BootOptions) (ap
 	return b.device(id)
 }
 
+// dropUnusableBaseline deletes a baseline the emulator refused (another GPU mode or AVD
+// configuration): it can never load again, and without it a daemon that stops during the retake
+// leaves an emulator without a baseline, which the next boot recognises and prepares again,
+// instead of an emulator whose old snapshot every reset fails to load.
+func (d *device) dropUnusableBaseline(ctx context.Context, e *emuClient) {
+	// Not cancelled with the boot: a shutdown right after the decision must not leave the
+	// refused baseline behind (it would then try standby on it).
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := e.deleteSnapshot(dctx, baselineSnapshot); err != nil {
+		logf("%s: could not delete the unusable %s (%v); the retake replaces it", d.name, baselineSnapshot, err)
+	}
+}
+
 func (d *device) setBooting(v bool) {
 	d.mu.Lock()
 	d.booting = v
@@ -768,7 +906,7 @@ func (d *device) refreshDisplay(ctx context.Context) (displayInfo, error) {
 }
 
 // launch starts the emulator detached from the daemon and waits for its gRPC endpoint.
-func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error {
+func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool) error {
 	p, err := allocPorts()
 	if err != nil {
 		return err
@@ -782,11 +920,15 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	}
 	defer lf.Close()
 	d.clearPark() // a new emulator process starts running
-	args := emulatorArgs(d.name, p, a, loadBaseline)
+	args := emulatorArgs(d.name, p, a, loadBaseline, wipe)
 	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.Env = emulatorEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
+	// A boot cancelled before this point (a shutdown right after boot) starts nothing.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
 	if err := cmd.Start(); err != nil {
 		return err
@@ -795,17 +937,24 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 	d.proc = cmd
 	d.mu.Unlock()
 	go func() { _ = cmd.Wait() }() // reap
+	// Until the emulator is registered and answers gRPC, nothing else can find or stop it (a
+	// shutdown looks for registered emulators): any failure or cancellation here kills it.
+	fail := func(err error) error {
+		logf("%s: emulator start abandoned (%v); stopping pid %d", d.name, err, cmd.Process.Pid)
+		killProcGroup(cmd.Process.Pid)
+		return err
+	}
 
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		if r, ok := findRunning(d.name); ok && r.GRPCPort != 0 {
 			e, err := dialEmu(r)
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			if err := e.waitGRPC(ctx, time.Until(deadline)); err != nil {
 				e.Close()
-				return err
+				return fail(err)
 			}
 			d.mu.Lock()
 			if d.emu != nil {
@@ -826,14 +975,108 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline bool) error
 			return fmt.Errorf("emulator exited during startup; see %s", filepath.Join(logDir(), d.name+".log"))
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log"))
+			return fail(fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log")))
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fail(ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// killProcGroup stops an emulator agemu started (its own session, so its process group is its
+// pid): SIGTERM, then SIGKILL after 20 s.
+func killProcGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	deadline := time.Now().Add(20 * time.Second) // the emulator's own graceful exit window
+	for groupAlive(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// recordIfBooted runs before agemu powers off a running AVD whose first boot is not yet recorded
+// as completed (firstboot.go). It pauses the VM, so the guest cannot finish booting between the
+// answer and the power-off that follows, then asks the emulator (gRPC getStatus, which reports
+// the guest's boot completion on this image), bounded and also when ctx is already cancelled. It
+// records the boot unless the paused guest is shown not to have finished it (firstBootUnfinished):
+// when the pause or the question fails, the boot is recorded.
+func (d *device) recordIfBooted(ctx context.Context, a avdInfo) {
+	var paused, known, booted bool
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if e, _, err := d.connRaw(c); err == nil {
+		// The VM stays paused: the caller powers it off next.
+		paused, known, booted = pausedBootStatus(c, e)
+	}
+	if firstBootUnfinished(paused, known, booted) {
+		logf("%s: the guest has not finished its first boot (the emulator says so, VM paused); the next boot repairs it", d.name)
+		return
+	}
+	if !paused || !known {
+		logf("%s: could not pause the VM and ask the emulator whether the guest finished its first boot; recording it as finished so it is never wiped automatically (if it never boots, boot it once with AGEMU_ANDROID_EMULATOR_FLAGS=-wipe-data)", d.name)
+	}
+	if _, err := recordBooted(a); err != nil {
+		logf("%s: could not record the completed boot: %v", d.name, err)
+	}
+}
+
+// pausedBootStatus pauses the VM and reads whether the guest has finished booting. SetVmState only
+// queues the pause on the emulator's main loop, so it waits until getVmState reports the VM paused
+// and then gives the emulator a moment to handle events the guest sent before the pause (a boot
+// completion among them) before it reads the flag. paused is false when the pause is not
+// confirmed before ctx ends; known is false when the flag could not be read.
+func pausedBootStatus(ctx context.Context, e *emuClient) (paused, known, booted bool) {
+	if e.setVM(ctx, emupb.VmRunState_PAUSED) != nil {
+		return false, false, false
+	}
+	for {
+		if st, err := e.vmState(ctx); err == nil && st == emupb.VmRunState_PAUSED {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, false, false
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return false, false, false
+	case <-time.After(pausedSettle):
+	}
+	st, err := e.status(ctx)
+	if err != nil {
+		return true, false, false
+	}
+	return true, true, st.GetBooted()
+}
+
+// pausedSettle is how long pausedBootStatus lets the emulator handle the guest's last events once
+// the VM is paused.
+var pausedSettle = 200 * time.Millisecond
+
+// groupAlive reports whether any process of the process group pgid still runs.
+func groupAlive(pgid int) bool { return pgid > 0 && syscall.Kill(-pgid, 0) == nil }
+
+// stopUnregistered stops the emulator this daemon launched for d if it still runs but never
+// registered (findRunning cannot see it, so shutdown would miss it).
+func (d *device) stopUnregistered() {
+	d.mu.Lock()
+	cmd := d.proc
+	d.mu.Unlock()
+	if cmd == nil || cmd.Process == nil || !groupAlive(cmd.Process.Pid) {
+		return
+	}
+	if _, ok := findRunning(d.name); ok {
+		return // registered: the normal shutdown stops it
+	}
+	logf("%s: stopping the unregistered emulator pid %d", d.name, cmd.Process.Pid)
+	killProcGroup(cmd.Process.Pid)
 }
 
 // waitBooted waits until adb sees the device and sys.boot_completed=1.
@@ -914,43 +1157,90 @@ func (d *device) checkGuest(ctx context.Context) {
 // the one snapshot agemu boots and resets from. The on-device agent is running when the
 // snapshot is taken, so every snapshot boot / reset is agent-ready immediately.
 func (d *device) makeBaseline(ctx context.Context) error {
-	e, a, err := d.conn(ctx)
+	cctx, ccancel := context.WithTimeout(ctx, time.Minute)
+	e, a, err := d.conn(cctx)
+	ccancel()
 	if err != nil {
 		return err
 	}
+	// Every guest call below has its own deadline (and ends when ctx is cancelled): a wedged adbd
+	// or agent must not hold the preparation, or a shutdown that cancels it.
+	step := func(dl time.Duration) (context.Context, context.CancelFunc) { return context.WithTimeout(ctx, dl) }
 	settle := time.Duration(envInt("AGEMU_ANDROID_BASELINE_SETTLE_S", 20)) * time.Second
 	logf("%s: settling %v before taking %s", d.name, settle, baselineSnapshot)
+	d.setPhase(phaseSteps)
 	// Let boot-time work (launcher, package scans) finish so a restored device is quiet.
-	time.Sleep(settle)
+	if err := sleepCtx(ctx, settle); err != nil {
+		return err
+	}
 	// The emulator's touchscreen advertises a stylus, so Gboard treats taps on text fields as
 	// stylus input and shows its floating handwriting toolbar instead of the keyboard. A phone
 	// is used with a finger: turn stylus handwriting off (a user setting, `settings put`).
 	d.mu.Lock()
 	serial := d.run.serial()
 	d.mu.Unlock()
-	if _, err := adbShellOK(ctx, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
+	sc, scancel := step(stepTimeout)
+	if _, err := adbShellOK(sc, serial, "settings put secure stylus_handwriting_enabled 0"); err != nil {
 		logf("%s: could not turn off stylus handwriting: %v", d.name, err)
 	}
+	scancel()
 	if leanOn() {
 		d.disableLeanPackages(ctx, serial)
 	}
-	d.warmUpKeyboard(ctx, e, a)
-	_ = a.call(ctx, map[string]any{"cmd": "cleartasks"}, nil)
-	_ = a.call(ctx, map[string]any{"cmd": "key", "code": keyCodes["home"]}, nil)
-	_ = a.call(ctx, map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000}, nil)
+	d.warmUpKeyboard(ctx, e, a) // bounded at 40 s
+	agentStep := func(req map[string]any) {
+		c, cancel := step(stepTimeout)
+		_ = a.call(c, req, nil)
+		cancel()
+	}
+	agentStep(map[string]any{"cmd": "cleartasks"})
+	agentStep(map[string]any{"cmd": "key", "code": keyCodes["home"]})
+	agentStep(map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000})
+	// Work the guest still has pending would run again after every reset (see quiet.go).
+	d.setPhase(phaseSettling)
+	if err := d.waitGuestSettled(ctx, serial, time.Now()); err != nil {
+		return err
+	}
+	if baselineUptime() > 0 {
+		// Anything that came up during the wait (a dialog, a notification shade) is dismissed;
+		// on the home screen the key does nothing.
+		agentStep(map[string]any{"cmd": "key", "code": keyCodes["home"]})
+		agentStep(map[string]any{"cmd": "idle", "quietMs": 500, "timeoutMs": 10000})
+		bctx, bcancel := step(60 * time.Second)
+		if _, err := adbShellOK(bctx, serial, "am wait-for-broadcast-idle"); err != nil {
+			logf("%s: broadcast queue not idle: %v", d.name, err)
+		}
+		bcancel()
+	}
+	zc, zcancel := step(time.Minute)
+	d.zeroFreeMemory(zc, serial)
+	zcancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("preparing the baseline was cancelled: %w", err)
+	}
 	// The snapshot must contain a running agent, so boots from it are agent-ready at once.
-	if _, err := ensureAgent(ctx, a, logf); err != nil {
+	ac, acancel := step(2 * time.Minute)
+	_, err = ensureAgent(ac, a, logf)
+	acancel()
+	if err != nil {
 		return fmt.Errorf("agent not running before snapshot: %w", err)
 	}
 	// No host connection or port redirection inside the snapshot: the emulator cannot load a
 	// snapshot that holds the redirection's socket (see redirector.drop).
 	a.Close()
 	if a.rd != nil {
-		a.rd.drop(ctx)
+		rc, rcancel := step(stepTimeout)
+		a.rd.drop(rc)
+		rcancel()
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+		return err
+	}
+	d.setPhase(phaseSaving)
 	t := time.Now()
-	sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// The save is not cancelled with the boot (a shutdown waits for it): an interrupted save
+	// could leave a snapshot that does not load.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), saveTimeout)
 	defer cancel()
 	if names, err := e.listSnapshots(sctx); err == nil {
 		for _, n := range names {
@@ -962,6 +1252,7 @@ func (d *device) makeBaseline(ctx context.Context) error {
 	if err := e.saveSnapshot(sctx, baselineSnapshot); err != nil {
 		return err
 	}
+	d.markSaved()
 	logf("%s: saved %s in %v", d.name, baselineSnapshot, time.Since(t).Round(time.Millisecond))
 	a.Close()
 	return nil
@@ -1047,8 +1338,18 @@ func (b *Backend) Shutdown(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	cancelled, err := d.cancelPrep("shutdown")
+	if err != nil {
+		return err
+	}
 	d.life.Lock()
 	defer d.life.Unlock()
+	d.stopUnregistered()
+	if cancelled {
+		// The guest of a cancelled preparation is half booted: standby (which needs a live
+		// agent) would wait for it; power it off.
+		return d.shutdown(ctx)
+	}
 	if !standbyEnabled() {
 		return d.shutdown(ctx)
 	}
@@ -1143,6 +1444,12 @@ func (d *device) shutdown(ctx context.Context) error {
 		d.drop()
 		return nil
 	}
+	if a, err := loadAVD(d.name); err == nil && a.hasFirstBootMarker() && !a.hasBootedRecord() {
+		// Every power-off of an AVD whose first boot is not yet recorded as completed asks the
+		// guest first: one that finished booting meanwhile (for example while no daemon watched
+		// it) holds data and must never be wiped at its next boot (firstboot.go).
+		d.recordIfBooted(ctx, a)
+	}
 	e, _, err := d.connRaw(ctx)
 	if err == nil {
 		c, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -1191,7 +1498,7 @@ func (b *Backend) Reset(ctx context.Context, id string) error {
 		return err
 	}
 	if !a.hasBaseline() {
-		return fmt.Errorf("%s has no baseline snapshot yet (boot it once)", id)
+		return fmt.Errorf("%s has no baseline snapshot: a device's first boot takes it, and a daemon stopped or restarted while preparing it leaves none; run `agemu boot %s` (it prepares the baseline again: usually 7-8 min, at most %.0f, once)", id, id, math.Ceil(prepMax().Minutes()))
 	}
 	e, ag, err := d.ready(ctx)
 	if err != nil {
@@ -1608,6 +1915,9 @@ func (b *Backend) Terminate(ctx context.Context, id, app string) error {
 }
 
 func (b *Backend) Close() error {
+	if b.bgCancel != nil {
+		b.bgCancel() // boots in progress stop; the next daemon prepares again (bootSync)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, d := range b.devs {

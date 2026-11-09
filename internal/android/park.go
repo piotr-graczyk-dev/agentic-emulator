@@ -36,8 +36,20 @@ func (b *Backend) Park(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	d.life.Lock()
+	// A boot holds the device's life lock until it is done, its baseline preparation (minutes)
+	// and a first-boot repair included: a park waits for it at most until its context ends, so a
+	// device is never paused while it boots, and the daemon's auto-park (30 s) never hangs on one.
+	for !d.life.TryLock() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("parking android:%s: waiting for its boot or shutdown to finish: %w", d.name, ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 	defer d.life.Unlock()
+	if p := d.preparing(); p != nil {
+		return fmt.Errorf("device android:%s is preparing its baseline; it cannot be parked", d.name)
+	}
 	if _, ok := findRunning(d.name); !ok {
 		return fmt.Errorf("device android:%s is not running (agemu boot android:%s)", d.name, d.name)
 	}

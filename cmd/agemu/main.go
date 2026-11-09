@@ -36,7 +36,10 @@ Device commands (-d <device> optional when exactly one device is booted):
   devices                                   list devices
   profiles [--platform android|ios]         list screen profiles
   create --platform android|ios --name N [--profile P]
-  boot <device> [--cold]                    boot (warm snapshot by default)
+  boot <device> [--cold] [--no-wait]        boot (warm snapshot by default). A new Android device's
+                                            first boot (or a retake) prepares its baseline snapshot
+                                            once, usually 7-8 min, at most 20: boot waits, prints progress on
+                                            stderr; --no-wait returns at once with state "preparing"
   shutdown | reset                          stop / restore clean baseline
   park | resume                             stop a booted device in place (no CPU, memory the
                                             host can reclaim) / continue it; any other command
@@ -82,7 +85,8 @@ Actions (tap, swipe, type, key, launch, open, push) also wait for their effect i
   e.g. agemu tap --text "Log in" --wait-id home-screen --ui
 
 Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform,
-4 failed while the app launched last through agemu was down after a crash (agemu crashes).
+4 failed while the app launched last through agemu was down after a crash (agemu crashes),
+5 the device is preparing its baseline (first boot or retake): poll devices, or boot again.
 
 Servers:
   daemon                                    run the daemon in the foreground
@@ -119,6 +123,68 @@ func main() {
 	}
 }
 
+// prepPoll is how often `boot` polls a preparing device; prepReport how often it prints progress.
+var prepPoll, prepReport = 5 * time.Second, 30 * time.Second
+
+// waitPrepared waits for a device that boot left preparing its baseline: it polls `devices`,
+// prints the phase on progress, and when the device is no longer preparing calls boot again for
+// the final state. A failed preparation is an error.
+func waitPrepared(cl *client.Client, p daemon.Params, raw json.RawMessage, progress io.Writer) (json.RawMessage, error) {
+	var dev api.Device
+	if err := json.Unmarshal(raw, &dev); err != nil || dev.State != api.StatePreparing {
+		return raw, nil
+	}
+	id := dev.ID
+	lastPhase, lastPrint := "", time.Time{}
+	report := func(pr *api.Preparing) {
+		if pr == nil {
+			return
+		}
+		if pr.Phase != lastPhase || time.Since(lastPrint) >= prepReport {
+			max := ""
+			if pr.MaxS > 0 {
+				max = fmt.Sprintf(", at most ~%.0f min", math.Ceil(pr.MaxS/60))
+			}
+			fmt.Fprintf(progress, "%s: preparing its baseline snapshot, once (%s, %.0fs so far%s)\n", id, pr.Phase, pr.ElapsedS, max)
+			lastPhase, lastPrint = pr.Phase, time.Now()
+		}
+	}
+	report(dev.Preparing)
+	for {
+		time.Sleep(prepPoll)
+		var devs []api.Device
+		if _, err := cl.Call("devices", nil, &devs); err != nil {
+			return nil, err
+		}
+		var cur *api.Device
+		for i := range devs {
+			if devs[i].ID == id {
+				cur = &devs[i]
+			}
+		}
+		if cur == nil {
+			return nil, fmt.Errorf("%s disappeared while preparing", id)
+		}
+		if cur.State == api.StatePreparing {
+			report(cur.Preparing)
+			continue
+		}
+		if cur.PrepareError != "" || cur.NoBaseline {
+			return nil, fmt.Errorf("preparing %s failed: %s", id, cur.PrepareError)
+		}
+		q := p
+		// The preparation was the boot (a cold one): this call only reads the booted device, so
+		// it must not ask for another cold boot.
+		q.Device, q.NoWait, q.Cold = id, false, false
+		r, err := cl.Do("boot", q)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(progress, "%s: baseline ready\n", id)
+		return r.Result, nil
+	}
+}
+
 // exitCode is the exit status for a failed command.
 func exitCode(err error) int {
 	switch {
@@ -126,6 +192,8 @@ func exitCode(err error) int {
 		return 3 // a script can skip the step on this platform
 	case errors.Is(err, api.ErrAppCrashed):
 		return 4 // the app crashed: not a selector that did not match
+	case errors.Is(err, api.ErrPreparing):
+		return 5 // the device is preparing its baseline: wait and retry
 	}
 	return 1
 }
@@ -136,7 +204,7 @@ type cli struct {
 	flags map[string]string
 }
 
-var boolFlags = map[string]bool{"cold": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
+var boolFlags = map[string]bool{"cold": true, "no-wait": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}}
@@ -226,6 +294,11 @@ func runCommand(cmd string, args []string) error {
 	reply, err := cl.Do(method, p)
 	if err != nil {
 		return err // a crash that explains it is in the message
+	}
+	if method == "boot" && c.flags["no-wait"] != "true" {
+		if reply.Result, err = waitPrepared(cl, p, reply.Result, os.Stderr); err != nil {
+			return err
+		}
 	}
 	if c := reply.AppCrash; c != nil {
 		// On stderr, so stdout stays the command's own output.
@@ -328,6 +401,11 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 			p.Device = c.pos[0]
 		}
 		p.Cold = c.flags["cold"] == "true"
+		if cmd == "boot" {
+			// The daemon returns once it knows the boot prepares a baseline; the CLI then waits
+			// by polling, with progress on stderr, unless --no-wait.
+			p.NoWait = true
+		}
 	case "profile":
 		method = "set_profile"
 		if len(c.pos) > 0 {
