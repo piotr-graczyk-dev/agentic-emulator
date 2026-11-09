@@ -79,7 +79,6 @@ type fakeIdle struct {
 	pass     int          // passes started so far (waitUntil calls)
 	heldAt   map[int]bool // passes (1-based) at which the device is held
 	recheckF func(p daemonProc) (gone, killable bool)
-	usageF   func(pid int) (procUsage, error)
 	signals  []string
 	stopAt   int // current() turns false at this pass (0: never)
 }
@@ -97,19 +96,12 @@ func (f *fakeIdle) recheck(p daemonProc) (bool, bool) {
 	if f.recheckF != nil {
 		return f.recheckF(p)
 	}
-	return true, false // exited on SIGTERM
-}
-func (f *fakeIdle) usage(pid int) (procUsage, error) {
-	if f.usageF != nil {
-		return f.usageF(pid)
-	}
-	return procUsage{}, syscall.ESRCH // exited: the recheck decides
+	return false, true // the same idle process: SIGKILL
 }
 func (f *fakeIdle) signal(pid int, sig syscall.Signal) error {
 	f.signals = append(f.signals, fmt.Sprintf("%d@%d %v", pid, f.pass, map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGKILL: "KILL"}[sig]))
 	return nil
 }
-func (f *fakeIdle) sleep(time.Duration) {}
 
 // dp is a daemon with flags, CPU time and start time 1 (before any app).
 func dp(pid int, name string, flags uint32, cpu uint64) daemonProc {
@@ -135,7 +127,7 @@ func TestIdlePassesNeedThreeQuietPasses(t *testing.T) {
 		[]daemonProc{dp(11, "sleepd", 3, 101), dp(12, "dirtyd", 3, 0), dp(13, "SpringBoard", 1, 0), dp(14, "diagnosticd", 3, 0)},
 	)}
 	stopped := idlePasses(f, "test")
-	if want := "10@3 TERM,11@4 TERM,12@4 TERM"; strings.Join(f.signals, ",") != want {
+	if want := "10@3 KILL,11@4 KILL,12@4 KILL"; strings.Join(f.signals, ",") != want {
 		t.Fatalf("signals = %v, want %s", f.signals, want)
 	}
 	if fmt.Sprint(stopped) != "map[dirtyd:1 maild:1 sleepd:1]" {
@@ -190,14 +182,14 @@ func TestIdlePassesRecheck(t *testing.T) {
 	f := &fakeIdle{passes: snaps(ps, ps, ps, ps, ps, ps), recheckF: func(p daemonProc) (bool, bool) {
 		switch p.name {
 		case "maild":
-			return false, true // ignored SIGTERM, still the same idle process: SIGKILL
+			return false, true // still the same idle process: SIGKILL
 		case "sleepd":
-			return false, false // busy again, or the device got held: no SIGKILL, kept
+			return false, false // busy since the pass, or the device got held: no SIGKILL, kept
 		}
-		return true, false // exited
+		return true, false // exited by itself: counted, nothing to signal
 	}}
 	stopped := idlePasses(f, "test")
-	if want := "40@3 TERM,41@3 TERM,42@3 TERM,40@3 KILL"; strings.Join(f.signals, ",") != want {
+	if want := "40@3 KILL"; strings.Join(f.signals, ",") != want {
 		t.Fatalf("signals = %v, want %s", f.signals, want)
 	}
 	if fmt.Sprint(stopped) != "map[maild:1 parsecd:1]" {
@@ -211,7 +203,7 @@ func TestIdlePassesHeld(t *testing.T) {
 	ps := []daemonProc{dp(50, "maild", 3, 0)}
 	f := &fakeIdle{passes: snaps(ps, ps, ps, ps, ps, ps), heldAt: map[int]bool{3: true}}
 	idlePasses(f, "test")
-	if want := "50@6 TERM"; strings.Join(f.signals, ",") != want {
+	if want := "50@6 KILL"; strings.Join(f.signals, ",") != want {
 		t.Fatalf("signals = %v, want %s", f.signals, want)
 	}
 }
@@ -257,7 +249,7 @@ func TestIdlePassesEndAgainAfterALaterReturn(t *testing.T) {
 		[]daemonProc{a(5)},
 	)}
 	stopped := idlePasses(f, "test")
-	if want := "1@3 TERM,2@3 TERM,4@7 TERM"; strings.Join(f.signals, ",") != want {
+	if want := "1@3 KILL,2@3 KILL,4@7 KILL"; strings.Join(f.signals, ",") != want {
 		t.Fatalf("signals = %v, want %s", f.signals, want)
 	}
 	if stopped["oneoff"] != 2 || stopped["churn"] != 1 {
@@ -447,15 +439,44 @@ func TestIdlePassesCutAtFirstAppWork(t *testing.T) {
 	}
 }
 
-func TestIdlePassesKillBaselineAfterTerm(t *testing.T) {
-	// The recheck sees the usage read idleTermSettle after the SIGTERM, not the pass's.
-	ps := []daemonProc{dp(80, "maild", 3, 10)}
-	var seen uint64
-	f := &fakeIdle{passes: snaps(ps, ps, ps),
-		usageF:   func(pid int) (procUsage, error) { return procUsage{cpu: 12, start: 1}, nil }, // the handler ran
-		recheckF: func(p daemonProc) (bool, bool) { seen = p.usage.cpu; return false, true }}
+func TestIdlePassesNoSIGTERM(t *testing.T) {
+	ps := []daemonProc{dp(90, "maild", 3, 0)}
+	f := &fakeIdle{passes: snaps(ps, ps, ps)}
 	idlePasses(f, "test")
-	if seen != 12 || strings.Join(f.signals, ",") != "80@3 TERM,80@3 KILL" {
-		t.Fatalf("recheck saw cpu %d, signals %v", seen, f.signals)
+	for _, sg := range f.signals {
+		if strings.HasSuffix(sg, "TERM") {
+			t.Fatalf("SIGTERM sent: %v", f.signals)
+		}
+	}
+	if len(f.signals) != 1 {
+		t.Fatalf("signals %v, want one SIGKILL", f.signals)
+	}
+}
+
+func TestRecheckOf(t *testing.T) {
+	p := daemonProc{pid: 5, name: "maild", flags: 3, usage: procUsage{cpu: 100, start: 7}}
+	ok := func(u procUsage, uerr error, fl uint32, ferr error, held bool) (bool, bool) {
+		return recheckOf(p, func(int) (procUsage, error) { return u, uerr }, func(int) (uint32, error) { return fl, ferr }, func() bool { return held })
+	}
+	for _, c := range []struct {
+		name           string
+		u              procUsage
+		uerr           error
+		fl             uint32
+		ferr           error
+		held           bool
+		gone, killable bool
+	}{
+		{"same idle process", procUsage{100, 7}, nil, 3, nil, false, false, true},
+		{"used CPU since the pass", procUsage{101, 7}, nil, 3, nil, false, false, false},
+		{"dirty now", procUsage{100, 7}, nil, 7, nil, false, false, false},
+		{"device held", procUsage{100, 7}, nil, 3, nil, true, false, false},
+		{"pid reused (other start)", procUsage{100, 8}, nil, 3, nil, false, true, false},
+		{"exited", procUsage{}, syscall.ESRCH, 0, nil, false, true, false},
+		{"exited before the flags read", procUsage{100, 7}, nil, 0, syscall.ESRCH, false, true, false},
+	} {
+		if g, k := ok(c.u, c.uerr, c.fl, c.ferr, c.held); g != c.gone || k != c.killable {
+			t.Errorf("%s: gone %v killable %v, want %v %v", c.name, g, k, c.gone, c.killable)
+		}
 	}
 }

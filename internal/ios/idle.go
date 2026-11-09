@@ -121,12 +121,6 @@ const (
 	idlePassEvery   = 30 * time.Second
 	idleLastPass    = 5 * time.Minute
 	idleQuietPasses = 2
-	// idleKillAfter: a daemon that is still running this long after SIGTERM, still clean and
-	// has used no CPU since idleTermSettle after the SIGTERM (a daemon that handles SIGTERM uses
-	// some at once) is sent SIGKILL, as launchd does for a pressured exit (most do not end on
-	// SIGTERM).
-	idleKillAfter  = 3 * time.Second
-	idleTermSettle = 300 * time.Millisecond
 	// idleMaxEnds bounds how often one daemon is ended in a boot.
 	idleMaxEnds = 3
 )
@@ -172,14 +166,11 @@ type idleEnv interface {
 	// parked or being parked. A pass then does nothing.
 	held() bool
 	snapshot() (idleSnapshot, error)
-	// usage reads a process's CPU and start time.
-	usage(pid int) (procUsage, error)
 	// recheck reads p again: gone when it has exited (or its pid now names another process),
 	// killable when it is the same process, still idle-exitable, has used no CPU since the pass
 	// and the device is not held.
 	recheck(p daemonProc) (gone, killable bool)
 	signal(pid int, sig syscall.Signal) error
-	sleep(d time.Duration)
 }
 
 // idlePasses runs the passes and returns how many processes it ended, by name.
@@ -189,11 +180,13 @@ type idleEnv interface {
 // not kept. The cut-off is the earliest of: the first agemu call of the boot that can start app
 // work (install, launch, open, push) and the earliest app process a pass saw (a user app's, or
 // the frontmost app's, system apps included). A daemon an install, a launch or an app started,
-// or that iOS started after them, may serve that app and is left alone. Ending is SIGTERM, then SIGKILL after
-// idleKillAfter if recheck finds the same process still idle-exitable. A name is left alone for
-// the rest of the boot when ending it did not hold: it was running again at the next pass
-// (something asks for it all the time, so ending it only costs a relaunch), or it became busy
-// before the SIGKILL. A name that comes back later (a one-off job, such as device management's
+// or that iOS started after them, may serve that app and is left alone. Ending is SIGKILL, as
+// jetsam's idle exit and launchd's pressured exit do, sent right after recheck has found the same
+// process still idle-exitable with no CPU used since the pass (milliseconds earlier). No SIGTERM
+// first: most of these daemons do not exit on it, and those that do not keep using CPU afterwards.
+// A name is left alone for the rest of the boot when ending it did not hold: it was running again
+// at the next pass (something asks for it all the time, so ending it only costs a relaunch), or
+// the recheck found it busy. A name that comes back later (a one-off job, such as device management's
 // on-reboot task at +120..200 s, started it) may be ended again once it is idle, up to
 // idleMaxEnds times per boot. A pass while the device is held does nothing and starts the
 // counting again; the passes stop when the simulator's launchd_sim changes (a boot not made by
@@ -264,16 +257,6 @@ func idlePasses(env idleEnv, name string) map[string]int {
 			prev, quiet = map[int]daemonProc{}, map[int]int{}
 			continue
 		}
-		for _, p := range stop {
-			_ = env.signal(p.pid, syscall.SIGTERM)
-		}
-		env.sleep(idleTermSettle)
-		for k, p := range stop {
-			if u, err := env.usage(p.pid); err == nil && u.start == p.usage.start {
-				stop[k].usage = u // the CPU baseline for the recheck, after a SIGTERM handler ran
-			}
-		}
-		env.sleep(idleKillAfter - idleTermSettle)
 		pass := map[string]int{}
 		for _, p := range stop {
 			gone, killable := env.recheck(p)
@@ -324,28 +307,25 @@ func (e *deviceIdle) snapshot() (idleSnapshot, error) {
 }
 
 func (e *deviceIdle) recheck(p daemonProc) (gone, killable bool) {
-	u, err := procUsageOf(p.pid)
+	return recheckOf(p, procUsageOf, procDirty, e.held)
+}
+
+// recheckOf reads p again right before a SIGKILL: gone when it has exited or its pid now names
+// another process (a different start time); killable when it is the same process, still
+// idle-exitable, has used no CPU since the pass and the device is not held.
+func recheckOf(p daemonProc, usage func(int) (procUsage, error), dirty func(int) (uint32, error), held func() bool) (gone, killable bool) {
+	u, err := usage(p.pid)
 	if err != nil || u.start != p.usage.start {
 		return true, false
 	}
-	f, err := procDirty(p.pid)
+	f, err := dirty(p.pid)
 	if err != nil {
 		return true, false
 	}
-	return false, idleExitable(f) && u.cpu == p.usage.cpu && !e.held()
+	return false, idleExitable(f) && u.cpu == p.usage.cpu && !held()
 }
 
 func (e *deviceIdle) signal(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
-func (e *deviceIdle) usage(pid int) (procUsage, error)         { return procUsageOf(pid) }
-
-// sleep returns early when the backend closes (the SIGKILL then still runs on a recheck, which
-// stays correct).
-func (e *deviceIdle) sleep(d time.Duration) {
-	select {
-	case <-e.b.bg.Done():
-	case <-time.After(d):
-	}
-}
 
 // appBundlePath marks the executables of installed apps (and their extensions) in a simulator.
 const appBundlePath = "/data/Containers/Bundle/Application/"
