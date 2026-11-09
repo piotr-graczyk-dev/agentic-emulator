@@ -501,6 +501,7 @@ tables: [docs/ANDROID.md](docs/ANDROID.md#run-it), [docs/IOS.md](docs/IOS.md).
 | `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |
 | `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; a first boot then takes 7-8 min (at most 20), during which the device is `preparing`; `0`: save at once (applies when a baseline is taken). |
+| `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not boot an AVD whose first boot was interrupted before it ever completed with `-wipe-data` (two interruptions about 10 s in leave it unbootable otherwise). |
 | `AGEMU_ANDROID_STREAM_IDLE_S` | `30` | Seconds without calls before the frame stream of a changing screen stops; `0`: never. |
 | `AGEMU_ANDROID_ANIMATIONS` | normal | `0`: system animations off. |
 | `AGEMU_IOS_ANIMATIONS` | normal | `0`: UIKit and SwiftUI animations ×0.05 (or a factor from 0.05 to 1). |
