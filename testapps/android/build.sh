@@ -30,6 +30,7 @@ KS="${AGEMU_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
 [[ -f "$ANDROID_JAR" ]] || { echo "missing $ANDROID_JAR" >&2; exit 1; }
 if [[ ! -f "$KS" ]]; then
   KS=build/debug.keystore
+  mkdir -p build
   [[ -f "$KS" ]] || keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
     -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -validity 10000 >/dev/null
 fi

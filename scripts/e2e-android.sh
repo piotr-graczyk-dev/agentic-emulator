@@ -21,6 +21,8 @@ PASS=0
 
 [[ -x "$AG" ]] || { echo "build first: make android-build (or make build and AGEMU_BIN=bin/agemu)" >&2; exit 2; }
 
+# py runs Python; Windows' Python ends lines with CRLF, so the CR is dropped for bash.
+py() { "${PYTHON:-python3}" "$@" | tr -d '\r'; }
 step() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '   ok: %s\n' "$*"; }
 fail() { printf '   FAIL: %s\n' "$*" >&2; exit 1; }
@@ -28,14 +30,14 @@ ag() { "$AG" "$@" -d "$DEV"; }
 # timed runs a command and prints its wall time.
 timed() {
   local t0 t1 out
-  t0=$("${PYTHON:-python3}" -c 'import time; print(time.time())')
+  t0=$(py -c 'import time; print(time.time())')
   out=$("$@") || { echo "$out"; return 1; }
-  t1=$("${PYTHON:-python3}" -c 'import time; print(time.time())')
-  printf '   (%s: %.0f ms)\n' "$*" "$("${PYTHON:-python3}" -c "print(($t1-$t0)*1000)")" >&2
+  t1=$(py -c 'import time; print(time.time())')
+  printf '   (%s: %.0f ms)\n' "$*" "$(py -c "print(($t1-$t0)*1000)")" >&2
   printf '%s' "$out"
 }
 # png_size reads a PNG's width and height from its IHDR chunk (sips on macOS is not needed).
-png_size() { "${PYTHON:-python3}" -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
+png_size() { py -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
 
 step "create (if missing) and boot $DEV"
 if "$AG" devices | grep -q "\"id\":\"$DEV\""; then
@@ -258,8 +260,8 @@ ok "push answers not implemented (exit 3)"
 # its :remote process.
 LAB="$PROBE/.LabActivity"
 # entries prints "level process tag message" per entry of a logs --json result on stdin.
-entries() { "${PYTHON:-python3}" -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
-cursor() { "${PYTHON:-python3}" -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
+entries() { py -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
+cursor() { py -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
 lab() { ag launch "$LAB" >/dev/null; ag wait --contains "lab: ready" --timeout-ms 8000 >/dev/null || fail "lab screen did not start"; }
 
 step "logs: levels, the app's processes only, cursor, since launch"
