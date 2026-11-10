@@ -107,7 +107,7 @@ ok "search field contains \"network\" (two type calls, appended at the cursor)"
 search_ran() {
   if ag wait --id breadcrumb --timeout-ms 15000 >/dev/null 2>&1; then
     echo results
-  elif ag find --id no_results_layout --json 2>/dev/null | grep -q '"ref"'; then
+  elif ag find --contains "No results" --json 2>/dev/null | grep -q '"ref"'; then # its id varies by version
     echo none
   else
     return 1
