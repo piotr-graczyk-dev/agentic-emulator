@@ -112,8 +112,8 @@ jobs:
 
   windows:
     # Android on Windows: unit tests (including the Windows process, lock and file-mapping calls),
-    # the build, the daemon's life cycle over its socket, install.ps1 and the npm launcher. GitHub's
-    # Windows runners have no hypervisor for the emulator, so no device runs here.
+    # the build, the daemon's life cycle over its socket, install.ps1 and the npm launcher.
+    # e2e-windows.yml drives a real emulator (WHPX).
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -178,10 +178,11 @@ jobs:
           $env:AGEMU_HOME = Join-Path $env:RUNNER_TEMP "agemu-inst"
           ./install.ps1
           $agemu = Join-Path $env:AGEMU_PREFIX "bin\agemu.exe"
-          if ((& $agemu version) -notmatch "agemu  $v") { Write-Error "install.ps1 did not install $v"; exit 1 }
+          if ((& $agemu version | Out-String) -notmatch "agemu  $v") { Write-Error "install.ps1 did not install $v"; exit 1 }
           & $agemu ping   # a daemon now runs from the installed agemud.exe
           ./install.ps1   # replaces agemud.exe while it runs
-          if ((& $agemu version) -notmatch "agemu  $v") { Write-Error "second install failed"; exit 1 }
+          if ((& $agemu version | Out-String) -notmatch "agemu  $v") { Write-Error "second install failed"; exit 1 }
+          & $agemu daemon status
           & $agemu daemon stop
           Stop-Process -Id $server.Id
       - name: npm launcher runs the Windows binary

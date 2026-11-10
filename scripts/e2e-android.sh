@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end proof for the Android backend. Everything goes through the agemu CLI
 # ($AGEMU_BIN, default bin/android/agemu; agemud must sit next to it)
-# (no adb, no emulator commands); python3 reads PNG sizes and times steps on the host. It runs
-# on macOS and Linux.
+# (no adb, no emulator commands); python3 reads PNG sizes and times steps on the host
+# ($PYTHON names another interpreter, e.g. python on Windows). It runs on macOS, Linux and in
+# Git Bash on Windows. $AGEMU_E2E_PROBE_APK uses a prebuilt probe app instead of building it.
 #
 #   scripts/e2e-android.sh [avd-name]        default: agemu-pixel
 #
@@ -27,14 +28,14 @@ ag() { "$AG" "$@" -d "$DEV"; }
 # timed runs a command and prints its wall time.
 timed() {
   local t0 t1 out
-  t0=$(python3 -c 'import time; print(time.time())')
+  t0=$("${PYTHON:-python3}" -c 'import time; print(time.time())')
   out=$("$@") || { echo "$out"; return 1; }
-  t1=$(python3 -c 'import time; print(time.time())')
-  printf '   (%s: %.0f ms)\n' "$*" "$(python3 -c "print(($t1-$t0)*1000)")" >&2
+  t1=$("${PYTHON:-python3}" -c 'import time; print(time.time())')
+  printf '   (%s: %.0f ms)\n' "$*" "$("${PYTHON:-python3}" -c "print(($t1-$t0)*1000)")" >&2
   printf '%s' "$out"
 }
 # png_size reads a PNG's width and height from its IHDR chunk (sips on macOS is not needed).
-png_size() { python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
+png_size() { "${PYTHON:-python3}" -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
 
 step "create (if missing) and boot $DEV"
 if "$AG" devices | grep -q "\"id\":\"$DEV\""; then
@@ -149,7 +150,9 @@ ag key home >/dev/null
 # (testapps/android) is built with the SDK build tools. Without them the run fails, unless
 # AGEMU_E2E_SKIP_CAPS=1 asks to skip this part (then it does not claim that all checks passed).
 PROBE=dev.agemu.probe
-if ! testapps/android/build.sh "$OUT/agemu-probe.apk" >"$OUT/probe-build.log" 2>&1; then
+if [[ -n "${AGEMU_E2E_PROBE_APK:-}" ]]; then
+  cp "$AGEMU_E2E_PROBE_APK" "$OUT/agemu-probe.apk" || fail "no probe app at $AGEMU_E2E_PROBE_APK"
+elif ! testapps/android/build.sh "$OUT/agemu-probe.apk" >"$OUT/probe-build.log" 2>&1; then
   if [[ "${AGEMU_E2E_SKIP_CAPS:-0}" == 1 ]]; then
     printf '\n== capabilities: SKIPPED (could not build the probe app, see %s)\n' "$OUT/probe-build.log"
     printf '\n%d CHECKS PASSED, CAPABILITY CHECKS SKIPPED (artifacts in %s)\n' "$PASS" "$OUT"
@@ -255,8 +258,8 @@ ok "push answers not implemented (exit 3)"
 # its :remote process.
 LAB="$PROBE/.LabActivity"
 # entries prints "level process tag message" per entry of a logs --json result on stdin.
-entries() { python3 -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
-cursor() { python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
+entries() { "${PYTHON:-python3}" -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
+cursor() { "${PYTHON:-python3}" -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
 lab() { ag launch "$LAB" >/dev/null; ag wait --contains "lab: ready" --timeout-ms 8000 >/dev/null || fail "lab screen did not start"; }
 
 step "logs: levels, the app's processes only, cursor, since launch"
