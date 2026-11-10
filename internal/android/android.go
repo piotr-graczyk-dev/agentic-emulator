@@ -667,6 +667,13 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []st
 	return args
 }
 
+// coldBootTimeout bounds a cold boot until the guest reports boot completion:
+// AGEMU_ANDROID_BOOT_TIMEOUT_S seconds, default 180. A slow host (nested virtualization,
+// software rendering) can need more.
+func coldBootTimeout() time.Duration {
+	return time.Duration(envInt("AGEMU_ANDROID_BOOT_TIMEOUT_S", 180)) * time.Second
+}
+
 // defaultGPU is the emulator's -gpu mode unless AGEMU_ANDROID_GPU sets one: the host GPU, except
 // on a Linux host without a display (a server, CI), where the emulator cannot open the host's GL
 // and "auto" picks software rendering.
@@ -817,7 +824,7 @@ func (b *Backend) bootSync(ctx context.Context, d *device, id string, opts api.B
 		err = d.waitAgentOrBooted(ctx, 180*time.Second)
 	} else {
 		d.setPhase(phaseColdBoot)
-		err = d.waitBooted(ctx, 180*time.Second)
+		err = d.waitBooted(ctx, coldBootTimeout())
 	}
 	if err != nil {
 		return api.Device{}, err

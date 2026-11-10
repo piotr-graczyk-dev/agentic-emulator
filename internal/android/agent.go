@@ -59,18 +59,29 @@ func (a *agentClient) transport() string {
 	return a.via
 }
 
-// dial opens a connection to the agent: TCP when available, adb otherwise.
+// dial opens a connection to the agent: TCP when available, adb otherwise. The TCP attempt gets
+// at most half of ctx's remaining time: a forwarded connection the guest never answers (its
+// network not up yet on a slow host) would otherwise use all of it, and adb none.
 func (a *agentClient) dial(ctx context.Context) (net.Conn, *bufio.Reader, string, error) {
+	var tcpErr error
 	if a.tcp != nil && a.token != "" {
+		tctx := ctx
+		if dl, ok := ctx.Deadline(); ok {
+			var cancel context.CancelFunc
+			tctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Until(dl)/2))
+			defer cancel()
+		}
 		for attempt := 0; attempt < 2; attempt++ {
-			hp, err := a.tcp(ctx, attempt > 0)
+			hp, err := a.tcp(tctx, attempt > 0)
 			if err != nil {
+				tcpErr = err
 				break
 			}
-			c, r, err := dialAgentTCP(ctx, hp, a.token)
+			c, r, err := dialAgentTCP(tctx, hp, a.token)
 			if err == nil {
 				return c, r, "tcp", nil
 			}
+			tcpErr = err
 			if !osproc.IsConnRefused(err) {
 				break
 			}
@@ -78,6 +89,9 @@ func (a *agentClient) dial(ctx context.Context) (net.Conn, *bufio.Reader, string
 	}
 	c, err := adbOpen(ctx, a.serial, "localabstract:"+agentSocket)
 	if err != nil {
+		if tcpErr != nil {
+			return nil, nil, "", fmt.Errorf("%w (and over TCP: %v)", err, tcpErr)
+		}
 		return nil, nil, "", err
 	}
 	return c, bufio.NewReaderSize(c, 1<<20), "adb", nil

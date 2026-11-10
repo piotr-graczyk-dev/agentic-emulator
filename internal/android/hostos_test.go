@@ -1,10 +1,15 @@
 package android
 
 import (
+	"context"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func envMap(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -127,5 +132,64 @@ func TestADBKeyPresent(t *testing.T) {
 	}
 	if !adbKeyPresent(home, envMap(nil)) {
 		t.Fatal("the key in ~/.android is not found")
+	}
+}
+
+// A forwarded TCP connection that the guest never answers (its network not up yet on a slow
+// host; seen on a Linux CI emulator) must not use up the call's time: the agent is reached over
+// adb within the same deadline.
+func TestDialFallsBackToADBWhenTCPHangs(t *testing.T) {
+	hang, err := net.Listen("tcp", "127.0.0.1:0") // accepts, never replies
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hang.Close()
+	go func() {
+		for {
+			c, err := hang.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	adb, err := net.Listen("tcp", "127.0.0.1:0") // a fake adb server: OKAY to transport and service
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adb.Close()
+	go func() {
+		for {
+			c, err := adb.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				for i := 0; i < 2; i++ {
+					var n [4]byte
+					if _, err := io.ReadFull(c, n[:]); err != nil {
+						return
+					}
+					l, _ := strconv.ParseUint(string(n[:]), 16, 32)
+					if _, err := io.ReadFull(c, make([]byte, l)); err != nil {
+						return
+					}
+					c.Write([]byte("OKAY"))
+				}
+			}(c)
+		}
+	}()
+	t.Setenv("ANDROID_ADB_SERVER_PORT", strconv.Itoa(adb.Addr().(*net.TCPAddr).Port))
+	port := hang.Addr().(*net.TCPAddr).Port
+	a := &agentClient{serial: "emulator-5580", token: "t", tcp: func(context.Context, bool) (int, error) { return port, nil }}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, _, via, err := a.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.Close()
+	if via != "adb" {
+		t.Fatalf("via %q, want adb", via)
 	}
 }
