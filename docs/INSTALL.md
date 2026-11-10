@@ -135,6 +135,9 @@ What is different from the Mac:
 - **Updating with `npm install -g` on Windows:** run `agemu daemon stop` first; Windows cannot
   replace `agemud.exe` while it runs. `install.ps1` handles that by itself, and `npx` runs each
   release from its own folder.
+- **Guest RAM.** In CI the x86_64 guest with the default 2 GB let its low memory killer end
+  Settings during a search (agemu's crash notice reports such kills). If that happens to your
+  app, create the device with `AGEMU_ANDROID_RAM_MB=4096`.
 - **The timings in the README and docs/ANDROID.md were measured on an Apple Silicon Mac.** The
   x86_64 image under KVM or WHPX has its own; `agemu-bench` does not build on Windows yet.
 

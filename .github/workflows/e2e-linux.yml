@@ -29,6 +29,7 @@ jobs:
       IMAGE: "system-images;android-37.1;google_apis_playstore_ps16k;x86_64"
       AGEMU_ANDROID_TIMEOUT_SCALE: "3" # software rendering on a shared runner
       AGEMU_E2E_TIMEOUT_SCALE: "4"
+      AGEMU_ANDROID_RAM_MB: "4096" # at 2 GB the x86_64 guest's lmkd killed Settings during its search
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
