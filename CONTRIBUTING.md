@@ -63,9 +63,15 @@ smoke test, publishes a GitHub release with `agemu-<version>-darwin-arm64.tar.gz
 with provenance. A tag with a suffix (`v0.2.0-rc.1`) is a GitHub prerelease and npm's `next`
 tag. Running the workflow by hand packages a version without publishing it.
 
+The workflow publishes to npm with trusted publishing: npm trusts `release.yml` in this
+repository and authenticates the run over OIDC, so there is no npm token or repository secret
+to set up or rotate. If the npm publish step fails, rerun the release job from the tag's run
+(Actions > release > Re-run jobs). The rerun reuses the GitHub release and replaces its files,
+and the npm step does nothing when that version is already on npm. The manual run is only a
+dry run, so it can't be used to retry.
+
 `scripts/package.sh <version>` builds the same files locally from `bin/`
-(`make build VERSION=<version>` first). The workflow publishes to npm with trusted publishing
-(npm trusts `release.yml` in this repository), so it needs no token. After changing `go.mod`, regenerate
+(`make build VERSION=<version>` first). After changing `go.mod`, regenerate
 `THIRD_PARTY_NOTICES.md` with `scripts/third-party-notices.sh > THIRD_PARTY_NOTICES.md`.
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE).
