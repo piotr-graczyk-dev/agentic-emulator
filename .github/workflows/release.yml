@@ -67,10 +67,8 @@ jobs:
           fi
       - name: npm publish
         if: env.PUBLISH == 'true'
-        env:
-          # A granular npm token with publish rights, until npm trusted publishing is set up for
-          # the package (then the token can be removed: npm authenticates the workflow itself).
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm trusted publishing: npm authenticates this workflow (release.yml in this repository)
+        # over OIDC, so no token is stored, and the package gets a provenance statement.
         run: |
           npm install -g npm@11 # trusted publishing needs npm 11.5+
           if [ "$(npm view "agentic-emulator@${VERSION#v}" version 2>/dev/null)" = "${VERSION#v}" ]; then

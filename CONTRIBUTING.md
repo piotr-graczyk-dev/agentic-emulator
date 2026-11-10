@@ -64,9 +64,8 @@ with provenance. A tag with a suffix (`v0.2.0-rc.1`) is a GitHub prerelease and 
 tag. Running the workflow by hand packages a version without publishing it.
 
 `scripts/package.sh <version>` builds the same files locally from `bin/`
-(`make build VERSION=<version>` first). The npm package needs the repository secret `NPM_TOKEN`
-(a granular token with publish rights) until npm trusted publishing is configured for
-`agentic-emulator`, after which the secret can go. After changing `go.mod`, regenerate
+(`make build VERSION=<version>` first). The workflow publishes to npm with trusted publishing
+(npm trusts `release.yml` in this repository), so it needs no token. After changing `go.mod`, regenerate
 `THIRD_PARTY_NOTICES.md` with `scripts/third-party-notices.sh > THIRD_PARTY_NOTICES.md`.
 
 By contributing you agree that your contribution is licensed under the [MIT License](LICENSE).
