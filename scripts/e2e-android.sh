@@ -101,10 +101,26 @@ ag find --id open_search_view_edit_text --json >"$OUT/field.json"
 cat "$OUT/field.json"; echo
 grep -q '"text":"network"' "$OUT/field.json" || fail "typed text not in the UI tree (want \"network\": the second type appends)"
 ok "search field contains \"network\" (two type calls, appended at the cursor)"
-ag wait --id breadcrumb --timeout-ms 15000 >"$OUT/result.json" || fail "Settings search showed no results for \"network\""
-ag find --id breadcrumb >"$OUT/results.txt"
-head -3 "$OUT/results.txt"
-ok "Settings search lists $(wc -l <"$OUT/results.txt" | tr -d ' ') results for \"network\" (TextWatcher ran the query)"
+# search_ran waits for Settings' answer to the query: results, or (on a fresh guest whose
+# search index is still empty, seen on CI emulators) its "No results" screen. Either shows that
+# the app's TextWatcher ran the query; it prints which.
+search_ran() {
+  if ag wait --id breadcrumb --timeout-ms 15000 >/dev/null 2>&1; then
+    echo results
+  elif ag find --id no_results_layout --json 2>/dev/null | grep -q '"ref"'; then
+    echo none
+  else
+    return 1
+  fi
+}
+answer=$(search_ran) || fail "Settings search did not answer the query \"network\""
+if [[ "$answer" == results ]]; then
+  ag find --id breadcrumb >"$OUT/results.txt"
+  head -3 "$OUT/results.txt"
+  ok "Settings search lists $(wc -l <"$OUT/results.txt" | tr -d ' ') results for \"network\" (TextWatcher ran the query)"
+else
+  ok "Settings search answered \"network\" with No results (TextWatcher ran the query; this guest's search index is empty)"
+fi
 ag screenshot -o "$OUT/shot-search.png" >/dev/null
 
 step "type --keys (one key event per character through the keyboard)"
@@ -113,8 +129,8 @@ ag wait --id breadcrumb --gone --timeout-ms 8000 >/dev/null || fail "results did
 timed ag type --keys "wifi" >/dev/null
 ag find --id open_search_view_edit_text --json >"$OUT/field-keys.json"
 grep -q '"text":"wifi"' "$OUT/field-keys.json" || fail "type --keys: field is $(cat "$OUT/field-keys.json")"
-ag wait --id breadcrumb --timeout-ms 15000 >/dev/null || fail "Settings search showed no results for \"wifi\""
-ok "type --keys typed \"wifi\" and Settings lists results"
+answer=$(search_ran) || fail "Settings search did not answer the query \"wifi\""
+ok "type --keys typed \"wifi\" and Settings answered ($answer)"
 ag key back >/dev/null
 ag key back >/dev/null
 ag wait --text "Search Settings" --timeout-ms 8000 >/dev/null || ag key back >/dev/null
