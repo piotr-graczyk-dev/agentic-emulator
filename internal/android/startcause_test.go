@@ -46,7 +46,7 @@ func TestBootErrorNamesSandboxFromEmulatorLog(t *testing.T) {
 	}
 	for _, want := range []string{
 		generic.Error(),
-		"agemud runs inside a sandbox",
+		"agemud probably runs inside a sandbox",
 		"the emulator was denied a Mach port",
 		"bootstrap_check_in org.chromium.crashpad.child_port_handshake.51562.3360111.HLFRSVGZDYJSRSRS: Permission denied (1100)",
 		"`agemu daemon restart` from an unsandboxed terminal",

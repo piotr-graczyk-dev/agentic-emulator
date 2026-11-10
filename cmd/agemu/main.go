@@ -456,8 +456,8 @@ var commandFlags = map[string][]string{
 // one meant.
 func checkFlags(cmd string, c cli) error {
 	own, known := commandFlags[cmd]
-	if !known {
-		return nil // params reports the unknown command
+	if !known { // also a command params handles but this table lacks: it fails at its first use
+		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
 	}
 	takes := flagSet(globalFlags, own)
 	for _, name := range slices.Sorted(maps.Keys(c.flags)) {

@@ -94,7 +94,12 @@ func startCause(logTail []byte, probe []string) string {
 	if len(evidence) == 0 {
 		return ""
 	}
-	msg := "agemud runs inside a sandbox, which the emulator inherits (" + strings.Join(evidence, "; ") +
+	// The probe sees the sandbox; log lines alone only suggest it.
+	runs := "runs"
+	if len(probe) == 0 {
+		runs = "probably runs"
+	}
+	msg := "agemud " + runs + " inside a sandbox, which the emulator inherits (" + strings.Join(evidence, "; ") +
 		"); start the daemon outside it: run `agemu daemon restart` from an unsandboxed terminal, then boot again"
 	if len(lines) > 0 {
 		msg += "; emulator log: " + strings.Join(lines, " | ")

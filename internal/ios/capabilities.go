@@ -48,7 +48,10 @@ func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	if err := b.call(ctx, "openurl", map[string]any{"udid": d.UDID, "url": url}, nil); err != nil {
 		return "", err
 	}
-	b.confirmOpen(ctx, id)
+	if err := b.confirmOpen(ctx, id); err != nil {
+		// The URL went through: say so, so the caller answers the alert instead of opening again.
+		return "", fmt.Errorf("the system accepted %s, but answering its %q prompt with Open failed: %w", url, openPrompt+"<app>”?", err)
+	}
 	return "", nil
 }
 
@@ -61,11 +64,12 @@ const openPrompt = "Open in “"
 // for the app's screen timed out behind the alert. With an Expo development build on iOS 26.5
 // the alert was up at the first UI read after openURL returned (66-78 ms, 4 of 4), and after one
 // Open iOS did not ask again for that app. So one read, which also returns at once when an app
-// is in front; a tree read that fails leaves the alert to the caller.
-func (b *Backend) confirmOpen(ctx context.Context, id string) {
+// is in front; a tree read that fails leaves the alert to the caller. The error is a failed tap
+// on a prompt that showed.
+func (b *Backend) confirmOpen(ctx context.Context, id string) error {
 	t, err := b.UITree(ctx, id)
 	if err != nil || t.App != "com.apple.springboard" {
-		return
+		return nil
 	}
 	var prompt bool
 	var open *api.Element
@@ -80,15 +84,15 @@ func (b *Backend) confirmOpen(ctx context.Context, id string) {
 		}
 	})
 	if !prompt || open == nil {
-		return
+		return nil
 	}
 	// The alert is new since the input, so the tap waits until its presentation has finished
 	// (UIKit drops touches until then; see ready.go).
 	if err := b.TapElement(ctx, id, open, false); err != nil {
-		log.Printf("ios open: answering the %q prompt: %v", openPrompt, err)
-		return
+		return err
 	}
 	log.Printf("ios open: answered SpringBoard's %q prompt with Open", openPrompt)
+	return nil
 }
 
 // privacyService maps a neutral permission name to the iOS Simulator's privacy service.
