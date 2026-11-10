@@ -101,6 +101,8 @@ type Service struct {
 	activity map[string]*devActivity
 	// switching counts the profile switches in flight per platform (autopark.go).
 	switching map[api.Platform]int
+	// exit ends Serve as SIGTERM does, for the exit method (set by Serve; nil otherwise).
+	exit func()
 }
 
 func NewService(tmpDir string, bs ...backend.Backend) *Service {

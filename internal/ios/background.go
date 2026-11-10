@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Background work after boot. In the first minutes after a cold boot iOS 26.5 starts some

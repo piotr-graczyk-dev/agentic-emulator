@@ -1,10 +1,13 @@
-# iOS backend: builds agemu-ios-helper (Swift, ios-helper/) and puts it next to agemu.
+# iOS backend: builds agemu-ios-helper (Swift, ios-helper/) and puts it next to agemu. macOS only:
+# elsewhere `make build` skips it (the iOS backend is compiled out off macOS).
 # The Go backend looks for the helper beside the agemu binary (or $AGEMU_IOS_HELPER).
 .PHONY: ios-helper ios-test ios-e2e
 
 IOS_HELPER_SRC := $(shell find ios-helper/Package.swift ios-helper/Sources -type f 2>/dev/null)
 
+ifeq ($(shell uname -s),Darwin)
 build-extra: ios-helper
+endif
 
 ios-helper: $(BIN)/agemu-ios-helper
 

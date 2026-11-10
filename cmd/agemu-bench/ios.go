@@ -1,4 +1,4 @@
-//go:build !noios
+//go:build !noios && !windows
 
 package main
 

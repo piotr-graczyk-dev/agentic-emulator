@@ -7,9 +7,9 @@ on:
 
 jobs:
   build-test:
-    # agemu targets Apple Silicon macOS: the iOS helper links AppKit/IOSurface, and the
-    # daemon's backends only run on macOS. Device end-to-end tests need real emulators and
-    # simulators and run locally (scripts/e2e-*.sh), not here.
+    # The macOS build: both backends. The iOS helper links AppKit/IOSurface, so it builds only
+    # here. Device end-to-end tests need real emulators and simulators and run locally
+    # (scripts/e2e-*.sh), and for Android on Linux in e2e-linux.yml.
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -21,11 +21,16 @@ jobs:
         run: test -z "$(gofmt -l . | tee /dev/stderr)"
       - name: vet
         run: go vet ./...
+      - name: vet (Linux and Windows builds)
+        run: |
+          for t in linux/amd64 linux/arm64 windows/amd64; do
+            echo "== $t"; GOOS=${t%/*} GOARCH=${t#*/} go vet ./...
+          done
       - name: unit tests
         run: go test -count=1 ./...
       - name: build (agemu, agemud, agemu-bench, agemu-ios-helper)
         run: make build VERSION=v0.0.0-ci
-      - name: package (release tarball and npm package)
+      - name: package (release archives and npm package)
         run: |
           sh -n install.sh
           scripts/package.sh v0.0.0-ci dist
@@ -39,3 +44,155 @@ jobs:
           bin/agemu profiles --platform ios | grep -q iphone-se-3
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | bin/agemu mcp | grep -q '"name":"screenshot"'
+      - name: npm package runs through its launcher
+        run: |
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-npm.XXXX)"
+          npm install -g ./dist/agentic-emulator-*.tgz
+          agemu version | grep -qx "agemu  v0.0.0-ci"
+          agemu daemon stop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-ci
+          path: dist/
+          retention-days: 7
+
+  linux:
+    # Android on Linux: unit tests, the build, the daemon's life cycle, install.sh and the npm
+    # launcher. e2e-linux.yml drives a real emulator.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: build
+        run: make build VERSION=v0.0.0-ci
+      - name: smoke test the CLI, MCP server and daemon
+        run: |
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-ci.XXXX)"
+          bin/agemu ping
+          bin/agemu version
+          bin/agemu daemon status | grep -q running
+          bin/agemu doctor || [ $? -eq 1 ]
+          bin/agemu doctor --json > doctor.json || [ $? -eq 1 ]
+          grep -q '"title": "Android"' doctor.json
+          ! grep -q '"title": "iOS"' doctor.json   # no iOS section off macOS
+          bin/agemu doctor --platform ios || [ $? -eq 1 ]
+          bin/agemu profiles --platform android | grep -q pixel-9
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | bin/agemu mcp | grep -q '"name":"screenshot"'
+          pid=$(bin/agemu daemon status | sed -n 's/.*pid \([0-9]*\).*/\1/p')
+          bin/agemu daemon stop | grep -q stopped
+          ! kill -0 "$pid" 2>/dev/null
+          bin/agemu daemon restart && bin/agemu daemon stop
+      - name: install.sh installs a Linux release
+        run: |
+          v=v0.0.0-ci; name=agemu-$v-linux-amd64
+          mkdir -p rel/$name && cp bin/agemu bin/agemud LICENSE THIRD_PARTY_NOTICES.md rel/$name/
+          tar -C rel -czf rel/$name.tar.gz $name && (cd rel && sha256sum $name.tar.gz > SHA256SUMS)
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-inst.XXXX)" prefix="$(mktemp -d)"
+          AGEMU_VERSION=$v AGEMU_DOWNLOAD_BASE="file://$PWD/rel" AGEMU_PREFIX="$prefix" sh install.sh
+          "$prefix/bin/agemu" version | grep -qx "agemu  $v"
+          test ! -e "$prefix/bin/agemu-ios-helper"
+      - name: npm launcher runs the Linux binary
+        run: |
+          pkg="$(mktemp -d)"
+          mkdir -p "$pkg/bin" "$pkg/platforms/linux-x64"
+          cp npm/agemu.js "$pkg/bin/agemu.js" && cp bin/agemu bin/agemud "$pkg/platforms/linux-x64/"
+          sed 's/"version": "0.0.0"/"version": "0.0.0-ci"/' npm/package.json > "$pkg/package.json"
+          npm install -g "$pkg"
+          export AGEMU_HOME="$(mktemp -d /tmp/agemu-npm.XXXX)"
+          agemu version | grep -qx "agemu  v0.0.0-ci"
+          agemu daemon stop
+
+  windows:
+    # Android on Windows: unit tests (including the Windows process, lock and file-mapping calls),
+    # the build, the daemon's life cycle over its socket, install.ps1 and the npm launcher. GitHub's
+    # Windows runners have no hypervisor for the emulator, so no device runs here.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: build
+        run: |
+          $ld = "-X github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon.Version=v0.0.0-ci"
+          go build -ldflags $ld -o bin/agemu.exe ./cmd/agemu
+          if ($LASTEXITCODE) { exit 1 }
+          go build -ldflags $ld -o bin/agemud.exe ./cmd/agemud
+          if ($LASTEXITCODE) { exit 1 }
+      - name: smoke test the CLI, MCP server and daemon
+        run: |
+          $env:AGEMU_HOME = Join-Path $env:RUNNER_TEMP "agemu-ci"
+          function Check($ok, $what) { if (-not $ok) { Write-Error "FAILED: $what"; exit 1 } }
+          bin\agemu.exe ping; Check ($LASTEXITCODE -eq 0) "ping"
+          $v = bin\agemu.exe version; $v
+          Check ($v -match "agemu  v0.0.0-ci") "version"
+          $st = bin\agemu.exe daemon status | Out-String; $st
+          Check ($st -match "running, pid (\d+)") "daemon status"
+          $daemonPid = [int]$Matches[1]
+          bin\agemu.exe doctor; Check ($LASTEXITCODE -le 1) "doctor"
+          $doc = bin\agemu.exe doctor --json | Out-String
+          Check ($doc -match '"title": "Android"') "doctor has an Android section"
+          Check ($doc -notmatch '"title": "iOS"') "doctor has no iOS section"
+          $p = bin\agemu.exe profiles --platform android | Out-String
+          Check ($p -match "pixel-9") "profiles"
+          $mcp = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}',
+                   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}') -join "`n" | bin\agemu.exe mcp | Out-String
+          Check ($mcp -match '"name":"screenshot"') "mcp tools/list"
+          # stop goes over the socket (Windows has no SIGTERM); the daemon must really exit
+          $out = bin\agemu.exe daemon stop | Out-String; $out
+          Check ($out -match "stopped") "daemon stop"
+          Start-Sleep -Milliseconds 300
+          Check (-not (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue)) "daemon pid $daemonPid gone after stop"
+          bin\agemu.exe daemon restart; Check ($LASTEXITCODE -eq 0) "daemon restart"
+          bin\agemu.exe daemon stop
+          Get-Content (Join-Path $env:AGEMU_HOME "daemon.log") -ErrorAction SilentlyContinue | Select-Object -Last 20
+      - name: install.ps1 installs a Windows release, also over a running daemon
+        run: |
+          $v = "v0.0.0-ci"; $name = "agemu-$v-windows-amd64"
+          New-Item -ItemType Directory -Force rel\$name | Out-Null
+          Copy-Item bin\agemu.exe, bin\agemud.exe, LICENSE, THIRD_PARTY_NOTICES.md rel\$name\
+          Compress-Archive -Path rel\$name -DestinationPath rel\$name.zip
+          $h = (Get-FileHash -Algorithm SHA256 rel\$name.zip).Hash.ToLower()
+          Set-Content -NoNewline -Path rel\SHA256SUMS -Value "$h  $name.zip`n"
+          $server = Start-Process -PassThru -WindowStyle Hidden python -ArgumentList "-m","http.server","8765","--bind","127.0.0.1","--directory","rel"
+          Start-Sleep -Seconds 2
+          $env:AGEMU_VERSION = $v
+          $env:AGEMU_DOWNLOAD_BASE = "http://127.0.0.1:8765"
+          $env:AGEMU_PREFIX = Join-Path $env:RUNNER_TEMP "agemu-prefix"
+          $env:AGEMU_HOME = Join-Path $env:RUNNER_TEMP "agemu-inst"
+          ./install.ps1
+          $agemu = Join-Path $env:AGEMU_PREFIX "bin\agemu.exe"
+          if ((& $agemu version) -notmatch "agemu  $v") { Write-Error "install.ps1 did not install $v"; exit 1 }
+          & $agemu ping   # a daemon now runs from the installed agemud.exe
+          ./install.ps1   # replaces agemud.exe while it runs
+          if ((& $agemu version) -notmatch "agemu  $v") { Write-Error "second install failed"; exit 1 }
+          & $agemu daemon stop
+          Stop-Process -Id $server.Id
+      - name: npm launcher runs the Windows binary
+        run: |
+          $pkg = Join-Path $env:RUNNER_TEMP "npm-pkg"
+          New-Item -ItemType Directory -Force "$pkg\bin", "$pkg\platforms\win32-x64" | Out-Null
+          Copy-Item npm\agemu.js "$pkg\bin\agemu.js"
+          Copy-Item bin\agemu.exe, bin\agemud.exe "$pkg\platforms\win32-x64\"
+          (Get-Content npm\package.json -Raw) -replace '"version": "0.0.0"', '"version": "0.0.0-ci"' | Set-Content "$pkg\package.json"
+          npm install -g $pkg
+          $env:AGEMU_HOME = Join-Path $env:RUNNER_TEMP "agemu-npm"
+          $v = agemu version | Out-String; $v
+          if ($v -notmatch "agemu  v0.0.0-ci") { Write-Error "launcher did not run agemu.exe"; exit 1 }
+          agemu daemon stop

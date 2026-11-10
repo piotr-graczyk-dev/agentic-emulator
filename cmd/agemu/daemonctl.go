@@ -8,11 +8,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/client"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 type daemonState int
@@ -118,8 +118,7 @@ func daemonCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		// Replace this process so signals reach the daemon directly.
-		return syscall.Exec(path, []string{path}, os.Environ())
+		return runDaemonForeground(path)
 	case "status":
 		p, state := probeDaemon()
 		switch state {
@@ -204,14 +203,14 @@ func stopDaemon() (bool, error) {
 	case daemonHung:
 		pid := lockPID()
 		if pid == 0 {
-			return false, fmt.Errorf("%s, and %s does not name its pid; stop it with `pkill -x agemud`", hungMessage(), daemon.LockPath())
+			return false, fmt.Errorf("%s, and %s does not name its pid; stop it with `%s`", hungMessage(), daemon.LockPath(), killAllDaemonsCommand)
 		}
 		return true, stopPID(pid)
 	}
 	return true, stopPID(p.PID)
 }
 
-// stopGrace is how long a daemon gets to exit after SIGTERM before it is killed. It exceeds the
+// stopGrace is how long a daemon gets to exit after it was asked to (askToExit) before it is killed. It exceeds the
 // bound on resuming the devices the daemon auto-parked (30 s, internal/daemon/autopark.go), which
 // it does on its way out.
 var stopGrace = 35 * time.Second
@@ -241,8 +240,8 @@ func stopPID(pid int) error {
 	if lp := lockPID(); lp != 0 && lp != pid {
 		return nil
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+	if err := askToExit(pid); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
 			return nil
 		}
 		return fmt.Errorf("stopping agemud (pid %d): %w", pid, err)
@@ -258,7 +257,7 @@ func stopPID(pid int) error {
 	if wait(stopGrace) {
 		return nil
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+	_ = osproc.Kill(pid)
 	if wait(3 * time.Second) {
 		return nil
 	}
@@ -269,7 +268,7 @@ func stopPID(pid int) error {
 // a daemon started by an agemu that still runs (an MCP session) stays a zombie after it exits.
 // Its flock is released at exit, though, and a new daemon writes its own pid to the lock file.
 func daemonGone(pid int) bool {
-	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+	if !osproc.Exists(pid) {
 		return true
 	}
 	if lp := lockPID(); lp != 0 && lp != pid {
@@ -299,10 +298,10 @@ func lockHeld() bool {
 		return false
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+	if err := osproc.TryLock(f, false); err != nil {
 		return true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = osproc.Unlock(f)
 	return false
 }
 

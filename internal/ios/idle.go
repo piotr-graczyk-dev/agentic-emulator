@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Idle daemons after boot. iOS marks most of its on-demand daemons as safe to end when they are

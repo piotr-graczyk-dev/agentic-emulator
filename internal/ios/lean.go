@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Lean simulators. A booted iOS 26.5 simulator runs the whole iOS userland: about 240

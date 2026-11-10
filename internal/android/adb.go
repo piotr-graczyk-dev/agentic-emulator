@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
 // Minimal client for the adb server's smart-socket protocol (the same protocol the adb
@@ -215,7 +217,7 @@ func adbShellOK(ctx context.Context, serial, cmd string) (string, error) {
 // adbExec runs the adb binary (used for push / install, which need the sync protocol).
 func adbExec(ctx context.Context, serial string, args ...string) (string, error) {
 	full := append([]string{"-s", serial}, args...)
-	out, err := exec.CommandContext(ctx, sdkTool("platform-tools", "adb"), full...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, toolchain.ADB(), full...).CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("adb %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}

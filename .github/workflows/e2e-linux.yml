@@ -1,0 +1,79 @@
+name: e2e-linux
+
+# The Android end-to-end run (scripts/e2e-android.sh) on a real emulator on Linux: GitHub's
+# Ubuntu runners have KVM, so the emulator runs the x86_64 system image accelerated. It creates
+# the AVD, waits through its one-time first boot and baseline, then drives Settings and the probe
+# app through every capability. About half an hour, so it runs when Android or daemon code
+# changes, and by hand.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/android/**"
+      - "internal/client/**"
+      - "internal/daemon/**"
+      - "internal/osproc/**"
+      - "internal/toolchain/**"
+      - "android-agent/**"
+      - "scripts/e2e-android.sh"
+      - "testapps/android/**"
+      - ".github/workflows/e2e-linux.yml"
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AGEMU_HOME: ${{ github.workspace }}/.agemu-e2e
+      IMAGE: "system-images;android-37.1;google_apis_playstore_ps16k;x86_64"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: free disk space for the system image and the baseline
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: let this user open /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: install the emulator and the x86_64 system image
+        run: |
+          sm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sm" --licenses > /dev/null || true
+          "$sm" --install emulator platform-tools "platforms;android-36" "$IMAGE" > /dev/null
+          "$ANDROID_HOME/emulator/emulator" -version | head -1
+          ls "$ANDROID_HOME/ndk" || true
+      - name: build (Android only)
+        run: make android-build
+      - name: doctor
+        run: bin/android/agemu doctor
+      - name: e2e
+        run: scripts/e2e-android.sh agemu-ci
+      - name: where the emulator wrote its discovery file
+        if: always()
+        run: find / -name 'pid_*.ini' -path '*avd/running*' 2>/dev/null || true
+      - name: logs
+        if: failure()
+        run: |
+          tail -n 200 "$AGEMU_HOME/daemon.log" || true
+          tail -n 100 "$AGEMU_HOME"/android/*.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-linux-logs
+          path: |
+            ${{ env.AGEMU_HOME }}/daemon.log
+            ${{ env.AGEMU_HOME }}/android/*.log
+            /tmp/agemu-e2e-android.*
+          retention-days: 7
+          if-no-files-found: ignore

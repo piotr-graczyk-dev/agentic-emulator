@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Parking (agemu park / resume): a booted simulator is stopped in place with SIGSTOP, so it

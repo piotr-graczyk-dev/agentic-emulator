@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,13 +9,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/backend"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 func tree() *api.UITree {
@@ -112,7 +114,7 @@ func TestSecondDaemonRefusesToStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := osproc.TryLock(lock, true); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -125,7 +127,7 @@ func TestSecondDaemonRefusesToStart(t *testing.T) {
 	}
 
 	// Once the lock is free, a daemon starts normally.
-	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	osproc.Unlock(lock)
 	done := make(chan error, 1)
 	go func() { done <- Serve(ctx, NewService(t.TempDir())) }()
 	deadline := time.Now().Add(time.Second)
@@ -147,7 +149,11 @@ func TestSecondDaemonRefusesToStart(t *testing.T) {
 
 // shortTempDir keeps the unix socket path under the 104-byte macOS limit.
 func shortTempDir(t *testing.T) string {
-	d, err := os.MkdirTemp("/tmp", "agemu-t")
+	root := "/tmp" // unix socket paths are limited to about 100 bytes; $TMPDIR on macOS is long
+	if runtime.GOOS == "windows" {
+		root = ""
+	}
+	d, err := os.MkdirTemp(root, "agemu-t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,5 +472,70 @@ func TestWaitEndsOnTimeWhenFramesStall(t *testing.T) {
 	}
 	if el := time.Since(start); el > 4*time.Second {
 		t.Fatalf("wait took %v with a 900 ms timeout", el)
+	}
+}
+
+// The exit method stops Serve the way SIGTERM does: it is how `agemu daemon stop` ends the daemon
+// on Windows. The client gets its reply before the daemon goes.
+func TestExitMethodStopsServe(t *testing.T) {
+	t.Setenv("AGEMU_HOME", shortTempDir(t))
+	done := make(chan error, 1)
+	go func() { done <- Serve(context.Background(), NewService(t.TempDir())) }()
+	var c net.Conn
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		var err error
+		if c, err = net.Dial("unix", SocketPath()); err == nil {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("daemon did not listen: %v", err)
+		}
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte(`{"id":7,"method":"exit"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(c).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("no reply to exit: %v", err)
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil || resp.ID != 7 || resp.Error != "" {
+		t.Fatalf("exit reply %s (%v)", line, err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve after exit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve still runs after exit")
+	}
+	// The lock is free again: another daemon may start.
+	lock, err := os.OpenFile(LockPath(), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := osproc.TryLock(lock, true); err != nil {
+		t.Fatalf("lock still held after exit: %v", err)
+	}
+}
+
+// Without Serve (a connection served by ServeConn), exit is refused instead of doing nothing.
+func TestExitMethodWithoutServe(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	go ServeConn(context.Background(), NewService(t.TempDir()), b)
+	if _, err := a.Write([]byte(`{"id":1,"method":"exit"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(a).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil || resp.Error == "" {
+		t.Fatalf("exit without Serve: %s", line)
 	}
 }

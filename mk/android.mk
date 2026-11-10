@@ -10,7 +10,7 @@
 
 .PHONY: android-agent android-build android-test android-e2e android-bench
 
-ANDROID_SDK_DIR    ?= $(or $(ANDROID_HOME),$(ANDROID_SDK_ROOT),$(HOME)/Library/Android/sdk)
+ANDROID_SDK_DIR    ?= $(or $(ANDROID_HOME),$(ANDROID_SDK_ROOT),$(if $(filter Darwin,$(shell uname -s)),$(HOME)/Library/Android/sdk,$(HOME)/Android/Sdk))
 ANDROID_AGENT_JAR  := internal/android/assets/agemu-agent.jar
 ANDROID_AGENT_SRC  := $(shell find android-agent/src -name '*.java' 2>/dev/null)
 ANDROID_BIN        := bin/android

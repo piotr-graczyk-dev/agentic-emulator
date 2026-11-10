@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end proof for the Android backend. Everything goes through the agemu CLI
 # ($AGEMU_BIN, default bin/android/agemu; agemud must sit next to it)
-# (no adb, no emulator commands); `sips` only reads PNG sizes on the host.
+# (no adb, no emulator commands); python3 reads PNG sizes and times steps on the host. It runs
+# on macOS and Linux.
 #
 #   scripts/e2e-android.sh [avd-name]        default: agemu-pixel
 #
@@ -32,7 +33,8 @@ timed() {
   printf '   (%s: %.0f ms)\n' "$*" "$(python3 -c "print(($t1-$t0)*1000)")" >&2
   printf '%s' "$out"
 }
-png_size() { sips -g pixelWidth -g pixelHeight "$1" | awk '/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{print w "x" h}'; }
+# png_size reads a PNG's width and height from its IHDR chunk (sips on macOS is not needed).
+png_size() { python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
 
 step "create (if missing) and boot $DEV"
 if "$AG" devices | grep -q "\"id\":\"$DEV\""; then

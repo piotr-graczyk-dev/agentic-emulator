@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 // Request / Response are newline-delimited JSON over the daemon's unix socket.
@@ -115,11 +115,15 @@ func SocketPath() string { return filepath.Join(Home(), "agemu.sock") }
 // LockPath is the file the running daemon holds an exclusive flock on; it contains its pid.
 func LockPath() string { return filepath.Join(Home(), "agemud.lock") }
 
-// Serve listens on the unix socket until ctx is cancelled.
+// Serve listens on the unix socket until ctx is cancelled or a client calls the exit method.
+// Go supports unix sockets on Windows 10 1803 and later too, so the protocol is the same there.
 func Serve(ctx context.Context, svc *Service) error {
 	if err := os.MkdirAll(Home(), 0o755); err != nil {
 		return err
 	}
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	svc.exit = stop
 	// Two agemu processes can both find no socket and each start a daemon. The second must
 	// not unlink the first one's socket, or two daemons would drive the same devices.
 	lock, err := os.OpenFile(LockPath(), os.O_CREATE|os.O_RDWR, 0o644)
@@ -127,7 +131,7 @@ func Serve(ctx context.Context, svc *Service) error {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := osproc.TryLock(lock, true); err != nil {
 		return errors.New("another agemud already runs for " + Home())
 	}
 	// The lock file names the daemon that holds it, so `agemu daemon stop` can stop one that
@@ -192,8 +196,19 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 		var req Request
 		var resp Response
 		start := time.Now()
+		exiting := false
 		if jerr := json.Unmarshal(line, &req); jerr != nil {
 			resp.Error = "bad request: " + jerr.Error()
+		} else if req.Method == "exit" {
+			// `agemu daemon stop` on Windows, which has no SIGTERM to send: the daemon exits the way
+			// SIGTERM makes it, after this reply.
+			resp.ID = req.ID
+			if svc.exit == nil {
+				resp.Error = "exit: this daemon does not serve a socket"
+			} else {
+				resp.Result, _ = json.Marshal(map[string]bool{"ok": true})
+				exiting = true
+			}
 		} else {
 			resp.ID = req.ID
 			res, crash, cerr := safeCall(ctx, svc, req)
@@ -210,6 +225,11 @@ func handle(ctx context.Context, svc *Service, conn net.Conn) {
 		w.Write(b)
 		w.WriteByte('\n')
 		if err := w.Flush(); err != nil {
+			return
+		}
+		if exiting {
+			log.Printf("exit requested by a client")
+			svc.exit()
 			return
 		}
 		if err != nil {

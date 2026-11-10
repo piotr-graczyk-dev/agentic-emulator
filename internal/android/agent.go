@@ -15,8 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 // The on-device agent (android-agent/, built by android-agent/build.sh).
@@ -70,7 +71,7 @@ func (a *agentClient) dial(ctx context.Context) (net.Conn, *bufio.Reader, string
 			if err == nil {
 				return c, r, "tcp", nil
 			}
-			if !errors.Is(err, syscall.ECONNREFUSED) {
+			if !osproc.IsConnRefused(err) {
 				break
 			}
 		}

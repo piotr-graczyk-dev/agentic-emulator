@@ -7,12 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
@@ -37,8 +38,6 @@ func envInt(name string, def int) int {
 	return def
 }
 
-func sdkTool(parts ...string) string { return toolchain.AndroidTool(parts...) }
-
 func avdHome() string {
 	if v := os.Getenv("ANDROID_AVD_HOME"); v != "" {
 		return v
@@ -47,13 +46,62 @@ func avdHome() string {
 	return filepath.Join(home, ".android", "avd")
 }
 
-// discoveryDir is where the emulator writes pid_<pid>.ini for every running instance.
-func discoveryDir() string {
+// discoveryDirs are where the emulator writes pid_<pid>.ini for every running instance
+// ($ANDROID_EMULATOR_DISCOVERY_DIR overrides them). The emulator picks one from the OS and its
+// environment, so every place it may use is read:
+//   - macOS: ~/Library/Caches/TemporaryItems/avd/running
+//   - Linux: $XDG_RUNTIME_DIR/avd/running, else /tmp/android-$USER/avd/running
+//   - Windows: %LOCALAPPDATA%\Temp\avd\running (the user's %TEMP%)
+func discoveryDirs() []string {
 	if v := os.Getenv("ANDROID_EMULATOR_DISCOVERY_DIR"); v != "" {
-		return v
+		return []string{v}
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Caches", "TemporaryItems", "avd", "running")
+	return discoveryDirsFor(runtime.GOOS, home, os.Getenv)
+}
+
+func discoveryDirsFor(goos, home string, getenv func(string) string) []string {
+	sub := []string{"avd", "running"}
+	var roots []string
+	switch goos {
+	case "darwin":
+		roots = []string{filepath.Join(home, "Library", "Caches", "TemporaryItems")}
+	case "windows":
+		if v := getenv("LOCALAPPDATA"); v != "" {
+			roots = append(roots, filepath.Join(v, "Temp"))
+		}
+		for _, k := range []string{"TEMP", "TMP"} {
+			if v := getenv(k); v != "" {
+				roots = append(roots, v)
+			}
+		}
+	default:
+		if v := getenv("XDG_RUNTIME_DIR"); v != "" {
+			roots = append(roots, v)
+		}
+		user := getenv("USER")
+		if user == "" {
+			user = filepath.Base(home)
+		}
+		tmp := getenv("TMPDIR")
+		if tmp == "" {
+			tmp = "/tmp"
+		}
+		roots = append(roots, filepath.Join(tmp, "android-"+user))
+		if tmp != "/tmp" {
+			roots = append(roots, filepath.Join("/tmp", "android-"+user))
+		}
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for _, r := range roots {
+		d := filepath.Join(append([]string{r}, sub...)...)
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
 }
 
 // managed reports whether agemu may touch this AVD. By default only AVDs whose name starts
@@ -167,8 +215,7 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	if _, err := coresSetting(); err != nil {
 		return avdInfo{}, err
 	}
-	avdmanager := sdkTool("cmdline-tools", "latest", "bin", "avdmanager")
-	cmd := exec.CommandContext(ctx, avdmanager, "create", "avd", "-n", name, "-k", img)
+	cmd := exec.CommandContext(ctx, toolchain.AVDManager(), "create", "avd", "-n", name, "-k", img)
 	cmd.Stdin = strings.NewReader("no\n") // "Do you wish to create a custom hardware profile?"
 	cmd.Env = toolchain.JavaEnv()         // avdmanager is a Java tool; Android Studio's runtime will do
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -290,17 +337,20 @@ type runningEmu struct {
 	ADBPort   int
 	GRPCPort  int
 	GRPCToken string
+	File      string // its discovery file
 }
 
 func (r runningEmu) serial() string { return fmt.Sprintf("emulator-%d", r.Console) }
 
-func pidAlive(pid int) bool {
-	return pid > 0 && syscall.Kill(pid, 0) == nil
-}
+func pidAlive(pid int) bool { return osproc.Alive(pid) }
 
 // runningEmulators lists live emulator instances (all of them, managed or not; callers filter).
 func runningEmulators() []runningEmu {
-	files, _ := filepath.Glob(filepath.Join(discoveryDir(), "pid_*.ini"))
+	var files []string
+	for _, d := range discoveryDirs() {
+		fs, _ := filepath.Glob(filepath.Join(d, "pid_*.ini"))
+		files = append(files, fs...)
+	}
 	var out []runningEmu
 	for _, f := range files {
 		pid, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "pid_"), ".ini"))
@@ -311,7 +361,7 @@ func runningEmulators() []runningEmu {
 		if err != nil {
 			continue
 		}
-		r := runningEmu{PID: pid, AVD: m["avd.id"], GRPCToken: m["grpc.token"]}
+		r := runningEmu{PID: pid, AVD: m["avd.id"], GRPCToken: m["grpc.token"], File: f}
 		r.Console, _ = strconv.Atoi(m["port.serial"])
 		r.ADBPort, _ = strconv.Atoi(m["port.adb"])
 		r.GRPCPort, _ = strconv.Atoi(m["grpc.port"])

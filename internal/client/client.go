@@ -11,12 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 type Client struct {
@@ -85,6 +86,14 @@ func New(conn net.Conn) *Client {
 
 func logPath() string { return filepath.Join(daemon.Home(), "daemon.log") }
 
+// DaemonFile is agemud's file name on this OS (agemud.exe on Windows).
+var DaemonFile = func() string {
+	if runtime.GOOS == "windows" {
+		return "agemud.exe"
+	}
+	return "agemud"
+}()
+
 // DaemonPath locates the agemud binary: $AGEMU_DAEMON, else next to the running
 // executable, else on $PATH.
 func DaemonPath() (string, error) {
@@ -95,7 +104,7 @@ func DaemonPath() (string, error) {
 		if real, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = real
 		}
-		p := filepath.Join(filepath.Dir(exe), "agemud")
+		p := filepath.Join(filepath.Dir(exe), DaemonFile)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p, nil
 		}
@@ -121,8 +130,7 @@ func startDaemon() error {
 	defer lf.Close()
 	cmd := exec.Command(exe)
 	cmd.Stdout, cmd.Stderr = lf, lf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	if err := osproc.StartDetached(cmd); err != nil {
 		return err
 	}
 	return cmd.Process.Release()

@@ -24,17 +24,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/android/emupb"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
 type Backend struct {
@@ -641,7 +643,7 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []st
 	}
 	args := []string{
 		"-avd", name, "-port", strconv.Itoa(p.console), "-grpc", strconv.Itoa(p.grpc),
-		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", "host"),
+		"-no-window", "-no-audio", "-no-boot-anim", "-gpu", env("AGEMU_ANDROID_GPU", defaultGPU(runtime.GOOS, os.Getenv)),
 		"-memory", strconv.Itoa(ram), "-no-snapshot-save",
 	}
 	// Emulator 37 raises guest RAM to 4096 MB for API > 36 images; -lowram is the only switch
@@ -663,6 +665,16 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []st
 	// this emulator deadlocked (docs/ANDROID.md, "Reset and boot breakdown").
 	args = append(args, strings.Fields(os.Getenv("AGEMU_ANDROID_EMULATOR_FLAGS"))...)
 	return args
+}
+
+// defaultGPU is the emulator's -gpu mode unless AGEMU_ANDROID_GPU sets one: the host GPU, except
+// on a Linux host without a display (a server, CI), where the emulator cannot open the host's GL
+// and "auto" picks software rendering.
+func defaultGPU(goos string, getenv func(string) string) string {
+	if goos == "linux" && getenv("DISPLAY") == "" && getenv("WAYLAND_DISPLAY") == "" {
+		return "auto"
+	}
+	return "host"
 }
 
 // snapshotCompressEnv maps AGEMU_ANDROID_SNAPSHOT_COMPRESS to the emulator's
@@ -921,16 +933,15 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 	defer lf.Close()
 	d.clearPark() // a new emulator process starts running
 	args := emulatorArgs(d.name, p, a, loadBaseline, wipe)
-	cmd := exec.Command(sdkTool("emulator", "emulator"), args...)
+	cmd := exec.Command(toolchain.Emulator(), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.Env = emulatorEnv(os.Environ())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survives the daemon
 	// A boot cancelled before this point (a shutdown right after boot) starts nothing.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	logf("%s: starting emulator %s", d.name, strings.Join(args, " "))
-	if err := cmd.Start(); err != nil {
+	if err := osproc.StartDetached(cmd); err != nil { // it survives the daemon
 		return err
 	}
 	d.mu.Lock()
@@ -985,14 +996,15 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 	}
 }
 
-// killProcGroup stops an emulator agemu started (its own session, so its process group is its
-// pid): SIGTERM, then SIGKILL after 20 s.
+// killProcGroup stops an emulator agemu started and the processes it started (its own session,
+// so its process group is its pid; on Windows its process tree): SIGTERM, then SIGKILL after 20 s.
+// Windows has no SIGTERM for a process without a console, so there the tree ends at once.
 func killProcGroup(pid int) {
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	osproc.TerminateGroup(pid)
 	deadline := time.Now().Add(20 * time.Second) // the emulator's own graceful exit window
 	for groupAlive(pid) {
 		if time.Now().After(deadline) {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			osproc.KillGroup(pid)
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -1061,7 +1073,7 @@ func pausedBootStatus(ctx context.Context, e *emuClient) (paused, known, booted 
 var pausedSettle = 200 * time.Millisecond
 
 // groupAlive reports whether any process of the process group pgid still runs.
-func groupAlive(pgid int) bool { return pgid > 0 && syscall.Kill(-pgid, 0) == nil }
+func groupAlive(pgid int) bool { return osproc.GroupAlive(pgid) }
 
 // stopUnregistered stops the emulator this daemon launched for d if it still runs but never
 // registered (findRunning cannot see it, so shutdown would miss it).
@@ -1457,14 +1469,14 @@ func (d *device) shutdown(ctx context.Context) error {
 		cancel()
 	}
 	if err != nil {
-		logf("%s: gRPC shutdown failed (%v), sending SIGTERM", d.name, err)
-		_ = syscall.Kill(r.PID, syscall.SIGTERM)
+		logf("%s: gRPC shutdown failed (%v), terminating pid %d", d.name, err, r.PID)
+		_ = osproc.Terminate(r.PID)
 	}
 	deadline := time.Now().Add(30 * time.Second)
 	for pidAlive(r.PID) && !d.reaped(r.PID) {
 		if time.Now().After(deadline) {
-			logf("%s: emulator pid %d still alive, SIGKILL", d.name, r.PID)
-			_ = syscall.Kill(r.PID, syscall.SIGKILL)
+			logf("%s: emulator pid %d still alive, killing it", d.name, r.PID)
+			_ = osproc.Kill(r.PID)
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -1473,7 +1485,9 @@ func (d *device) shutdown(ctx context.Context) error {
 	d.clearPark()
 	// The emulator removes its discovery file on exit; a killed one may leave it behind.
 	if !pidAlive(r.PID) || d.reaped(r.PID) {
-		_ = os.Remove(filepath.Join(discoveryDir(), fmt.Sprintf("pid_%d.ini", r.PID)))
+		if r.File != "" {
+			_ = os.Remove(r.File)
+		}
 	}
 	return nil
 }

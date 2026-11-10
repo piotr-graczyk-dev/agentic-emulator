@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Logs (docs/CAPABILITIES.md "Logs and crashes", docs/IOS.md "Logs and crashes").

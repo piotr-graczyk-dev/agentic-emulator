@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // PosterBoard's wallpaper gallery, kept from starting at boot. PosterBoard keeps the time it last
