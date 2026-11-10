@@ -152,9 +152,10 @@ func adbHostQuery(ctx context.Context, req string) (string, error) {
 	return s, ctxErr(ctx, err)
 }
 
-// adbReconnectOffline asks the adb server to drop and reopen its offline device connections, as
-// `adb reconnect offline` does. Errors are ignored: it is a nudge.
-func adbReconnectOffline(ctx context.Context) {
+// adbReconnect asks the adb server to drop and reopen its connection to this one device, as
+// `adb -s <serial> reconnect` does (the server accepts it for an offline device). Errors are
+// ignored: it is a nudge.
+func adbReconnect(ctx context.Context, serial string) {
 	d := net.Dialer{Timeout: 2 * time.Second}
 	c, err := d.DialContext(ctx, "tcp", adbServerAddr())
 	if err != nil {
@@ -164,7 +165,24 @@ func adbReconnectOffline(ctx context.Context) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
-	_ = adbRequest(c, "host:reconnect-offline")
+	_ = adbRequest(c, "host-serial:"+serial+":reconnect")
+}
+
+var (
+	reconnectMu   sync.Mutex
+	lastReconnect = map[string]time.Time{}
+)
+
+// reconnectDue reports whether a reconnect of serial may be sent now (none in the last every),
+// and if so records it, so concurrent waits on one device share the cooldown.
+func reconnectDue(serial string, every time.Duration) bool {
+	reconnectMu.Lock()
+	defer reconnectMu.Unlock()
+	if time.Since(lastReconnect[serial]) < every {
+		return false
+	}
+	lastReconnect[serial] = time.Now()
+	return true
 }
 
 // adbState returns "device", "offline", ... for the serial, or an error when unknown.

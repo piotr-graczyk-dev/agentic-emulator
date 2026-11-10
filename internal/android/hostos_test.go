@@ -202,3 +202,43 @@ func TestSlowHostScale(t *testing.T) {
 		}
 	}
 }
+
+// A wait on one device reconnects only that device, through the adb server's per-device
+// service, and concurrent waits share one cooldown.
+func TestReconnectIsScopedAndShared(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan string, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		var n [4]byte
+		if _, err := io.ReadFull(c, n[:]); err != nil {
+			return
+		}
+		l, _ := strconv.ParseUint(string(n[:]), 16, 32)
+		b := make([]byte, l)
+		io.ReadFull(c, b)
+		c.Write([]byte("OKAY"))
+		got <- string(b)
+	}()
+	t.Setenv("ANDROID_ADB_SERVER_PORT", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	adbReconnect(ctx, "emulator-5580")
+	if req := <-got; req != "host-serial:emulator-5580:reconnect" {
+		t.Fatalf("request %q", req)
+	}
+	if !reconnectDue("emulator-test-1", time.Hour) || reconnectDue("emulator-test-1", time.Hour) {
+		t.Fatal("the cooldown is not shared between calls")
+	}
+	if !reconnectDue("emulator-test-2", time.Hour) {
+		t.Fatal("the cooldown of one device holds back another")
+	}
+}
