@@ -219,8 +219,9 @@ shell. Devices keep running across a restart.
 - **Android profiles other than the AVD's native one are resampled.** Create the AVD with
   `--profile <name>` to make that profile pixel-exact.
 - **Rotation isn't handled**, and iPad Split View and Slide Over are untested.
-- **Android on Windows has not run on a device in CI.** GitHub's Windows runners have no
-  hypervisor; CI covers the unit tests, the daemon and the installers there, and runs the full
+- **Android on Windows is a preview.** On GitHub's Windows runner the emulator boots under agemu,
+  but the guest's services fail under nested virtualization, so the UI tree and taps are not yet
+  verified on Windows. CI covers the unit tests, the daemon and the installers there, and runs the
   Android end-to-end test on Linux with KVM. Windows screenshots use the gRPC reply for now (see
   [docs/INSTALL.md](docs/INSTALL.md#linux-and-windows)).
 

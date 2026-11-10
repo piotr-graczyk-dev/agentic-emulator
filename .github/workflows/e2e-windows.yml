@@ -1,24 +1,20 @@
 name: e2e-windows
 
-# The Android end-to-end run (scripts/e2e-android.sh, in Git Bash) on a real emulator on Windows:
-# GitHub's Windows runners expose the Windows Hypervisor Platform (WHPX), so the emulator runs the
-# x86_64 system image accelerated. The probe app for the capability checks is built on Linux
-# (testapps/android/build.sh is a bash script around the SDK's build tools and the NDK) and handed
-# over as an artifact. It runs when Android or daemon code changes, and by hand.
+# The Android end-to-end run (scripts/e2e-android.sh, in Git Bash) on a real emulator on Windows.
+# The probe app for the capability checks is built on Linux (testapps/android/build.sh is a bash
+# script around the SDK's build tools and the NDK) and handed over as an artifact.
+#
+# Run it by hand, on a runner with real hardware virtualization (runs-on below). On GitHub's
+# hosted windows-latest (2026-11) the emulator starts under nested WHPX and the guest reports boot
+# completion after about 5 minutes, but its system services then fail binder calls
+# (DeadObjectException from the accessibility manager, "Broken pipe" for the emulator's own `am`
+# calls), so agemu's on-device agent cannot register its UiAutomation and the run fails there.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "cmd/**"
-      - "internal/android/**"
-      - "internal/client/**"
-      - "internal/daemon/**"
-      - "internal/osproc/**"
-      - "internal/toolchain/**"
-      - "android-agent/**"
-      - "scripts/e2e-android.sh"
-      - "testapps/android/**"
-      - ".github/workflows/e2e-windows.yml"
+    inputs:
+      runs-on:
+        description: "Runner label (a self-hosted Windows machine with WHPX is best)"
+        default: windows-latest
 
 jobs:
   probe:
@@ -44,7 +40,7 @@ jobs:
 
   android:
     needs: probe
-    runs-on: windows-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 90
     defaults:
       run:

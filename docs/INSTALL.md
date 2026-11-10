@@ -126,9 +126,12 @@ rendering) the guest boots and starts agemu's agent several times slower than ag
 What is different from the Mac:
 
 - **Windows is new and less tested.** CI runs the unit tests, the daemon and both installers on
-  Windows, but GitHub's Windows runners have no hypervisor, so the emulator itself has not run
-  under agemu on Windows in CI. Linux runs the full Android end-to-end test on a KVM emulator in
-  CI (`.github/workflows/e2e-linux.yml`). Reports from Windows are welcome.
+  Windows. On GitHub's Windows runner agemu also created an AVD, started the emulator under WHPX,
+  found it, and saw it boot, but the guest's system services failed under nested virtualization,
+  so the on-device agent, and with it the UI tree and taps, has not been verified on Windows
+  (`.github/workflows/e2e-windows.yml` runs the end-to-end test by hand on a better machine).
+  Linux runs the Android end-to-end test on a KVM emulator in CI
+  (`.github/workflows/e2e-linux.yml`). Reports from Windows are welcome.
 - **Screenshots on Windows travel in the gRPC reply** instead of a shared file mapping, until the
   emulator's mapping is verified there: tens of milliseconds instead of a few.
   `AGEMU_ANDROID_SHM=1` turns the mapping on.

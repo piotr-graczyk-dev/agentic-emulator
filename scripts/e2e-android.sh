@@ -126,6 +126,11 @@ ag screenshot -o "$OUT/shot-search.png" >/dev/null
 step "type --keys (one key event per character through the keyboard)"
 ag tap --text "Clear text" >/dev/null || fail "no Clear text button"
 ag wait --id breadcrumb --gone --timeout-ms 8000 >/dev/null || fail "results did not clear"
+# Key events typed while the field still clears can be lost: wait until it is empty.
+for _ in $(seq 40); do
+  ag find --id open_search_view_edit_text --json | grep -q '"text":"network"' || break
+  sleep 0.25
+done
 timed ag type --keys "wifi" >/dev/null
 ag find --id open_search_view_edit_text --json >"$OUT/field-keys.json"
 grep -q '"text":"wifi"' "$OUT/field-keys.json" || fail "type --keys: field is $(cat "$OUT/field-keys.json")"

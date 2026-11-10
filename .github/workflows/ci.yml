@@ -113,7 +113,7 @@ jobs:
   windows:
     # Android on Windows: unit tests (including the Windows process, lock and file-mapping calls),
     # the build, the daemon's life cycle over its socket, install.ps1 and the npm launcher.
-    # e2e-windows.yml drives a real emulator (WHPX).
+    # e2e-windows.yml drives a real emulator, by hand (see there why not on every PR).
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:

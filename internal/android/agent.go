@@ -297,10 +297,6 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 				diag, derr := adbShell(ctx, a.serial, "ls -l "+agentDevicePath+" /data/local/tmp/agemu-agent.log; pidof agemu-agent; getprop sys.boot_completed")
 				msg += fmt.Sprintf("; start command: exit %d %q; device: %q %q %v", started.Exit,
 					strings.TrimSpace(started.Stdout+started.Stderr), strings.TrimSpace(diag.Stdout), strings.TrimSpace(diag.Stderr), derr)
-				// Run it in the foreground for a while to see what it says, and what the system logged.
-				// The exit status tells a hang (124, timeout) from a crash (128+signal).
-				fg, _ := adbShell(ctx, a.serial, fmt.Sprintf("%sCLASSPATH=%s timeout 20 app_process /system/bin --nice-name=agemu-agent agemu.Agent %s %d >/data/local/tmp/agemu-diag.log 2>&1; echo \"exit $?\"; tail -n 15 /data/local/tmp/agemu-diag.log; logcat -d -t 3000 | grep -v ' adbd ' | grep -i -E 'agemu|app_process|AndroidRuntime|lowmemorykiller|lmkd| DEBUG |libc|SIGILL|SIGSEGV|art ' | tail -n 30", tcpArgs, agentDevicePath, agentSocket, agentGuestPort))
-				msg += fmt.Sprintf("; in the foreground: %q", strings.TrimSpace(fg.Stdout+fg.Stderr))
 			}
 			return true, errors.New(msg)
 		}
