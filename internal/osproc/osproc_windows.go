@@ -75,7 +75,7 @@ func track(pid int) {
 
 // groupWatchInterval is how often the watcher of a started process checks whether its group has
 // exited (GroupAlive then releases the handle).
-var groupWatchInterval = 2 * time.Second
+const groupWatchInterval = 2 * time.Second
 
 func creationTime(h windows.Handle) (int64, bool) {
 	var c, e, k, u windows.Filetime

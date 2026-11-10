@@ -27,10 +27,9 @@ func TestGroupFunctionsIgnoreUntrackedPIDs(t *testing.T) {
 }
 
 // The handle kept for a started process is released once its group has exited, also when nothing
-// calls the group functions (an emulator that shut down by itself).
+// calls the group functions (an emulator that shut down by itself). The watcher looks every
+// groupWatchInterval (2 s); waitFor allows 10 s.
 func TestTrackingEndsWithTheGroup(t *testing.T) {
-	defer func(d time.Duration) { groupWatchInterval = d }(groupWatchInterval)
-	groupWatchInterval = 20 * time.Millisecond
 	c := child(t, "OSPROC_CHILD=sleep")
 	if err := StartDetached(c); err != nil {
 		t.Fatal(err)
