@@ -1,6 +1,7 @@
 package android
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -103,5 +104,28 @@ func TestAVDHomeLikeTheSDK(t *testing.T) {
 		if got := avdHomeFor(c.goos, "/home/a", envMap(c.env), c.isDir); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestADBKeyPresent(t *testing.T) {
+	home := t.TempDir()
+	if adbKeyPresent(home, envMap(nil)) {
+		t.Fatal("a key is reported in an empty home")
+	}
+	user := t.TempDir()
+	if err := os.WriteFile(filepath.Join(user, "adbkey.pub"), []byte("k"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !adbKeyPresent(home, envMap(map[string]string{"ANDROID_USER_HOME": user})) {
+		t.Fatal("the key under ANDROID_USER_HOME is not found")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".android"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".android", "adbkey.pub"), []byte("k"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !adbKeyPresent(home, envMap(nil)) {
+		t.Fatal("the key in ~/.android is not found")
 	}
 }

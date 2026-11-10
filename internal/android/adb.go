@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -212,6 +213,45 @@ func adbShellOK(ctx context.Context, serial, cmd string) (string, error) {
 		return r.Stdout, fmt.Errorf("adb shell %q: exit %d: %s", cmd, r.Exit, strings.TrimSpace(r.Stderr+" "+r.Stdout))
 	}
 	return r.Stdout, nil
+}
+
+// ensureADBKey makes sure the host has an adb key before an emulator starts. The emulator
+// installs the host's public key (adbkey.pub in the Android user directory) into the guest as it
+// boots, and the Play Store images accept adb only from such a key. On a computer where adb never
+// ran (a new Linux or Windows install, CI) there is none yet: the adb server creates it when it
+// first starts, which would be after the emulator, and every adb call would then fail with
+// "device unauthorized". Starting the server first creates the key; with a key present this does
+// nothing.
+func ensureADBKey(ctx context.Context) {
+	home, _ := os.UserHomeDir()
+	if adbKeyPresent(home, os.Getenv) {
+		return
+	}
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(c, toolchain.ADB(), "start-server").CombinedOutput(); err != nil {
+		logf("adb start-server (to create the adb key before the emulator starts): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
+// adbKeyPresent reports whether an adb public key exists where adb and the emulator look for it.
+func adbKeyPresent(home string, getenv func(string) string) bool {
+	var dirs []string
+	for _, k := range []string{"ANDROID_USER_HOME", "ANDROID_EMULATOR_HOME"} {
+		if v := getenv(k); v != "" {
+			dirs = append(dirs, v)
+		}
+	}
+	if v := getenv("ANDROID_SDK_HOME"); v != "" {
+		dirs = append(dirs, filepath.Join(v, ".android"))
+	}
+	dirs = append(dirs, filepath.Join(home, ".android"))
+	for _, d := range dirs {
+		if st, err := os.Stat(filepath.Join(d, "adbkey.pub")); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // adbExec runs the adb binary (used for push / install, which need the sync protocol).

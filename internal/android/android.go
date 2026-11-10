@@ -932,6 +932,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 	}
 	defer lf.Close()
 	d.clearPark() // a new emulator process starts running
+	ensureADBKey(ctx)
 	args := emulatorArgs(d.name, p, a, loadBaseline, wipe)
 	cmd := exec.Command(toolchain.Emulator(), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
