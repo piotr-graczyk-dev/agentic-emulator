@@ -528,7 +528,7 @@ func androidChecks(d daemonInfo) doctorSection {
 		if runtime.GOOS == "windows" {
 			fix = []string{
 				`& "` + sdkmanager + `" --licenses    # accept each license with y`,
-				`& "` + sdkmanager + `" --install ` + strings.Join(missing, " ") + "    # the image takes about 8 GB of disk",
+				`& "` + sdkmanager + `" --install '` + strings.Join(missing, `' '`) + `'    # the image takes about 8 GB of disk`,
 			}
 		}
 		if jbr := toolchain.AndroidStudioJBR(); java != "" && jbr != "" && os.Getenv("JAVA_HOME") == "" && strings.HasPrefix(java, jbr) && runtime.GOOS != "windows" {

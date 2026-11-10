@@ -5,7 +5,8 @@
 //
 // A "group" is the process a caller started with StartDetached plus every process it started:
 // on Unix the session's process group (its id is the leader's pid), on Windows the process tree
-// under that pid.
+// under that pid. On Windows the group functions act only on processes StartDetached started in
+// this process, since Windows reuses process ids quickly.
 package osproc
 
 import "errors"

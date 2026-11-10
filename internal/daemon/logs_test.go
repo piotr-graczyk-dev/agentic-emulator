@@ -613,7 +613,9 @@ func TestWaitStopsWhenTheAppCrashesDuringIt(t *testing.T) {
 		t.Fatalf("the compound wait ran %v", el)
 	}
 	// Told once, the agent may wait for something else: the wait runs its course, and its
-	// timeout still says the app is down.
+	// timeout still says the app is down. The next call starts after the crash also on a clock
+	// with coarse ticks (Windows), where the crash and the call could share a timestamp.
+	time.Sleep(20 * time.Millisecond)
 	_, _, err = handleCall(t, svc, "wait", `{"device":"android:x","selector":{"text":"Thank you"},"timeoutMs":300}`)
 	if !errors.Is(err, api.ErrAppCrashed) || !strings.Contains(err.Error(), "timeout after 300ms") {
 		t.Fatalf("wait after the agent was told: err = %v", err)

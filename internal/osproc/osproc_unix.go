@@ -4,6 +4,7 @@ package osproc
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"syscall"
@@ -93,3 +94,7 @@ func Unmap(b []byte) error { return syscall.Munmap(b) }
 
 // IsConnRefused reports whether err is a refused TCP or socket connection.
 func IsConnRefused(err error) bool { return errors.Is(err, syscall.ECONNREFUSED) }
+
+// PeerClosed is always false on Unix: there a write to a socket whose peer has gone fails
+// (EPIPE), which tells the caller what it needs.
+func PeerClosed(net.Conn) bool { return false }

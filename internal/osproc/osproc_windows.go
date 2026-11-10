@@ -4,8 +4,10 @@ package osproc
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -22,7 +24,60 @@ func StartDetached(cmd *exec.Cmd) error {
 	}
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS | breakawayFlag()
 	cmd.SysProcAttr.HideWindow = true
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	track(cmd.Process.Pid)
+	return nil
+}
+
+// Windows reuses a process id as soon as no handle to the exited process is left, and exec.Cmd
+// closes its handle once Wait returns. The group functions must never act on a process that got
+// the id of one agemu started, so StartDetached keeps a handle of its own to each process it
+// starts: while it is open the id cannot be reused. The group functions accept only these
+// processes, and a process counts as a child only when it was created after its parent (a
+// process with a reused id and an older parent is not). The handle is closed once the whole
+// group has exited.
+type tracked struct {
+	h       windows.Handle
+	created int64 // creation time, 100 ns units
+}
+
+var (
+	trackedMu sync.Mutex
+	trackedBy = map[int]tracked{}
+)
+
+func track(pid int) {
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return
+	}
+	created, ok := creationTime(h)
+	if !ok {
+		windows.CloseHandle(h)
+		return
+	}
+	trackedMu.Lock()
+	if old, ok := trackedBy[pid]; ok {
+		windows.CloseHandle(old.h)
+	}
+	trackedBy[pid] = tracked{h: h, created: created}
+	trackedMu.Unlock()
+}
+
+func creationTime(h windows.Handle) (int64, bool) {
+	var c, e, k, u windows.Filetime
+	if windows.GetProcessTimes(h, &c, &e, &k, &u) != nil {
+		return 0, false
+	}
+	return c.Nanoseconds() / 100, true
+}
+
+// running reports whether the process behind h has not exited.
+func running(h windows.Handle) bool {
+	ev, err := windows.WaitForSingleObject(h, 0)
+	return err == nil && ev == uint32(windows.WAIT_TIMEOUT)
 }
 
 // breakawayFlag is CREATE_BREAKAWAY_FROM_JOB when this process is in a job that lets children
@@ -93,36 +148,65 @@ func Kill(pid int) error {
 // TerminateGroup ends the process tree under pid, children first (see Terminate).
 func TerminateGroup(pid int) { KillGroup(pid) }
 
-// KillGroup ends the process tree under pid, children first.
+// KillGroup ends the process tree under pid, children first. pid must be a process StartDetached
+// started in this process; for any other pid it does nothing.
 func KillGroup(pid int) {
-	if pid <= 0 {
+	trackedMu.Lock()
+	t, ok := trackedBy[pid]
+	trackedMu.Unlock()
+	if !ok {
 		return
 	}
-	for _, c := range descendants(pid) {
-		_ = Kill(c)
+	kids := descendants(pid, t.created)
+	for _, k := range kids {
+		_ = windows.TerminateProcess(k.h, 1)
+		windows.CloseHandle(k.h)
 	}
-	_ = Kill(pid)
+	if running(t.h) {
+		_ = windows.TerminateProcess(t.h, 1)
+	}
 }
 
-// GroupAlive reports whether pid or any process it started still runs. Windows keeps a child's
-// parent pid after the parent exits, so the children are found also then.
+// GroupAlive reports whether pid or any process it started still runs. pid must be a process
+// StartDetached started in this process; for any other pid it is false. Windows keeps a child's
+// parent id after the parent exits, so the children are found also then.
 func GroupAlive(pid int) bool {
-	if pid <= 0 {
+	trackedMu.Lock()
+	t, ok := trackedBy[pid]
+	trackedMu.Unlock()
+	if !ok {
 		return false
 	}
-	if Alive(pid) {
+	if running(t.h) {
 		return true
 	}
-	for _, c := range descendants(pid) {
-		if Alive(c) {
-			return true
-		}
+	kids := descendants(pid, t.created)
+	alive := false
+	for _, k := range kids {
+		alive = alive || running(k.h)
+		windows.CloseHandle(k.h)
 	}
-	return false
+	if !alive { // the group is gone: let Windows reuse the id
+		trackedMu.Lock()
+		if cur, ok := trackedBy[pid]; ok && cur.h == t.h {
+			delete(trackedBy, pid)
+			windows.CloseHandle(t.h)
+		}
+		trackedMu.Unlock()
+	}
+	return alive
 }
 
-// descendants lists the processes under pid, deepest first.
-func descendants(pid int) []int {
+type proc struct {
+	pid int
+	h   windows.Handle
+}
+
+// descendants opens the processes under the process pid created at created, deepest first. A
+// process counts as a child only when its parent id matches and it was created after that
+// parent, so a process that got a reused id, or whose parent id was reused, is left out. The
+// caller closes the handles; holding them keeps the ids from being reused meanwhile.
+func descendants(pid int, created int64) []proc {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil
@@ -136,20 +220,29 @@ func descendants(pid int) []int {
 			children[e.ParentProcessID] = append(children[e.ParentProcessID], e.ProcessID)
 		}
 	}
-	var out []int
+	var out []proc
 	seen := map[uint32]bool{uint32(pid): true}
-	var walk func(p uint32)
-	walk = func(p uint32) {
-		for _, c := range children[p] {
+	var walk func(parent uint32, parentCreated int64)
+	walk = func(parent uint32, parentCreated int64) {
+		for _, c := range children[parent] {
 			if seen[c] {
 				continue
 			}
 			seen[c] = true
-			walk(c)
-			out = append(out, int(c))
+			h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, c)
+			if err != nil {
+				continue
+			}
+			ct, ok := creationTime(h)
+			if !ok || ct < parentCreated {
+				windows.CloseHandle(h)
+				continue
+			}
+			walk(c, ct)
+			out = append(out, proc{pid: int(c), h: h})
 		}
 	}
-	walk(uint32(pid))
+	walk(uint32(pid), created)
 	return out
 }
 
@@ -214,3 +307,40 @@ func Unmap(b []byte) error {
 func IsConnRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, windows.WSAECONNREFUSED)
 }
+
+// PeerClosed reports whether the other end has closed conn, without reading from it. Unlike on
+// Unix, a write to a Windows socket whose peer has gone succeeds, so a client that must not send
+// a request into a dead connection asks first. Use it only when no data is expected: pending data
+// also counts as closed.
+func PeerClosed(conn net.Conn) bool {
+	sc, ok := conn.(syscall.Conn)
+	if !ok {
+		return false
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return false
+	}
+	closed := false
+	_ = raw.Control(func(fd uintptr) {
+		pfd := wsaPollFD{fd: fd, events: pollRdNorm}
+		n, _, _ := procWSAPoll.Call(uintptr(unsafe.Pointer(&pfd)), 1, 0)
+		closed = int32(n) == 1 && pfd.revents&(pollRdNorm|pollHup|pollErr|pollNval) != 0
+	})
+	return closed
+}
+
+type wsaPollFD struct {
+	fd      uintptr
+	events  int16
+	revents int16
+}
+
+const (
+	pollErr    = 0x0001
+	pollHup    = 0x0002
+	pollNval   = 0x0004
+	pollRdNorm = 0x0100
+)
+
+var procWSAPoll = windows.NewLazySystemDLL("ws2_32.dll").NewProc("WSAPoll")

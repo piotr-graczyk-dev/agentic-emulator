@@ -242,7 +242,11 @@ func TestStopAHungDaemon(t *testing.T) {
 }
 
 // fakePingDaemon answers ping with p on $AGEMU_HOME's socket until the test ends.
-func fakePingDaemon(t *testing.T, p daemon.Ping) {
+func fakePingDaemon(t *testing.T, p daemon.Ping) { fakePingDaemonExit(t, p, nil) }
+
+// fakePingDaemonExit is fakePingDaemon whose exit method runs onExit (the process stand-in exits,
+// as a real daemon does; `agemu daemon stop` asks for it on Windows).
+func fakePingDaemonExit(t *testing.T, p daemon.Ping, onExit func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", daemon.SocketPath())
 	if err != nil {
@@ -264,6 +268,10 @@ func fakePingDaemon(t *testing.T, p daemon.Ping) {
 						return
 					}
 					res, _ := json.Marshal(p)
+					if req.Method == "exit" && onExit != nil {
+						onExit()
+						res = json.RawMessage(`{"ok":true}`)
+					}
 					resp, _ := json.Marshal(daemon.Response{ID: req.ID, Result: res})
 					if _, err := conn.Write(append(resp, '\n')); err != nil {
 						return
@@ -293,8 +301,8 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 		}
 		exited := make(chan struct{})
 		go func() { old.Wait(); close(exited) }()
-		fakePingDaemon(t, daemon.Ping{OK: true, PID: old.Process.Pid, Version: "v0.1.0", Exe: "/elsewhere/agemud",
-			Started: time.Now(), Preparing: preparing})
+		fakePingDaemonExit(t, daemon.Ping{OK: true, PID: old.Process.Pid, Version: "v0.1.0", Exe: "/elsewhere/agemud",
+			Started: time.Now(), Preparing: preparing}, func() { _ = old.Process.Kill() })
 
 		restartIfOutdated()
 		select {

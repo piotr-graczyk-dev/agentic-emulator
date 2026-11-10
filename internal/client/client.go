@@ -198,7 +198,7 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 			return Reply{}, err
 		}
 	}
-	if _, err := c.conn.Write(req); err != nil {
+	if _, err := c.write(req); err != nil {
 		if c.redial == nil {
 			// Not sent, and this client cannot reconnect: the caller may send it again on a new
 			// connection (the MCP server does, once).
@@ -211,7 +211,7 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 		if err := c.reconnect(); err != nil {
 			return Reply{}, err
 		}
-		if _, err := c.conn.Write(req); err != nil {
+		if _, err := c.write(req); err != nil {
 			c.broken = true
 			return Reply{}, err
 		}
@@ -232,6 +232,18 @@ func (c *Client) Do(method string, params any) (Reply, error) {
 		return Reply{Ms: resp.Ms}, &Error{Message: resp.Error, Code: resp.Code, Crash: resp.AppCrash}
 	}
 	return Reply{Result: resp.Result, Ms: resp.Ms, AppCrash: resp.AppCrash}, nil
+}
+
+// errPeerClosed is the write error for a connection the daemon has closed. On Unix the write
+// itself fails (EPIPE); a write to a Windows socket whose peer has gone succeeds, and the request
+// would be lost with only the reply's read failing, so the connection is checked first there.
+var errPeerClosed = errors.New("the daemon closed the connection")
+
+func (c *Client) write(req []byte) (int, error) {
+	if c.r.Buffered() == 0 && osproc.PeerClosed(c.conn) {
+		return 0, errPeerClosed
+	}
+	return c.conn.Write(req)
 }
 
 // SendError is a request that could not be written to the daemon (the connection is broken, e.g.

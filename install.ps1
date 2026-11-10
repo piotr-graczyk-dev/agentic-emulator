@@ -52,15 +52,18 @@ try {
 	# Windows cannot overwrite a program that runs (a running daemon, say), but it can rename it.
 	# Copy the new files next to their targets first, then rename each old one away and move the
 	# new one into place; leftovers from an earlier install are removed when nothing runs them.
+	# Each displaced file gets its own name: one from an earlier install may still run (an MCP
+	# session, or a daemon whose restart waits for a preparation).
 	foreach ($b in "agemu.exe", "agemud.exe") {
-		Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $bin "$b.old")
+		Get-ChildItem -Path $bin -Filter "$b.old-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 		Copy-Item -Force (Join-Path $tmp "$name\$b") (Join-Path $bin ".$b.new")
 	}
+	$stamp = [DateTime]::UtcNow.ToString("yyyyMMddHHmmssfff")
 	foreach ($b in "agemu.exe", "agemud.exe") {
 		$dst = Join-Path $bin $b
-		if (Test-Path $dst) { Move-Item -Force $dst "$dst.old" }
+		if (Test-Path $dst) { Move-Item -Force $dst "$dst.old-$stamp" }
 		Move-Item -Force (Join-Path $bin ".$b.new") $dst
-		Remove-Item -Force -ErrorAction SilentlyContinue "$dst.old"
+		Remove-Item -Force -ErrorAction SilentlyContinue "$dst.old-$stamp"
 	}
 	Write-Host "Installed agemu.exe and agemud.exe $version to $bin"
 	& (Join-Path $bin "agemu.exe") daemon restart --if-running
