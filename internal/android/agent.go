@@ -297,6 +297,9 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 				diag, derr := adbShell(ctx, a.serial, "ls -l "+agentDevicePath+" /data/local/tmp/agemu-agent.log; pidof agemu-agent; getprop sys.boot_completed")
 				msg += fmt.Sprintf("; start command: exit %d %q; device: %q %q %v", started.Exit,
 					strings.TrimSpace(started.Stdout+started.Stderr), strings.TrimSpace(diag.Stdout), strings.TrimSpace(diag.Stderr), derr)
+				// Run it in the foreground for a while to see what it says, and what the system logged.
+				fg, _ := adbShell(ctx, a.serial, fmt.Sprintf("%sCLASSPATH=%s timeout 20 app_process /system/bin --nice-name=agemu-agent agemu.Agent %s %d 2>&1 | tail -n 15; echo \"exit $?\"; logcat -d -t 2000 | grep -i -E 'agemu|app_process|AndroidRuntime|lowmemorykiller|lmkd|DEBUG' | tail -n 25", tcpArgs, agentDevicePath, agentSocket, agentGuestPort))
+				msg += fmt.Sprintf("; in the foreground: %q", strings.TrimSpace(fg.Stdout+fg.Stderr))
 			}
 			return true, errors.New(msg)
 		}
