@@ -85,6 +85,31 @@ static NSString *AGDeveloperDir(void)
   return @"/Applications/Xcode.app/Contents/Developer";
 }
 
+// SimulatorKit.framework candidates for a developer directory, in order: Xcode up to 26 has it in
+// Contents/Developer/Library/PrivateFrameworks, Xcode 27 moved it to Contents/SharedFrameworks.
+static NSArray<NSString *> *AGSimulatorKitCandidates(NSString *developerDir)
+{
+  NSString *shared = [[developerDir stringByDeletingLastPathComponent]
+    stringByAppendingPathComponent:@"SharedFrameworks/SimulatorKit.framework"];
+  return @[
+    [developerDir stringByAppendingPathComponent:@"Library/PrivateFrameworks/SimulatorKit.framework"],
+    shared,
+  ];
+}
+
+// The first SimulatorKit.framework that has its binary, or nil.
+static NSString *AGSimulatorKitPath(NSString *developerDir)
+{
+  for (NSString *framework in AGSimulatorKitCandidates(developerDir)) {
+    if ([NSFileManager.defaultManager fileExistsAtPath:[framework stringByAppendingPathComponent:@"SimulatorKit"]]) {
+      return framework;
+    }
+  }
+  return nil;
+}
+
+static NSString *gSimulatorKitPath;
+
 static void *AGOpen(NSString *path, NSError **error)
 {
   void *handle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
@@ -108,8 +133,14 @@ BOOL AGLoadFrameworks(NSError **error)
       loadError = err;
       return;
     }
-    NSString *simKit =
-      [gDeveloperDir stringByAppendingPathComponent:@"Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit"];
+    NSString *framework = AGSimulatorKitPath(gDeveloperDir);
+    if (!framework) {
+      loadError = AGError(@"SimulatorKit.framework not found in %@ (looked in %@)", gDeveloperDir,
+                          [AGSimulatorKitCandidates(gDeveloperDir) componentsJoinedByString:@" and "]);
+      return;
+    }
+    gSimulatorKitPath = framework;
+    NSString *simKit = [framework stringByAppendingPathComponent:@"SimulatorKit"];
     void *simKitHandle = AGOpen(simKit, &err);
     if (!simKitHandle) {
       loadError = err;
@@ -144,10 +175,9 @@ NSDictionary<NSString *, NSString *> *AGFrameworkVersions(void)
   if (simDevice) {
     out[@"coreSimulator"] = [NSBundle bundleForClass:simDevice].infoDictionary[@"CFBundleVersion"] ?: @"?";
   }
-  NSBundle *simKit = [NSBundle bundleWithPath:[gDeveloperDir
-                                                stringByAppendingPathComponent:
-                                                  @"Library/PrivateFrameworks/SimulatorKit.framework"]];
+  NSBundle *simKit = gSimulatorKitPath ? [NSBundle bundleWithPath:gSimulatorKitPath] : nil;
   out[@"simulatorKit"] = simKit.infoDictionary[@"CFBundleVersion"] ?: @"?";
+  out[@"simulatorKitPath"] = gSimulatorKitPath ?: @"";
   out[@"developerDir"] = gDeveloperDir ?: @"";
   return out;
 }

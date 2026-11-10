@@ -299,3 +299,28 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 		}
 	}
 }
+
+func TestFrameworksCheck(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, script string
+		status       checkStatus
+		detail       string
+	}{
+		{"loaded", `echo '{"ok":true,"versions":{"coreSimulator":"1155.4","simulatorKit":"1000.1","simulatorKitPath":"/X.app/Contents/SharedFrameworks/SimulatorKit.framework"}}'`,
+			statusOK, "CoreSimulator 1155.4, SimulatorKit 1000.1 (/X.app/Contents/SharedFrameworks/SimulatorKit.framework)"},
+		{"missing", `echo '{"ok":false,"error":"SimulatorKit.framework not found"}'; exit 1`,
+			statusFail, "SimulatorKit.framework not found"},
+		{"old helper", `cat > /dev/null`, statusWarn, "not checked: this agemu-ios-helper has no --check"},
+		{"crash", `echo 'dyld: boom' >&2; exit 134`, statusFail, "agemu-ios-helper --check failed: dyld: boom"},
+	} {
+		p := filepath.Join(dir, "helper-"+tc.name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		c := frameworksCheck(p)
+		if c.Status != tc.status || c.Detail != tc.detail {
+			t.Errorf("%s: got %s %q, want %s %q", tc.name, c.Status, c.Detail, tc.status, tc.detail)
+		}
+	}
+}

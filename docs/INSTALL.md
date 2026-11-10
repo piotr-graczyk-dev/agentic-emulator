@@ -32,6 +32,7 @@ iOS  ready
   ✓ Xcode                  Xcode 26.6 (/Applications/Xcode.app/Contents/Developer)
   ✓ iOS Simulator runtime  iOS 26.5
   ✓ agemu-ios-helper       ~/.local/bin/agemu-ios-helper
+  ✓ private frameworks     CoreSimulator 1051.55, SimulatorKit 955.7 (/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework)
 
 Android  not ready
   ✓ Android SDK            ~/Library/Android/sdk
