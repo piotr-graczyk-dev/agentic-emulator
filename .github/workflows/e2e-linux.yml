@@ -48,6 +48,7 @@ jobs:
           ls -l /dev/kvm
       - name: install the emulator and the x86_64 system image
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libpulse0 > /dev/null   # qemu links it even with -no-audio
           sm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$sm" --licenses > /dev/null || true
           "$sm" --install emulator platform-tools "platforms;android-36" "$IMAGE" > /dev/null

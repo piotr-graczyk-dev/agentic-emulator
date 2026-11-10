@@ -38,13 +38,46 @@ func envInt(name string, def int) int {
 	return def
 }
 
+// avdHome is the directory the AVDs are in, found the way the SDK's tools find it:
+// $ANDROID_AVD_HOME, else avd/ under $ANDROID_USER_HOME, $ANDROID_EMULATOR_HOME or
+// $ANDROID_SDK_HOME/.android, else ~/.android/avd, except on Linux when only the XDG location
+// ($XDG_CONFIG_HOME/.android/avd, default ~/.config/.android/avd) exists. agemu passes it to
+// avdmanager and the emulator as ANDROID_AVD_HOME (avdEnv), so the three never disagree.
 func avdHome() string {
-	if v := os.Getenv("ANDROID_AVD_HOME"); v != "" {
+	home, _ := os.UserHomeDir()
+	return avdHomeFor(runtime.GOOS, home, os.Getenv, isDir)
+}
+
+func avdHomeFor(goos, home string, getenv func(string) string, isDir func(string) bool) string {
+	if v := getenv("ANDROID_AVD_HOME"); v != "" {
 		return v
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".android", "avd")
+	for _, k := range []string{"ANDROID_USER_HOME", "ANDROID_EMULATOR_HOME"} {
+		if v := getenv(k); v != "" {
+			return filepath.Join(v, "avd")
+		}
+	}
+	if v := getenv("ANDROID_SDK_HOME"); v != "" {
+		return filepath.Join(v, ".android", "avd")
+	}
+	classic := filepath.Join(home, ".android", "avd")
+	if goos == "linux" && !isDir(classic) {
+		cfg := getenv("XDG_CONFIG_HOME")
+		if cfg == "" {
+			cfg = filepath.Join(home, ".config")
+		}
+		if xdg := filepath.Join(cfg, ".android", "avd"); isDir(xdg) {
+			return xdg
+		}
+	}
+	return classic
 }
+
+// avdEnv is env with ANDROID_AVD_HOME set to avdHome, for avdmanager and the emulator. exec uses
+// the last value of a duplicate key.
+func avdEnv(env []string) []string { return append(env, "ANDROID_AVD_HOME="+avdHome()) }
+
+func isDir(p string) bool { st, err := os.Stat(p); return err == nil && st.IsDir() }
 
 // discoveryDirs are where the emulator writes pid_<pid>.ini for every running instance
 // ($ANDROID_EMULATOR_DISCOVERY_DIR overrides them). The emulator picks one from the OS and its
@@ -217,7 +250,7 @@ func createAVD(ctx context.Context, name string, prof api.Profile) (avdInfo, err
 	}
 	cmd := exec.CommandContext(ctx, toolchain.AVDManager(), "create", "avd", "-n", name, "-k", img)
 	cmd.Stdin = strings.NewReader("no\n") // "Do you wish to create a custom hardware profile?"
-	cmd.Env = toolchain.JavaEnv()         // avdmanager is a Java tool; Android Studio's runtime will do
+	cmd.Env = avdEnv(toolchain.JavaEnv()) // avdmanager is a Java tool; Android Studio's runtime will do
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return avdInfo{}, fmt.Errorf("avdmanager create avd: %v: %s", err, lastLines(string(out), 5))
 	}

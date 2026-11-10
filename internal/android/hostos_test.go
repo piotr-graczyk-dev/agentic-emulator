@@ -77,3 +77,31 @@ func TestDefaultSHM(t *testing.T) {
 		}
 	}
 }
+
+// The SDK's tools look for AVDs in several places; agemu must look where avdmanager writes them
+// (a fresh Linux machine without ~/.android gets the XDG location).
+func TestAVDHomeLikeTheSDK(t *testing.T) {
+	j := filepath.Join
+	none := func(string) bool { return false }
+	xdgOnly := func(p string) bool { return p == j("/home/a", ".config", ".android", "avd") }
+	for _, c := range []struct {
+		name, goos string
+		env        map[string]string
+		isDir      func(string) bool
+		want       string
+	}{
+		{"ANDROID_AVD_HOME", "linux", map[string]string{"ANDROID_AVD_HOME": "/x", "ANDROID_USER_HOME": "/u"}, none, "/x"},
+		{"ANDROID_USER_HOME", "darwin", map[string]string{"ANDROID_USER_HOME": "/u"}, none, j("/u", "avd")},
+		{"ANDROID_EMULATOR_HOME", "linux", map[string]string{"ANDROID_EMULATOR_HOME": "/e"}, none, j("/e", "avd")},
+		{"ANDROID_SDK_HOME", "linux", map[string]string{"ANDROID_SDK_HOME": "/s"}, none, j("/s", ".android", "avd")},
+		{"macOS default", "darwin", nil, none, j("/home/a", ".android", "avd")},
+		{"Linux, nothing yet", "linux", nil, none, j("/home/a", ".android", "avd")},
+		{"Linux, XDG only", "linux", nil, xdgOnly, j("/home/a", ".config", ".android", "avd")},
+		{"Linux, XDG_CONFIG_HOME", "linux", map[string]string{"XDG_CONFIG_HOME": "/c"}, func(p string) bool { return p == j("/c", ".android", "avd") }, j("/c", ".android", "avd")},
+		{"Linux, both", "linux", nil, func(string) bool { return true }, j("/home/a", ".android", "avd")},
+	} {
+		if got := avdHomeFor(c.goos, "/home/a", envMap(c.env), c.isDir); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}

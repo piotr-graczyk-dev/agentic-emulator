@@ -320,6 +320,9 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 }
 
 func TestFrameworksCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake helpers are shell scripts; the iOS checks run on macOS only")
+	}
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		name, script string

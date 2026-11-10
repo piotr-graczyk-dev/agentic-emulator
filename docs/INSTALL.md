@@ -115,7 +115,9 @@ CLI, MCP server and daemon, built for that OS. The iOS Simulator exists only on 
 | Java 17+ | `$JAVA_HOME`, `java` on `PATH`, or `/opt/android-studio/jbr` | `%JAVA_HOME%`, `java` on `PATH`, or Android Studio's `jbr` |
 
 `agemu doctor` asks the emulator whether its hypervisor works (`emulator -accel-check`) and prints
-the fix when it does not. On a Linux host without a display (a server, CI) agemu starts the
+the fix when it does not. On a minimal Linux install the emulator may also need PulseAudio's
+client library even without audio (`sudo apt install libpulse0`); a boot that fails says so in
+`~/.agemu/android/<device>.log`. On a Linux host without a display (a server, CI) agemu starts the
 emulator with software rendering (`-gpu auto`); with a display, and on Windows, with the host GPU.
 `AGEMU_ANDROID_GPU` overrides both.
 

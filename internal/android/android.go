@@ -935,7 +935,7 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 	args := emulatorArgs(d.name, p, a, loadBaseline, wipe)
 	cmd := exec.Command(toolchain.Emulator(), args...)
 	cmd.Stdout, cmd.Stderr = lf, lf
-	cmd.Env = emulatorEnv(os.Environ())
+	cmd.Env = avdEnv(emulatorEnv(os.Environ()))
 	// A boot cancelled before this point (a shutdown right after boot) starts nothing.
 	if err := ctx.Err(); err != nil {
 		return err
