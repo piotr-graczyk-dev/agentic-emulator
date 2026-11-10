@@ -275,7 +275,8 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 		tcpArgs = fmt.Sprintf("AGEMU_TOKEN=%s ", a.token)
 	}
 	start := fmt.Sprintf("for p in $(pidof agemu-agent); do kill $p; done; %sCLASSPATH=%s nohup app_process /system/bin --nice-name=agemu-agent agemu.Agent %s %d >/data/local/tmp/agemu-agent.log 2>&1 &", tcpArgs, agentDevicePath, agentSocket, agentGuestPort)
-	if _, err := adbShell(ctx, a.serial, start); err != nil {
+	started, err := adbShell(ctx, a.serial, start)
+	if err != nil {
 		return true, fmt.Errorf("starting agent: %w", err)
 	}
 	deadline := time.Now().Add(slowHost(60 * time.Second)) // app_process + UiAutomation connect can be slow on a loaded host
@@ -291,7 +292,13 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 			if err == nil {
 				err = fmt.Errorf("version %s", p.Version)
 			}
-			return true, fmt.Errorf("agent did not start: %v; log: %s", err, lastLines(log.Stdout, 8))
+			msg := fmt.Sprintf("agent did not start: %v; log: %s", err, lastLines(log.Stdout, 8))
+			if strings.TrimSpace(log.Stdout) == "" { // it never ran: say what the device shows
+				diag, derr := adbShell(ctx, a.serial, "ls -l "+agentDevicePath+" /data/local/tmp/agemu-agent.log; pidof agemu-agent; getprop sys.boot_completed")
+				msg += fmt.Sprintf("; start command: exit %d %q; device: %q %q %v", started.Exit,
+					strings.TrimSpace(started.Stdout+started.Stderr), strings.TrimSpace(diag.Stdout), strings.TrimSpace(diag.Stderr), derr)
+			}
+			return true, errors.New(msg)
 		}
 		select {
 		case <-ctx.Done():

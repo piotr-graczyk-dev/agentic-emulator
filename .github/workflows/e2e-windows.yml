@@ -87,6 +87,11 @@ jobs:
       - name: logs
         if: failure()
         run: |
+          adb="$ANDROID_HOME/platform-tools/adb.exe"
+          "$adb" version || true
+          "$adb" devices -l || true
+          tasklist | grep -i -E 'adb|qemu|emulator' || true
+          "$adb" -s emulator-5580 shell 'ls -l /data/local/tmp; cat /data/local/tmp/agemu-agent.log; logcat -d -t 300 | grep -i -E "agemu|AndroidRuntime|app_process" | tail -n 40' || true
           tail -n 200 "$RUNNER_TEMP/agemu-e2e/daemon.log" || true
           tail -n 100 "$RUNNER_TEMP"/agemu-e2e/android/*.log || true
       - uses: actions/upload-artifact@v4
