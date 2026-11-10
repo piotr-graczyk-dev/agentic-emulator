@@ -1,17 +1,20 @@
 # Install
 
-The full setup: what each install method does, what a Mac needs, other MCP clients, updates and
-troubleshooting. The short version is in the [README](../README.md#install).
+The full setup: what each install method does, what a Mac, a Linux or a Windows computer needs,
+other MCP clients, updates and troubleshooting. The short version is in the
+[README](../README.md#install). iOS needs a Mac; Android runs on all three
+([Linux and Windows](#linux-and-windows)).
 
 ```sh
 claude mcp add agemu -- npx -y agentic-emulator@latest mcp
 ```
 
 That is the whole install for Claude Code. `npx` fetches the
-[`agentic-emulator`](https://www.npmjs.com/package/agentic-emulator) package on first use: three
-native binaries, 13 MB, no Node code and no install script. With `@latest` each new session
-runs the newest release, and a session that starts a newer release restarts the shared daemon on it (devices keep
-running). Then check this Mac:
+[`agentic-emulator`](https://www.npmjs.com/package/agentic-emulator) package on first use: the
+native binaries for macOS, Linux and Windows (32 MB) and a small Node launcher that runs the ones
+for this computer; there is no install script. With `@latest` each new session runs the newest
+release, and a session that starts a newer release restarts the shared daemon on it (devices keep
+running). Then check this computer:
 
 ```sh
 npx -y agentic-emulator doctor
@@ -69,13 +72,16 @@ agemu screenshot -o shot.png
 
 Every command prints JSON, and `agemu help` lists them. Through `npx`, a command is
 `npx -y agentic-emulator <command>`, which adds Node's start-up to each call; an agent that runs
-one command per action should use the installed `agemu`.
+one command per action should use the installed `agemu`. The npm-installed `agemu` also starts
+through the Node launcher, about 40 ms per command; `install.sh` (and `install.ps1`) put the
+binaries themselves on `PATH`. An MCP session starts the launcher once, so it costs nothing per
+call there.
 
 ## What it needs
 
 | | Needed for | Get it |
 |---|---|---|
-| Apple Silicon Mac | everything | |
+| Apple Silicon Mac, or Linux / Windows for Android ([below](#linux-and-windows)) | everything | |
 | Xcode with an iOS Simulator runtime | iOS | the App Store, open it once, then `xcodebuild -downloadPlatform iOS` (iOS 26.5: 16 GB on disk) |
 | Android SDK: emulator, platform-tools, command-line tools | Android | Android Studio, or `brew install --cask android-commandlinetools` |
 | the arm64 system image `system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a` | Android | `sdkmanager --install '<image>'` (8.2 GB on disk); another image: `AGEMU_ANDROID_IMAGE` |
@@ -93,6 +99,40 @@ brew install --cask android-commandlinetools temurin
 yes | sdkmanager --licenses > /dev/null
 sdkmanager --install emulator platform-tools 'system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a'
 ```
+
+## Linux and Windows
+
+agemu drives the Android emulator on Linux (x86-64 or arm64) and Windows (x86-64) too: the same
+CLI, MCP server and daemon, built for that OS. The iOS Simulator exists only on macOS, so there
+`agemu doctor` checks Android alone.
+
+| | Linux | Windows |
+|---|---|---|
+| Install `agemu` | `npm install -g agentic-emulator`, or `curl -fsSL https://raw.githubusercontent.com/piotr-graczyk-dev/agentic-emulator/main/install.sh \| sh` | `npm install -g agentic-emulator`, or in PowerShell `irm https://raw.githubusercontent.com/piotr-graczyk-dev/agentic-emulator/main/install.ps1 \| iex` (into `%LOCALAPPDATA%\Programs\agemu\bin`, added to `PATH`) |
+| Hypervisor | KVM: `/dev/kvm` must be yours to open (`sudo usermod -aG kvm $USER`, then log in again) | WHPX: turn on Windows Hypervisor Platform (`Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`), or install the Android Emulator Hypervisor Driver |
+| Android SDK found at | `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`, `~/Android/Sdk` (Android Studio) | `%ANDROID_HOME%`, `%ANDROID_SDK_ROOT%`, `%LOCALAPPDATA%\Android\Sdk` (Android Studio) |
+| System image | `system-images;android-37.1;google_apis_playstore_ps16k;x86_64` on x86-64, the `arm64-v8a` one on arm64 | `system-images;android-37.1;google_apis_playstore_ps16k;x86_64` |
+| Java 17+ | `$JAVA_HOME`, `java` on `PATH`, or `/opt/android-studio/jbr` | `%JAVA_HOME%`, `java` on `PATH`, or Android Studio's `jbr` |
+
+`agemu doctor` asks the emulator whether its hypervisor works (`emulator -accel-check`) and prints
+the fix when it does not. On a Linux host without a display (a server, CI) agemu starts the
+emulator with software rendering (`-gpu auto`); with a display, and on Windows, with the host GPU.
+`AGEMU_ANDROID_GPU` overrides both.
+
+What is different from the Mac:
+
+- **Windows is new and less tested.** CI runs the unit tests, the daemon and both installers on
+  Windows, but GitHub's Windows runners have no hypervisor, so the emulator itself has not run
+  under agemu on Windows in CI. Linux runs the full Android end-to-end test on a KVM emulator in
+  CI (`.github/workflows/e2e-linux.yml`). Reports from Windows are welcome.
+- **Screenshots on Windows travel in the gRPC reply** instead of a shared file mapping, until the
+  emulator's mapping is verified there: tens of milliseconds instead of a few.
+  `AGEMU_ANDROID_SHM=1` turns the mapping on.
+- **Updating with `npm install -g` on Windows:** run `agemu daemon stop` first; Windows cannot
+  replace `agemud.exe` while it runs. `install.ps1` handles that by itself, and `npx` runs each
+  release from its own folder.
+- **The timings in the README and docs/ANDROID.md were measured on an Apple Silicon Mac.** The
+  x86_64 image under KVM or WHPX has its own; `agemu-bench` does not build on Windows yet.
 
 ## Connect an agent
 
@@ -114,7 +154,8 @@ prints.
 |---|---|---|
 | `npx` | nothing to do: each session runs the latest release | `claude mcp remove agemu` |
 | `npm install -g` | `npm install -g agentic-emulator@latest`, then `agemu daemon restart` | `agemu daemon stop && npm uninstall -g agentic-emulator` |
-| `install.sh` | run it again | `agemu daemon stop && rm ~/.local/bin/{agemu,agemud,agemu-ios-helper}` |
+| `install.sh` | run it again | `agemu daemon stop && rm ~/.local/bin/{agemu,agemud,agemu-ios-helper}` (no helper on Linux) |
+| `install.ps1` | run it again | `agemu daemon stop`, then delete `%LOCALAPPDATA%\Programs\agemu` and remove its `bin` from your user `PATH` |
 | source | `git pull && make install` | `make uninstall` |
 
 `install.sh` and `make install` restart a running daemon on the new build; after an npm update,
@@ -128,7 +169,10 @@ and the state in `~/.agemu`.
 
 ## From source
 
-Building needs Go (the version in `go.mod`) and Swift (Xcode or `xcode-select --install`):
+Building needs Go (the version in `go.mod`) and, on a Mac, Swift (Xcode or `xcode-select
+--install`) for the iOS helper. On Linux `make install` builds and installs `agemu` and `agemud`
+alone; on Windows build them with Go (`go build -o bin\agemu.exe .\cmd\agemu` and the same for
+`agemud`) and keep the two side by side:
 
 ```sh
 git clone https://github.com/piotr-graczyk-dev/agentic-emulator.git
@@ -153,6 +197,7 @@ on-device Android agent's jar is committed; rebuilding it needs a JDK and the An
   environment. Set them in the MCP config's `env`, or run `agemu daemon restart` from your shell.
 - **`agemu create --platform android` fails.** The error carries `avdmanager`'s last lines; a
   missing image or Java shows up in `agemu doctor` first.
-- **The daemon log:** `~/.agemu/daemon.log`; `agemu daemon status` prints its path and the pid.
+- **The daemon log:** `~/.agemu/daemon.log` (`%USERPROFILE%\.agemu\daemon.log` on Windows);
+  `agemu daemon status` prints its path and the pid.
 - **Still stuck:** [open an issue](https://github.com/piotr-graczyk-dev/agentic-emulator/issues/new/choose)
   with `agemu doctor --json`.

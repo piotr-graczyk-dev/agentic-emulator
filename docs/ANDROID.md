@@ -6,6 +6,16 @@ Hypervisor.framework) and the **stock** SDK system image
 is replaced or patched. agemu only replaces the control plane, which is where the standard
 tools spend their time.
 
+The same backend runs on Linux (KVM) and Windows (WHPX or AEHD) with the image built for the
+host's CPU (`...;x86_64` on x86-64). The design below, and every measurement and caveat in this
+document, comes from Apple Silicon Macs (HVF, 16 KB-page arm64 image); some caveats are this
+emulator's behaviour under HVF and may differ under KVM or WHPX. The per-OS differences agemu
+knows of: the emulator's discovery directory (`~/Library/Caches/TemporaryItems/avd/running` on
+macOS, `$XDG_RUNTIME_DIR/avd/running` or `/tmp/android-$USER/avd/running` on Linux,
+`%LOCALAPPDATA%\Temp\avd\running` on Windows), `-gpu auto` on a Linux host without a display,
+and screenshots from the gRPC reply on Windows until the MMAP transport is verified there
+(`AGEMU_ANDROID_SHM=1` turns it on). See [INSTALL.md](INSTALL.md#linux-and-windows).
+
 ```
 agemu daemon (Go, internal/android)
  ├─ emulator gRPC (EmulatorController, SnapshotService)   touch, snapshots, VM state
@@ -43,14 +53,14 @@ Environment variables (read by the daemon):
 | Variable | Default | Meaning |
 |---|---|---|
 | `AGEMU_ANDROID_AVDS` | `agemu-` | Comma-separated AVD name prefixes agemu manages (`*` = all). |
-| `AGEMU_ANDROID_GPU` | `host` | Emulator `-gpu` mode. `auto` picks software rendering (SwiftShader) without a window; see "Host GPU and lean devices". |
+| `AGEMU_ANDROID_GPU` | `host` (`auto` on Linux without a display) | Emulator `-gpu` mode. `auto` picks software rendering (SwiftShader) without a window; see "Host GPU and lean devices". |
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: leave on the Google apps a lean baseline turns off (applies when a baseline is taken). |
 | `AGEMU_ANDROID_ANIMATIONS` | `1` | `0`: set the window, transition and animator scales to 0 after every boot and reset (screen changes finish at once). |
 | `AGEMU_ANDROID_RAM_MB` | `2048` | Guest RAM for new AVDs. Below 4096 the emulator needs `-lowram`. Less RAM saves host memory but changes what apps get; see "Guest RAM, vCPUs and display size" for the measured trade-off. |
 | `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`), 1 to 8 (the emulator boots no more; `create` refuses other values). `2` cut device CPU-seconds per flow by 11-19% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
-| `AGEMU_ANDROID_SHM` | `1` | `0`: frames travel in the gRPC reply instead of a shared mmap. |
+| `AGEMU_ANDROID_SHM` | `1` (`0` on Windows) | `0`: frames travel in the gRPC reply instead of a shared mmap. |
 | `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline steps (stylus, lean apps, keyboard). |
 | `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Before saving the baseline, wait until the guest has been up this long and has been quiet for a minute (CPU and network), so work it still had pending does not run again after every reset; see Quiet baseline. `0`: save right after the baseline steps (agemu before 2026-11-08). Applies when a baseline is taken. |
 | `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not repair an AVD whose first boot was interrupted before it ever completed (agemu otherwise boots it once with `-wipe-data`; see Quiet baseline). |

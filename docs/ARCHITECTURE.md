@@ -1,17 +1,19 @@
 # Architecture
 
 agemu is an agent-first runtime for Android emulators and iOS Simulators on
-Apple Silicon macOS. It has no UI for humans. Agents drive devices through a
-CLI or an MCP server.
+Apple Silicon macOS, and for Android emulators on Linux and Windows. It has no
+UI for humans. Agents drive devices through a CLI or an MCP server.
 
 ## What is new and what is reused
 
 The guest operating systems are the stock ones, because only the real OS
 gives real behaviour:
 
-- **Android:** the AOSP arm64 system image from the Android SDK. It runs in
-  the SDK's QEMU with Apple Hypervisor.framework (HVF) acceleration, so app
-  code runs at near-native CPU speed.
+- **Android:** the AOSP system image from the Android SDK, built for the host's
+  CPU (arm64 on Apple Silicon and arm64 Linux, x86_64 on x86-64 Linux and
+  Windows). It runs in the SDK's QEMU with the host's hypervisor
+  (Hypervisor.framework on macOS, KVM on Linux, WHPX or AEHD on Windows), so
+  app code runs at near-native CPU speed.
 - **iOS:** the iOS Simulator runtime from Xcode, through CoreSimulator. App
   code runs natively on the host CPU.
 
@@ -29,7 +31,7 @@ standard tooling is slow:
 
 ```
 agents ──► agemu CLI ─┐            (one short-lived process per command)
-agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.sock
+agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.sock (also on Windows 10+)
                       ▼
                agemud daemon (Go) ── device registry, selectors, waits, per-device locks
                ├── android backend (internal/android)
@@ -43,6 +45,14 @@ agents ──► agemu mcp ─┤  JSON lines over unix socket ~/.agemu/agemu.so
                      └── log capture: one `simctl spawn log stream` per simulator, kqueue on
                            launched apps, the Mac's .ips crash reports
 ```
+
+The iOS backend is compiled into darwin builds only. What differs between the
+host OSes in the daemon, the CLI and the Android backend is in
+`internal/osproc` (detached processes, process liveness and tree kill, the
+daemon's lock, the frame mapping) and `internal/toolchain` (SDK, Java and tool
+paths, the default system image). On Windows, which has no SIGTERM for a
+detached process, `agemu daemon stop` asks the daemon to exit over its socket
+(the `exit` method).
 
 `logs`, `crashes` and the crash notice run without the device lock: they read what the capture
 holds in memory (docs/CAPABILITIES.md, "Logs and crashes").

@@ -10,9 +10,11 @@ security problem goes to [SECURITY.md](SECURITY.md) instead.
 
 ## Building
 
-You need an Apple Silicon Mac, Go (the version in `go.mod`), Xcode or the Command Line Tools
-for the Swift helper, and for each platform you work on its SDK: Xcode with an iOS Simulator
-runtime, or the Android SDK (`agemu doctor` lists what is missing).
+You need Go (the version in `go.mod`) and, for each platform you work on, its SDK: on an Apple
+Silicon Mac, Xcode or the Command Line Tools for the Swift helper and Xcode with an iOS
+Simulator runtime for iOS; the Android SDK for Android, which you can also work on from Linux or
+Windows (`agemu doctor` lists what is missing). OS-specific calls go in `internal/osproc` (with a
+`_unix.go` and a `_windows.go` side) or `internal/toolchain`, so the rest stays portable.
 
 ```sh
 make build     # bin/agemu, bin/agemud, bin/agemu-ios-helper, bin/agemu-bench
@@ -42,7 +44,8 @@ The scripts only create and boot `agemu-*` devices, but they reset them: the iOS
 ## Pull requests
 
 - One change per pull request, with a description of what it fixes and how you checked it.
-- `gofmt`, `go vet ./...` and `go test ./...` must pass; CI runs them on macOS.
+- `gofmt`, `go vet ./...` and `go test ./...` must pass; CI runs them on macOS, Linux and
+  Windows, and the Android end-to-end test on a Linux KVM emulator.
 - Keep the conventions in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): device ids with a
   platform prefix, coordinates in screenshot pixels, calls that never hang silently, and
   "not implemented" (exit status 3) instead of a faked capability.
