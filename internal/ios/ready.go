@@ -80,8 +80,9 @@ func (b *Backend) freshElement(udid string, el *api.Element) bool {
 	return s == nil || s.before == nil || !s.before[elementKey(el)]
 }
 
-// TapElement taps the centre of el, a match of a selector. An element that is new since the last
-// input is tapped once it is ready (see above). atRest means the daemon saw the screen keep
+// TapElement taps el, a match of a selector, at its TapPoint (see api.Element.TapPoint). An
+// element that is new since the last input is tapped once it is ready (see above). atRest
+// means the daemon saw the screen keep
 // changing and the element's frame repeat: the screen-wide wait for no big change is skipped,
 // as in TapNow.
 func (b *Backend) TapElement(ctx context.Context, id string, el *api.Element, atRest bool) error {
@@ -89,12 +90,12 @@ func (b *Backend) TapElement(ctx context.Context, id string, el *api.Element, at
 	if err != nil {
 		return err
 	}
-	x, y := el.Frame.Center()
+	x, y := el.TapPoint()
 	if x < 0 || y < 0 || (d.Width > 0 && (x >= d.Width || y >= d.Height)) {
 		return fmt.Errorf("tap (%d,%d) is outside the %dx%d screen", x, y, d.Width, d.Height)
 	}
 	fresh := b.freshElement(d.UDID, el)
-	params := elementTapParams(d.UDID, el, atRest, fresh)
+	params := elementTapParams(d.UDID, el, x, y, atRest, fresh)
 	b.noteInput(d.UDID)
 	var r struct {
 		ReadyMs      float64 `json:"readyMs"`
@@ -115,10 +116,9 @@ func (b *Backend) TapElement(ctx context.Context, id string, el *api.Element, at
 	return nil
 }
 
-// elementTapParams is the helper's tap request for el: its centre; "ready" with its frame when
-// it is fresh; no screen-wide settle when it is at rest on a screen that keeps changing.
-func elementTapParams(udid string, el *api.Element, atRest, fresh bool) map[string]any {
-	x, y := el.Frame.Center()
+// elementTapParams is the helper's tap request for el at x,y: "ready" with its frame when it is
+// fresh; no screen-wide settle when it is at rest on a screen that keeps changing.
+func elementTapParams(udid string, el *api.Element, x, y int, atRest, fresh bool) map[string]any {
 	params := map[string]any{"udid": udid, "x": x, "y": y}
 	if atRest {
 		params["settleMaxMs"] = 0

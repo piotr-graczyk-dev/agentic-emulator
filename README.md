@@ -78,7 +78,8 @@ method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/A
   result and returns the new screen. Fewer calls means fewer agent turns.
 - **Taps that land.** A tap by selector waits until the element can take the touch: after a screen
   transition, or when an alert or sheet has just appeared. A flow doesn't fail because a tap came
-  too early.
+  too early. `--contains` prefers an element whose whole text is the given text, and a switch is
+  tapped on the switch, not in the middle of its row.
 - **Crash notice.** When the app dies, the next call says so instead of waiting for a timeout.
 - **Logs and crash reports from memory**, filtered to your app and to what happened since launch.
 - **Test capabilities.** Deep links, permissions, location, clipboard, dark mode, push (iOS),
@@ -195,6 +196,7 @@ shell. Devices keep running across a restart.
 | `AGEMU_ANDROID_ANIMATIONS` | normal | `0`: system animations off. |
 | `AGEMU_IOS_ANIMATIONS` | normal | `0`: UIKit and SwiftUI animations ×0.05 (or a factor from 0.05 to 1). |
 | `AGEMU_ANDROID_TAP_WAIT` | `1` | `0`: taps by selector do not wait for transitions or motion. |
+| `AGEMU_IOS_TAP_HOLD_MS` | `100` | How long an iOS tap holds the touch down (a SwiftUI Toggle ignores a touch that ends as it begins). |
 | `AGEMU_IOS_TAP_SETTLE` | on | `0`: taps and typing do not wait for a still screen, nor taps for a just-presented element. |
 | `AGEMU_ANDROID_LOGS`, `AGEMU_IOS_LOG_CAPTURE` | on | `0`: no log capture; `logs` says so (iOS still watches launched apps' exits and `.ips` reports). |
 | `AGEMU_IOS_MAX_BOOTED` | 2, or 1 while memory is short | agemu simulators booted at once; a boot or iOS profile switch beyond it shuts down the least recently used one. |

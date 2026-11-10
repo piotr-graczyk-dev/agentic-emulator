@@ -52,6 +52,24 @@ func TestFind(t *testing.T) {
 	}
 }
 
+// TestFindContainsExactFirst: the consent dialog of an Expo app, where a paragraph above the
+// link ends in "... our Privacy Policy.". The link must come first.
+func TestFindContainsExactFirst(t *testing.T) {
+	tr := &api.UITree{Width: 1206, Height: 2622, Root: &api.Element{Ref: "e1", Role: "application", Frame: api.Rect{W: 1206, H: 2622}, Children: []*api.Element{
+		{Ref: "e4", Role: "text", Text: "More information is in our Privacy Policy.", Frame: api.Rect{X: 150, Y: 1052, W: 906, H: 458}},
+		{Ref: "e5", Role: "other", Label: "Privacy policy", Frame: api.Rect{X: 150, Y: 1558, W: 906, H: 49}},
+		{Ref: "e6", Role: "other", Label: "Privacy policy settings", Frame: api.Rect{X: 150, Y: 1650, W: 906, H: 49}},
+	}}}
+	got := Find(tr, api.Selector{Contains: "privacy policy"})
+	var refs []string
+	for _, e := range got {
+		refs = append(refs, e.Ref)
+	}
+	if want := "e5 e4 e6"; strings.Join(refs, " ") != want {
+		t.Fatalf("matches %v, want %s (whole-label match first, then document order)", refs, want)
+	}
+}
+
 func TestCenter(t *testing.T) {
 	x, y := api.Rect{X: 10, Y: 20, W: 30, H: 10}.Center()
 	if x != 25 || y != 25 {

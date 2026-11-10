@@ -1,0 +1,14 @@
+INFO         | Android emulator version 37.1.11.0 (build_id 15917651) (CL:N/A)
+INFO         | Graphics backend: gfxstream
+INFO         | Found systemPath /Users/dev/Library/Android/sdk/system-images/android-37.1/google_apis_playstore_ps16k/arm64-v8a/
+[51562:3360111:20261110,234605.157258:ERROR bootstrap.cc:65] bootstrap_check_in org.chromium.crashpad.child_port_handshake.51562.3360111.HLFRSVGZDYJSRSRS: Permission denied (1100)
+[51562:3360111:20261110,234605.157450:FATAL child_port_handshake.cc:118] Check failed: server_port.is_valid(). 
+[51553:3360097:20261110,234605.157867:ERROR file_io.cc:103] ReadExactly: expected 4, observed 0
+INFO         | Guest usage of host flag 'VulkanVirtualQueue' will be ignored.
+INFO         | Increasing RAM size to 4096MB
+INFO         | Guest GLES Driver: Auto (ext controls)
+WARNING      | Your GPU drivers may have a bug. Switching to software rendering.
+INFO         | emuglConfig_init: vulkan_mode_selected:lavapipe gles_mode_selected:swangle
+INFO         | Checking system compatibility:
+INFO         |   Checking: hasSufficientDiskSpace
+INFO         |      Ok: Disk space requirements to run avd: `agemu-sbx-test-1472` are met

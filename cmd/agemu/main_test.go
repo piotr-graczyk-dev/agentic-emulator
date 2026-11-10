@@ -139,7 +139,6 @@ func TestLogsAndCrashesCommands(t *testing.T) {
 		{[]string{"logs", "--since", "c1730970000123456", "--json"}, "logs", `{"since":"c1730970000123456"}`},
 		{[]string{"crashes"}, "crashes", `{}`},
 		{[]string{"crashes", "com.app", "--since", "5m", "--limit", "3"}, "crashes", `{"app":"com.app","since":"5m","limit":3}`},
-		{[]string{"crashes", "--app", "com.app", "--level", "error"}, "crashes", `{"app":"com.app"}`}, // logs-only flags are not sent
 	}
 	for _, c := range cases {
 		method, p, err := req(t, "", c.args...)
@@ -160,9 +159,98 @@ func TestLogsAndCrashesCommands(t *testing.T) {
 		{[]string{"logs", "--limit", "many"}, `--limit must be a whole number, got "many"`},
 		{[]string{"logs", "--max-bytes", "1.5"}, "--max-bytes must be a whole number"},
 		{[]string{"crashes", "--limit", "x"}, "--limit must be a whole number"},
+		{[]string{"crashes", "--app", "com.app", "--level", "error"}, "crashes does not take --level"}, // a logs-only flag
 	} {
 		if _, _, err := req(t, "", c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%v: err = %v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
+// A flag the command does not take is a usage error (exit 2) before the daemon is asked: parse
+// takes every --name, and `wait --contains X --wait-gone` used to wait for X to appear.
+func TestFlagsTheCommandDoesNotTake(t *testing.T) {
+	cases := []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"wait", "--contains", "X", "--wait-gone"}, []string{"wait does not take --wait-gone (did you mean --gone?)", "--gone", "--timeout-ms"}},
+		{[]string{"wait", "--wait-contains", "X", "--gone"}, []string{"wait does not take --wait-contains (did you mean --contains?)"}},
+		{[]string{"wait", "--id", "a", "--wait-timeout-ms", "500"}, []string{"did you mean --timeout-ms?"}},
+		{[]string{"find", "--text", "X", "--wait-text", "Y"}, []string{"find does not take --wait-text (did you mean --text?)"}},
+		{[]string{"find", "--text", "X", "--gone"}, []string{"find does not take --gone; it takes -d/--device --json --text"}},
+		{[]string{"tap", "--text", "X", "--wait-text", "Y", "--gone"}, []string{"tap does not take --gone (did you mean --wait-gone?)"}},
+		{[]string{"tap", "--text", "X", "--wait-id", "Y", "--timeout-ms", "9"}, []string{"did you mean --wait-timeout-ms?"}},
+		{[]string{"tap", "--txt", "X"}, []string{"tap does not take --txt;", "--wait-gone --wait-timeout-ms --ui"}},
+		{[]string{"tap", "--text", "X", "-o", "out.png"}, []string{"tap does not take -o;"}},
+		{[]string{"screenshot", "--out=shot.png"}, []string{"screenshot does not take --out;", "-o/--output"}},
+		{[]string{"reset", "--cold"}, []string{"reset does not take --cold"}},
+		{[]string{"devices", "--platform", "ios"}, []string{"devices does not take --platform; it takes -d/--device --json ("}},
+	}
+	for _, c := range cases {
+		_, _, err := req(t, "", c.args...)
+		if err == nil {
+			t.Fatalf("%v: no error", c.args)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Fatalf("%v: err = %q, want %q", c.args, err, w)
+			}
+		}
+		if code := exitCode(err); code != 2 {
+			t.Fatalf("%v: exit %d, want 2 (usage)", c.args, code)
+		}
+	}
+	// An unknown command is still reported as one.
+	if _, _, err := req(t, "", "teleport", "--fast"); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("teleport: %v", err)
+	}
+}
+
+// Every command line of scripts/e2e-*.sh, examples/agent-race/drivers.go, README.md and docs/ still
+// parses (the flag check must not refuse a valid one).
+func TestValidCommandLinesStillParse(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "--platform", "ios", "--name", "agemu-iphone-17-pro", "--profile", "iphone-17-pro"},
+		{"create", "--platform", "android", "--name", "pixel"},
+		{"profiles", "--platform", "ios"},
+		{"boot", "agemu-iphone", "--cold", "--no-wait"},
+		{"devices", "--json"},
+		{"ui", "-d", "android:x"},
+		{"ui", "--json"},
+		{"wait", "--id", "About", "--gone", "--timeout-ms", "10000"},
+		{"wait", "--role", "textfield", "--text", "Wallpaper", "--timeout-ms", "5000"},
+		{"wait", "--contains", "pid:", "--timeout-ms", "8000", "-d", "android:x"},
+		{"find", "--role", "textfield", "--json"},
+		{"find", "--id", "breadcrumb"},
+		{"screenshot", "-o", "shot.png", "-d", "android:x"},
+		{"screenshot", "--scale", "0.5", "--format", "jpeg"},
+		{"tap", "--text", "Sign in", "--wait-text", "Welcome", "--ui"},
+		{"tap", "--id", "crash-exception", "--wait-id", "never-there", "--wait-timeout-ms", "10000"},
+		{"tap", "--text", "Done", "--wait-text", "Loading", "--wait-gone"},
+		{"tap", "--id", "log-levels", "--wait-contains", "levels tok"},
+		{"swipe", "10", "20", "10", "80", "--ms", "500", "--ui"},
+		{"type", "--keys", "wifi"},
+		{"type", "hello", "--wait-contains", "hello"},
+		{"key", "back", "--wait-text", "Settings"},
+		{"profile", "--width", "900", "--height", "1800", "--density", "360"},
+		{"launch", "dev.agemu.testapp", "--relaunch", "--", "-logs", "--initialUrl", "http://127.0.0.1:8081"}, // after --: arguments, not flags
+		{"launch", "pl.app", "--wait-text", "Sign in"},
+		{"open", "myapp://orders/7", "--wait-id", "order-7", "--ui"},
+		{"push", "com.app", `{"aps":{"alert":"Hi"}}`, "--wait-contains", "Hi"},
+		{"logs", "dev.agemu.testapp", "--since", "launch", "--limit", "300", "--max-bytes", "200000"},
+		{"logs", "com.example.app", "--since", "launch", "--level", "warn"},
+		{"logs", "pl.app", "--since", "launch", "--contains", "level ", "--json"},
+		{"crashes", "dev.agemu.testapp", "--since", "launch", "--limit", "1"},
+		{"clipboard", "--json"},
+	} {
+		if _, _, err := req(t, "", args...); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	for cmd := range commandFlags { // every command in the table is one params knows
+		if _, _, err := req(t, "", cmd); err != nil && strings.Contains(err.Error(), "unknown command") {
+			t.Fatalf("commandFlags has %q, which params does not know", cmd)
 		}
 	}
 }

@@ -60,7 +60,8 @@ func TestFreshElementIsOneTheAgentCouldNotSeeBeforeTheLastInput(t *testing.T) {
 
 func TestElementTapParams(t *testing.T) {
 	el := button("OK", 300, 1400)
-	p := elementTapParams("U", el, false, true)
+	x, y := el.TapPoint()
+	p := elementTapParams("U", el, x, y, false, true)
 	if p["x"] != 400 || p["y"] != 1430 {
 		t.Fatalf("centre: %v", p)
 	}
@@ -70,7 +71,7 @@ func TestElementTapParams(t *testing.T) {
 	if _, ok := p["settleMaxMs"]; ok {
 		t.Fatalf("an element not at rest keeps the helper's settle: %v", p)
 	}
-	p = elementTapParams("U", el, true, false)
+	p = elementTapParams("U", el, x, y, true, false)
 	if _, ok := p["ready"]; ok {
 		t.Fatalf("an element the agent could see is tapped as before: %v", p)
 	}

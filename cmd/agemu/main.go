@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -83,7 +85,7 @@ Actions (tap, swipe, type, key, launch, open, push) also wait for their effect i
   --ui prints the screen the action ends on (outline), so one call acts, waits and observes
   e.g. agemu tap --text "Log in" --wait-id home-screen --ui
 
-Exit status: 0 ok, 1 error, 2 usage, 3 not implemented on the device's platform,
+Exit status: 0 ok, 1 error, 2 usage (also a flag the command does not take), 3 not implemented on the device's platform,
 4 failed while the app launched last through agemu was down after a crash (agemu crashes),
 5 the device is preparing its baseline (first boot or retake): poll devices, or boot again.
 
@@ -211,20 +213,28 @@ func exitCode(err error) int {
 		return 4 // the app crashed: not a selector that did not match
 	case errors.Is(err, api.ErrPreparing):
 		return 5 // the device is preparing its baseline: wait and retry
+	case errors.As(err, new(usageError)):
+		return 2
 	}
 	return 1
 }
 
 // parsed command line: positional args + --flags (flags may appear anywhere).
 type cli struct {
-	pos   []string
-	flags map[string]string
+	pos     []string
+	flags   map[string]string
+	spelled map[string]string // flag name -> as typed (-o for output), for error messages
 }
+
+// usageError is a command line the command cannot take: exit status 2.
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
 
 var boolFlags = map[string]bool{"cold": true, "no-wait": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
 
 func parse(args []string) cli {
-	c := cli{flags: map[string]string{}}
+	c := cli{flags: map[string]string{}, spelled: map[string]string{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -232,16 +242,18 @@ func parse(args []string) cli {
 			break
 		}
 		if strings.HasPrefix(a, "-") && len(a) > 1 && !isNumber(a) {
-			name := strings.TrimLeft(a, "-")
-			if k, v, ok := strings.Cut(name, "="); ok {
-				c.flags[k] = v
-				continue
-			}
+			typed, value, hasValue := strings.Cut(a, "=")
+			name := strings.TrimLeft(typed, "-")
 			if name == "o" {
 				name = "output"
 			}
 			if name == "d" {
 				name = "device"
+			}
+			c.spelled[name] = typed
+			if hasValue {
+				c.flags[name] = value
+				continue
 			}
 			if boolFlags[name] || i+1 >= len(args) {
 				c.flags[name] = "true"
@@ -391,9 +403,99 @@ func runCommand(cmd string, args []string) error {
 	return nil
 }
 
+// Flag sets of commandFlags. globalFlags are taken by every device command.
+var (
+	globalFlags   = []string{"device", "json"}
+	selectorFlags = []string{"text", "contains", "id", "role", "index"}
+	actionFlags   = []string{"wait-text", "wait-contains", "wait-id", "wait-role", "wait-gone", "wait-timeout-ms", "ui"} // params, at its end
+)
+
+func flagSet(sets ...[]string) []string { return slices.Concat(sets...) }
+
+// commandFlags are the flags each device command acts on (in params; no-wait in runCommand),
+// besides globalFlags; keep it in step with params. Any other flag is a usage error: parse takes
+// every --name, so a misspelt flag, or one of another command (`wait --wait-gone` for `--gone`),
+// used to be dropped silently and change what the command did.
+var commandFlags = map[string][]string{
+	"ping":       nil,
+	"devices":    nil,
+	"profiles":   {"platform"},
+	"create":     {"platform", "name", "profile"},
+	"boot":       {"cold", "no-wait"}, // the only command cold changes
+	"shutdown":   nil,
+	"reset":      nil,
+	"park":       nil,
+	"resume":     nil,
+	"profile":    {"width", "height", "density"},
+	"screenshot": {"output", "format", "scale"},
+	"ui":         nil,
+	"find":       selectorFlags, // the daemon's find neither waits nor takes gone
+	"wait":       flagSet(selectorFlags, []string{"gone", "timeout-ms"}),
+	"tap":        flagSet(selectorFlags, actionFlags),
+	"swipe":      flagSet([]string{"ms"}, actionFlags),
+	"type":       flagSet([]string{"keys"}, actionFlags),
+	"key":        actionFlags,
+	"install":    nil,
+	"launch":     flagSet([]string{"relaunch"}, actionFlags),
+	"terminate":  nil,
+	"uninstall":  nil,
+	"clear-data": nil,
+	"open":       actionFlags,
+	"permission": nil,
+	"location":   nil,
+	"clipboard":  nil,
+	"appearance": nil,
+	"apps":       nil,
+	"push":       actionFlags,
+	"logs":       {"app", "since", "limit", "level", "contains", "regex", "max-bytes"},
+	"crashes":    {"app", "since", "limit"},
+}
+
+// checkFlags returns a usage error for the first flag cmd does not take, naming the flags it
+// takes and, for a flag of the other spelling (--wait-gone on wait, --gone on an action), the
+// one meant.
+func checkFlags(cmd string, c cli) error {
+	own, known := commandFlags[cmd]
+	if !known { // also a command params handles but this table lacks: it fails at its first use
+		return fmt.Errorf("unknown command %q (see agemu help)", cmd)
+	}
+	takes := flagSet(globalFlags, own)
+	for _, name := range slices.Sorted(maps.Keys(c.flags)) {
+		if slices.Contains(takes, name) {
+			continue
+		}
+		msg := fmt.Sprintf("%s does not take %s", cmd, c.spelled[name])
+		if rest, ok := strings.CutPrefix(name, "wait-"); ok && slices.Contains(takes, rest) {
+			msg += fmt.Sprintf(" (did you mean --%s?)", rest)
+		} else if slices.Contains(takes, "wait-"+name) {
+			msg += fmt.Sprintf(" (did you mean --wait-%s?)", name)
+		}
+		names := make([]string, len(takes))
+		for i, t := range takes {
+			names[i] = flagName(t)
+		}
+		return usageError{fmt.Sprintf("%s; it takes %s (see agemu help)", msg, strings.Join(names, " "))}
+	}
+	return nil
+}
+
+// flagName spells a flag for help: with its short form, which parse maps to it.
+func flagName(name string) string {
+	switch name {
+	case "device":
+		return "-d/--device"
+	case "output":
+		return "-o/--output"
+	}
+	return "--" + name
+}
+
 // request turns a command line into a daemon method and its parameters. stdin is read for
 // `push <app> -`.
 func request(cmd string, c cli, stdin io.Reader) (string, daemon.Params, error) {
+	if err := checkFlags(cmd, c); err != nil {
+		return "", daemon.Params{}, err
+	}
 	p := daemon.Params{Device: c.flags["device"]}
 	if p.Device == "" {
 		p.Device = os.Getenv("AGEMU_DEVICE")
@@ -417,8 +519,8 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 		if len(c.pos) > 0 {
 			p.Device = c.pos[0]
 		}
-		p.Cold = c.flags["cold"] == "true"
 		if cmd == "boot" {
+			p.Cold = c.flags["cold"] == "true"
 			// The daemon returns once it knows the boot prepares a baseline; the CLI then waits
 			// by polling, with progress on stderr, unless --no-wait.
 			p.NoWait = true
