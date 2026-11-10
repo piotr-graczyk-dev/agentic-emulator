@@ -380,7 +380,7 @@ func waitDevice(ctx context.Context, serial string, timeout time.Duration) error
 		// adb reconnects 0.2-0.6 s after a snapshot load on macOS; on a Linux host it stayed
 		// offline for minutes after a reset. After a few seconds offline, ask the adb server to
 		// reconnect offline devices (`adb reconnect offline`), at most every 10 s.
-		if st == "offline" {
+		if st == "offline" || (err != nil && strings.Contains(err.Error(), "offline")) { // the server answers "device offline" as an error
 			if offlineSince.IsZero() {
 				offlineSince = time.Now()
 			}
