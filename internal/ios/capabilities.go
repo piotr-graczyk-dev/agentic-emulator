@@ -36,8 +36,8 @@ var (
 
 // OpenURL opens url with SimDevice openURL, what `simctl openurl` does. It returns once the
 // system has accepted the URL; the app comes up after that (use --wait-*). For a custom scheme
-// the system may first ask "Open in <app>?" (as for a link in Safari): agemu does not answer it.
-// A URL that no app handles is an error. The handling app is not reported ("").
+// the system may first ask "Open in <app>?" (as for a link in Safari): agemu answers Open (see
+// confirmOpen). A URL that no app handles is an error. The handling app is not reported ("").
 func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	d, err := b.target(ctx, id)
 	if err != nil {
@@ -48,7 +48,47 @@ func (b *Backend) OpenURL(ctx context.Context, id, url string) (string, error) {
 	if err := b.call(ctx, "openurl", map[string]any{"udid": d.UDID, "url": url}, nil); err != nil {
 		return "", err
 	}
+	b.confirmOpen(ctx, id)
 	return "", nil
+}
+
+// openPrompt starts the text of the alert SpringBoard shows before it opens a custom-scheme URL:
+// "Open in “<app>”?", with Cancel and Open (an English simulator; agemu's are).
+const openPrompt = "Open in “"
+
+// confirmOpen answers SpringBoard's "Open in “<app>”?" alert with Open, as the person who
+// followed the link would; without it every deep link needed an extra tap, and an agent waiting
+// for the app's screen timed out behind the alert. With an Expo development build on iOS 26.5
+// the alert was up at the first UI read after openURL returned (66-78 ms, 4 of 4), and after one
+// Open iOS did not ask again for that app. So one read, which also returns at once when an app
+// is in front; a tree read that fails leaves the alert to the caller.
+func (b *Backend) confirmOpen(ctx context.Context, id string) {
+	t, err := b.UITree(ctx, id)
+	if err != nil || t.App != "com.apple.springboard" {
+		return
+	}
+	var prompt bool
+	var open *api.Element
+	t.Walk(func(e *api.Element) {
+		if strings.HasPrefix(e.Text, openPrompt) || strings.HasPrefix(e.Label, openPrompt) {
+			prompt = true
+		}
+		if e.Role == "button" && e.Label == "Open" {
+			c := *e
+			c.Children = nil
+			open = &c
+		}
+	})
+	if !prompt || open == nil {
+		return
+	}
+	// The alert is new since the input, so the tap waits until its presentation has finished
+	// (UIKit drops touches until then; see ready.go).
+	if err := b.TapElement(ctx, id, open, false); err != nil {
+		log.Printf("ios open: answering the %q prompt: %v", openPrompt, err)
+		return
+	}
+	log.Printf("ios open: answered SpringBoard's %q prompt with Open", openPrompt)
 }
 
 // privacyService maps a neutral permission name to the iOS Simulator's privacy service.

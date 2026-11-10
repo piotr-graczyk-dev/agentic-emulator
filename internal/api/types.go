@@ -221,6 +221,20 @@ type Rect struct {
 
 func (r Rect) Center() (int, int) { return r.X + r.W/2, r.Y + r.H/2 }
 
+// TapPoint is where a tap by selector lands on e: the centre of its frame, except that a switch
+// is tapped at its trailing end. SwiftUI reports a Toggle's frame as the rest of its row, and
+// only the switch at the row's trailing edge takes a tap (the Expo dev menu: a 598x80 px frame,
+// the switch in its last 150 px). A switch whose frame is the switch itself (UIKit, Android) is
+// at most twice as wide as tall, so it keeps its centre.
+func (e *Element) TapPoint() (int, int) {
+	r := e.Frame
+	x, y := r.Center()
+	if e.Role == "switch" && r.W > 2*r.H {
+		x = r.X + r.W - r.H
+	}
+	return x, y
+}
+
 // Element is one node of the accessibility / view hierarchy.
 type Element struct {
 	Ref       string     `json:"ref"`            // stable within one snapshot, e.g. "e12"

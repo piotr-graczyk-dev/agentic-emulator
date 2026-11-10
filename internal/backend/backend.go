@@ -178,8 +178,9 @@ type FrameWaiter interface {
 //     BROWSABLE does not match, as from a real link (`am start -d` would open it). The caller
 //     is still the shell, so getReferrer() differs from a browser's. Returns once the target
 //     activity, or the disambiguation dialog, is displayed.
-//   - iOS: SimDevice openURL (what `simctl openurl` does). Safari's "Open in <app>?"
-//     confirmation never shows. Returns once the system has accepted the URL.
+//   - iOS: SimDevice openURL (what `simctl openurl` does). Returns once the system has
+//     accepted the URL, after answering SpringBoard's "Open in <app>?" confirmation with Open
+//     when it shows (for a custom scheme, as for a link in Safari).
 //
 // App Links / universal links open the app only when their domain is verified, as on a device;
 // otherwise the browser opens. app is the package / bundle id that took the URL, "" when the

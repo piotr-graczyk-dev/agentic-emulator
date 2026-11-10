@@ -143,8 +143,9 @@ What each capability does differently from a person using a real device:
     `adb shell am start -d` would open it and hide that bug.
   - The caller is still the shell, so `getReferrer()` differs from a browser's.
   - On iOS the source application differs. iOS may first ask "Open in <app>?", as for a link in
-    Safari (seen for a single open of a just-installed app, and for two quick opens of one URL);
-    agemu does not answer it.
+    Safari (seen for a single open of a just-installed app, for two quick opens of one URL, and
+    for every open of an Expo development build in front until one was answered); agemu answers
+    Open, as the person who followed the link would.
   - App Links and universal links open the app only when their domain is verified, as on a
     device; otherwise the browser opens (not exercised).
   - Android returns when the target activity (or the app chooser) is displayed. iOS returns
@@ -504,8 +505,9 @@ Deviations from the tables above:
   the Siri entitlement). `location-always` needs both location usage descriptions. `camera`
   works (`kTCCServiceCamera`), though it is not in `simctl privacy`'s list.
 - **open_url**: an "Open in <app>?" prompt can show first (seen for a single open of a
-  just-installed app on a new simulator, and for two quick opens of the same URL; not in 36
-  benchmark opens). `app` is not reported.
+  just-installed app on a new simulator, for two quick opens of the same URL, and for every open
+  of an Expo development build in front until one was answered; not in 36 benchmark opens).
+  agemu answers it with Open. `app` is not reported.
 - **location clear**: an app that starts updating gets `kCLErrorLocationUnknown`; an app that
   was already updating usually keeps its last fix (simctl the same).
 - **push**: in the background the banner showed ~10.5 s after the push on a lean simulator

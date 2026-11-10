@@ -226,6 +226,12 @@ func pressKey(_ d: AGDevice, _ name: String) throws {
 /// AGEMU_IOS_TAP_SETTLE=0 makes taps skip the wait for a still screen.
 let tapSettle = ProcessInfo.processInfo.environment["AGEMU_IOS_TAP_SETTLE"] != "0"
 
+/// How long a tap holds the finger down (AGEMU_IOS_TAP_HOLD_MS, default 100, about a finger's).
+/// A SwiftUI Toggle ignores a touch that ends as it begins: in the Expo dev menu (iOS 26.5) a
+/// 0-1 ms tap on the switch toggled it 0 of 6 times, 8 ms 4 of 6, 16 and 30 ms 6 of 6, 50 ms 35
+/// of 39 (the misses scattered, some after a pause), 100 ms 15 of 15.
+let tapHoldMs: Double = Double(ProcessInfo.processInfo.environment["AGEMU_IOS_TAP_HOLD_MS"] ?? "") ?? 100
+
 // MARK: - Running apps
 
 // Parses `launchctl list` from inside the simulator: UIKitApplication:<bundle>[...] entries.
@@ -854,7 +860,7 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "tap":
         let d = try device(req)
         let x = try req.double("x"), y = try req.double("y")
-        let hold = req.optDouble("holdMs", 0)
+        let hold = req.optDouble("holdMs", tapHoldMs)
         // A tap during a transition (e.g. a navigation pop still sliding in) is ignored by
         // UIKit: wait until the screen has been still for 48 ms first (at most 1 s; instant
         // when it already is).

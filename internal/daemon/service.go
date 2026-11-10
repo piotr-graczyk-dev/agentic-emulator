@@ -682,7 +682,7 @@ func (s *Service) point(ctx context.Context, b backend.Backend, id string, p Par
 			el = again
 		}
 	}
-	x, y = el.Frame.Center()
+	x, y = el.TapPoint()
 	return x, y, el, atRest, nil
 }
 
@@ -852,9 +852,12 @@ func describe(s api.Selector) string {
 	return string(b)
 }
 
-// Find returns elements matching the selector, in document order, without children.
+// Find returns elements matching the selector, in document order, without children. With
+// Contains, the elements whose whole text or label is the substring (ignoring case) come
+// first: `--contains "Privacy policy"` hit a paragraph above the link that ends in "... our
+// Privacy Policy." instead of the link.
 func Find(t *api.UITree, sel api.Selector) []*api.Element {
-	var out []*api.Element
+	var out, partial []*api.Element
 	needle := strings.ToLower(sel.Contains)
 	t.Walk(func(e *api.Element) {
 		if sel.Text != "" && e.Text != sel.Text && e.Label != sel.Text {
@@ -874,7 +877,11 @@ func Find(t *api.UITree, sel api.Selector) []*api.Element {
 		}
 		c := *e
 		c.Children = nil
+		if sel.Contains != "" && strings.ToLower(e.Text) != needle && strings.ToLower(e.Label) != needle {
+			partial = append(partial, &c)
+			return
+		}
 		out = append(out, &c)
 	})
-	return out
+	return append(out, partial...)
 }
