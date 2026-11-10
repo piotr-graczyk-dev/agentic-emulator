@@ -60,10 +60,11 @@ The scripts only create and boot `agemu-*` devices, but they reset them: the iOS
 ## Releasing (maintainers)
 
 Push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The
-[release workflow](.github/workflows/release.yml) builds on Apple Silicon, runs the tests and a
-smoke test, publishes a GitHub release with `agemu-<version>-darwin-arm64.tar.gz` and
-`SHA256SUMS` (which `install.sh` downloads), and publishes the npm package `agentic-emulator`
-with provenance. A tag with a suffix (`v0.2.0-rc.1`) is a GitHub prerelease and npm's `next`
+[release workflow](.github/workflows/release.yml) builds on Apple Silicon (and cross-compiles
+Linux and Windows), runs the tests and a smoke test, publishes a GitHub release with
+`agemu-<version>-darwin-arm64.tar.gz`, `-linux-amd64.tar.gz`, `-linux-arm64.tar.gz`,
+`-windows-amd64.zip` and `SHA256SUMS` (which `install.sh` and `install.ps1` download), and
+publishes the npm package `agentic-emulator`, with every platform's binaries, with provenance. A tag with a suffix (`v0.2.0-rc.1`) is a GitHub prerelease and npm's `next`
 tag. Running the workflow by hand packages a version without publishing it.
 
 The workflow publishes to npm with trusted publishing: npm trusts `release.yml` in this
