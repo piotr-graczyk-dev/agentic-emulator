@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -35,9 +36,10 @@ func StartDetached(cmd *exec.Cmd) error {
 // closes its handle once Wait returns. The group functions must never act on a process that got
 // the id of one agemu started, so StartDetached keeps a handle of its own to each process it
 // starts: while it is open the id cannot be reused. The group functions accept only these
-// processes, and a process counts as a child only when it was created after its parent (a
-// process with a reused id and an older parent is not). The handle is closed once the whole
-// group has exited.
+// processes, and a process counts as a child only when its handle is open and Windows then still
+// names the (held) parent as its parent. A watcher closes the handle once the whole group has
+// exited, however it ended. trackedMu is held through every group operation, so the watcher
+// cannot close a handle another operation uses.
 type tracked struct {
 	h       windows.Handle
 	created int64 // creation time, 100 ns units
@@ -64,7 +66,16 @@ func track(pid int) {
 	}
 	trackedBy[pid] = tracked{h: h, created: created}
 	trackedMu.Unlock()
+	go func() {
+		for GroupAlive(pid) {
+			time.Sleep(groupWatchInterval)
+		}
+	}()
 }
+
+// groupWatchInterval is how often the watcher of a started process checks whether its group has
+// exited (GroupAlive then releases the handle).
+var groupWatchInterval = 2 * time.Second
 
 func creationTime(h windows.Handle) (int64, bool) {
 	var c, e, k, u windows.Filetime
@@ -152,13 +163,12 @@ func TerminateGroup(pid int) { KillGroup(pid) }
 // started in this process; for any other pid it does nothing.
 func KillGroup(pid int) {
 	trackedMu.Lock()
+	defer trackedMu.Unlock()
 	t, ok := trackedBy[pid]
-	trackedMu.Unlock()
 	if !ok {
 		return
 	}
-	kids := descendants(pid, t.created)
-	for _, k := range kids {
+	for _, k := range descendants(pid, t.h) {
 		_ = windows.TerminateProcess(k.h, 1)
 		windows.CloseHandle(k.h)
 	}
@@ -169,30 +179,26 @@ func KillGroup(pid int) {
 
 // GroupAlive reports whether pid or any process it started still runs. pid must be a process
 // StartDetached started in this process; for any other pid it is false. Windows keeps a child's
-// parent id after the parent exits, so the children are found also then.
+// parent id after the parent exits, so the children are found also then. When the whole group
+// has exited it stops tracking pid, so Windows may reuse the id.
 func GroupAlive(pid int) bool {
 	trackedMu.Lock()
+	defer trackedMu.Unlock()
 	t, ok := trackedBy[pid]
-	trackedMu.Unlock()
 	if !ok {
 		return false
 	}
 	if running(t.h) {
 		return true
 	}
-	kids := descendants(pid, t.created)
 	alive := false
-	for _, k := range kids {
+	for _, k := range descendants(pid, t.h) {
 		alive = alive || running(k.h)
 		windows.CloseHandle(k.h)
 	}
-	if !alive { // the group is gone: let Windows reuse the id
-		trackedMu.Lock()
-		if cur, ok := trackedBy[pid]; ok && cur.h == t.h {
-			delete(trackedBy, pid)
-			windows.CloseHandle(t.h)
-		}
-		trackedMu.Unlock()
+	if !alive {
+		delete(trackedBy, pid)
+		windows.CloseHandle(t.h)
 	}
 	return alive
 }
@@ -202,11 +208,12 @@ type proc struct {
 	h   windows.Handle
 }
 
-// descendants opens the processes under the process pid created at created, deepest first. A
-// process counts as a child only when its parent id matches and it was created after that
-// parent, so a process that got a reused id, or whose parent id was reused, is left out. The
-// caller closes the handles; holding them keeps the ids from being reused meanwhile.
-func descendants(pid int, created int64) []proc {
+// descendants opens the processes under pid (whose handle the caller holds, so the id is not
+// reused meanwhile), deepest first. The snapshot only proposes candidates: a candidate counts once
+// its handle is open and Windows, asked afresh, names the parent as its parent. A process that got
+// a candidate's id after the snapshot has another parent and is left out, and the parent of each
+// level stays open while its children are checked. The caller closes the handles.
+func descendants(pid int, root windows.Handle) []proc {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil
@@ -234,7 +241,7 @@ func descendants(pid int, created int64) []proc {
 				continue
 			}
 			ct, ok := creationTime(h)
-			if !ok || ct < parentCreated {
+			if !ok || ct < parentCreated || parentOf(h) != parent {
 				windows.CloseHandle(h)
 				continue
 			}
@@ -242,8 +249,21 @@ func descendants(pid int, created int64) []proc {
 			out = append(out, proc{pid: int(c), h: h})
 		}
 	}
-	walk(uint32(pid), created)
+	rootCreated, ok := creationTime(root)
+	if !ok {
+		return nil
+	}
+	walk(uint32(pid), rootCreated)
 	return out
+}
+
+// parentOf is the parent process id Windows records for the process behind h (0 when unknown).
+func parentOf(h windows.Handle) uint32 {
+	var bi windows.PROCESS_BASIC_INFORMATION
+	if windows.NtQueryInformationProcess(h, windows.ProcessBasicInformation, unsafe.Pointer(&bi), uint32(unsafe.Sizeof(bi)), nil) != nil {
+		return 0
+	}
+	return uint32(bi.InheritedFromUniqueProcessId)
 }
 
 // lockOffset is where TryLock locks one byte. Windows locks are mandatory: a lock on the file's
