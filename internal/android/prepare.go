@@ -262,6 +262,9 @@ func (b *Backend) runBoot(ctx context.Context, d *device, id string, opts api.Bo
 		}
 		err = nil
 	}
+	// A sandbox around agemud, which the emulator inherits, shows only as an exited emulator or a
+	// timeout: name it (startcause.go).
+	err = d.explainStart(err, p.start)
 	if err != nil && p.visible.Load() {
 		logf("%s: preparing the baseline failed after %v: %v", d.name, time.Since(p.start).Round(time.Second), err)
 		// A preparation that failed by itself (the guest never booted, a deadline) leaves an

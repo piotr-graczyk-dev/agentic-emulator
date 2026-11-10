@@ -963,7 +963,8 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 	d.mu.Lock()
 	d.proc = cmd
 	d.mu.Unlock()
-	go func() { _ = cmd.Wait() }() // reap
+	exited := make(chan struct{}) // closed once the emulator has exited and is reaped
+	go func() { _ = cmd.Wait(); close(exited) }()
 	// Until the emulator is registered and answers gRPC, nothing else can find or stop it (a
 	// shutdown looks for registered emulators): any failure or cancellation here kills it.
 	fail := func(err error) error {
@@ -998,8 +999,22 @@ func (d *device) launch(ctx context.Context, a avdInfo, loadBaseline, wipe bool)
 			d.recordDefaultFix(ctx, e, r.PID)
 			return nil
 		}
-		if cmd.ProcessState != nil || !pidAlive(cmd.Process.Pid) {
-			return fmt.Errorf("emulator exited during startup; see %s", filepath.Join(logDir(), d.name+".log"))
+		reaped := false
+		select {
+		case <-exited:
+			reaped = true
+		default:
+		}
+		if reaped || !pidAlive(cmd.Process.Pid) {
+			// How it ended, once reaped: "signal: illegal instruction" is the emulator in a
+			// sandbox that denies it a sysctl (startcause.go), with nothing about it in its log.
+			how := ""
+			select {
+			case <-exited:
+				how = " (" + cmd.ProcessState.String() + ")"
+			case <-time.After(time.Second):
+			}
+			return fmt.Errorf("emulator exited during startup%s; see %s", how, filepath.Join(logDir(), d.name+".log"))
 		}
 		if time.Now().After(deadline) {
 			return fail(fmt.Errorf("emulator did not register its gRPC endpoint in 60s; see %s", filepath.Join(logDir(), d.name+".log")))
