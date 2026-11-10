@@ -314,13 +314,15 @@ func TestFrameworksCheck(t *testing.T) {
 		{"old helper", `cat > /dev/null`, statusWarn, "not checked: this agemu-ios-helper has no --check"},
 		{"crash", `echo 'dyld: boom' >&2; exit 134`, statusFail, "agemu-ios-helper --check failed: dyld: boom"},
 	} {
-		p := filepath.Join(dir, "helper-"+tc.name)
-		if err := os.WriteFile(p, []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		c := frameworksCheck(p)
-		if c.Status != tc.status || c.Detail != tc.detail {
-			t.Errorf("%s: got %s %q, want %s %q", tc.name, c.Status, c.Detail, tc.status, tc.detail)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(dir, "helper-"+tc.name)
+			if err := os.WriteFile(p, []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			c := frameworksCheck(p)
+			if c.Status != tc.status || c.Detail != tc.detail {
+				t.Errorf("got %s %q, want %s %q", c.Status, c.Detail, tc.status, tc.detail)
+			}
+		})
 	}
 }

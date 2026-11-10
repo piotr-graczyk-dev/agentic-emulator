@@ -322,6 +322,7 @@ func frameworksCheck(helper string) check {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, helper, "--check")
+	cmd.WaitDelay = 2 * time.Second // do not wait on pipes a killed helper's children hold open
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, runErr := cmd.Output()
@@ -339,6 +340,9 @@ func frameworksCheck(helper string) check {
 		msg := firstLine(strings.TrimSpace(stderr.String()))
 		if msg == "" {
 			msg = runErr.Error()
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			msg = "timed out after 30 s"
 		}
 		c.Status, c.Detail = statusFail, "agemu-ios-helper --check failed: "+msg
 		return c
