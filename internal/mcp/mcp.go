@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -490,6 +492,9 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 	if t == nil {
 		return toolError(fmt.Errorf("unknown tool %q", name)), nil
 	}
+	if err := checkArgs(t, args); err != nil {
+		return toolError(err), nil
+	}
 	// Tool arguments use the daemon's field names; selector fields are folded into a selector.
 	b, _ := json.Marshal(args)
 	var p daemon.Params
@@ -546,6 +551,37 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 		}
 	}
 	return res, nil
+}
+
+// checkArgs refuses an argument that is not in the tool's input schema. Arguments are unmarshalled
+// straight into daemon.Params, so one of another tool (an action's waitGone given to wait_for for
+// its gone) would set a field this tool ignores and silently change what the call does. For an
+// argument of the other spelling (waitGone / gone, waitTimeoutMs / timeoutMs) the error names the
+// one meant.
+func checkArgs(t *tool, args map[string]json.RawMessage) error {
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	for _, name := range slices.Sorted(maps.Keys(args)) {
+		if _, ok := props[name]; ok {
+			continue
+		}
+		msg := fmt.Sprintf("%s does not take the argument %q", t.Name, name)
+		meant := "wait" + upperFirst(name)
+		if rest, ok := strings.CutPrefix(name, "wait"); ok && rest != "" {
+			meant = strings.ToLower(rest[:1]) + rest[1:]
+		}
+		if _, ok := props[meant]; ok {
+			msg += fmt.Sprintf(" (did you mean %q?)", meant)
+		}
+		return fmt.Errorf("%s; its arguments are %s", msg, strings.Join(slices.Sorted(maps.Keys(props)), ", "))
+	}
+	return nil
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // render turns a tool's raw result into MCP content.

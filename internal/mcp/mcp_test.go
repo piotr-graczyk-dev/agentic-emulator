@@ -161,6 +161,44 @@ func TestToolArgumentsReachTheBackend(t *testing.T) {
 	}
 }
 
+// An argument the tool does not declare is a tool error, and the daemon is not asked: arguments are
+// unmarshalled into daemon.Params, so wait_for given an action's waitGone used to wait for the
+// element to appear.
+func TestArgumentsTheToolDoesNotTake(t *testing.T) {
+	cases := []struct{ tool, args, want string }{
+		{"wait_for", `{"contains":"X","waitGone":true}`, `wait_for does not take the argument "waitGone" (did you mean "gone"?)`},
+		{"wait_for", `{"text":"X","waitTimeoutMs":500}`, `(did you mean "timeoutMs"?)`},
+		{"tap", `{"text":"X","waitFor":{"text":"Y"},"gone":true}`, `tap does not take the argument "gone" (did you mean "waitGone"?)`},
+		{"type_text", `{"text":"hi","timeoutMs":5}`, `(did you mean "waitTimeoutMs"?)`},
+		{"find", `{"text":"X","gone":true}`, `find does not take the argument "gone"; its arguments are contains, device, id, index, role, text`},
+		{"screenshot", `{"path":"/tmp/x.png"}`, `screenshot does not take the argument "path"`},
+	}
+	for _, c := range cases {
+		r := &recorder{}
+		cl := connect(t, r)
+		args := toolArgs(t, c.args)
+		args["device"] = json.RawMessage(`"ios:y"`)
+		res := callTool(cl, c.tool, args)
+		if res["isError"] != true || !strings.Contains(resultText(res), c.want) {
+			t.Fatalf("%s %s: %v, want an error with %q", c.tool, c.args, res, c.want)
+		}
+		if len(r.calls) != 0 {
+			t.Fatalf("%s %s: the backend was called: %q", c.tool, c.args, r.calls)
+		}
+	}
+	// Every declared argument is taken (wait_for's own gone and timeoutMs, an action's wait*).
+	r := &recorder{}
+	cl := connect(t, r)
+	for _, c := range []struct{ tool, args string }{
+		{"wait_for", `{"device":"ios:y","text":"Log in","gone":false,"timeoutMs":500}`},
+		{"tap", `{"device":"ios:y","text":"Log in","waitFor":{"text":"Log in"},"waitGone":false,"waitTimeoutMs":500,"returnUi":true}`},
+	} {
+		if res := callTool(cl, c.tool, toolArgs(t, c.args)); res["isError"] == true {
+			t.Fatalf("%s %s: %s", c.tool, c.args, resultText(res))
+		}
+	}
+}
+
 func TestToolResults(t *testing.T) {
 	cl := connect(t, &recorder{})
 	res := callTool(cl, "clipboard", map[string]json.RawMessage{"device": json.RawMessage(`"ios:y"`)})
