@@ -278,7 +278,7 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 	if _, err := adbShell(ctx, a.serial, start); err != nil {
 		return true, fmt.Errorf("starting agent: %w", err)
 	}
-	deadline := time.Now().Add(60 * time.Second) // app_process + UiAutomation connect can be slow on a loaded host
+	deadline := time.Now().Add(slowHost(60 * time.Second)) // app_process + UiAutomation connect can be slow on a loaded host
 	for {
 		pctx, cancel := context.WithTimeout(ctx, time.Second)
 		p, err = a.ping(pctx)

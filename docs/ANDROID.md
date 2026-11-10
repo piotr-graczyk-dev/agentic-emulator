@@ -60,7 +60,7 @@ Environment variables (read by the daemon):
 | `AGEMU_ANDROID_CORES` | (avdmanager's, 4) | vCPUs for new AVDs (`hw.cpu.ncore`), 1 to 8 (the emulator boots no more; `create` refuses other values). `2` cut device CPU-seconds per flow by 11-19% with no slower flow except one (a small app's cold launch, +7%); apps see 2 processors. See "Guest RAM, vCPUs and display size". |
 | `AGEMU_ANDROID_STANDBY` | `1` | `0`: `shutdown` always powers off. |
 | `AGEMU_ANDROID_CONSOLE_PORT` / `AGEMU_ANDROID_GRPC_PORT` | `5580` / `8580` | First ports to try. |
-| `AGEMU_ANDROID_BOOT_TIMEOUT_S` | `180` | Seconds a cold boot may take until the guest reports boot completion; more for a slow host (nested virtualization, software rendering). |
+| `AGEMU_ANDROID_TIMEOUT_SCALE` | `1` | Multiplies the bounds on a cold boot (180 s) and the agent's start (60 s), for a slow host (nested virtualization, software rendering). |
 | `AGEMU_ANDROID_SHM` | `1` (`0` on Windows) | `0`: frames travel in the gRPC reply instead of a shared mmap. |
 | `AGEMU_ANDROID_BASELINE_SETTLE_S` | `20` | Settle time before the baseline steps (stylus, lean apps, keyboard). |
 | `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Before saving the baseline, wait until the guest has been up this long and has been quiet for a minute (CPU and network), so work it still had pending does not run again after every reset; see Quiet baseline. `0`: save right after the baseline steps (agemu before 2026-11-08). Applies when a baseline is taken. |

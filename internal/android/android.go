@@ -667,11 +667,19 @@ func emulatorArgs(name string, p ports, a avdInfo, loadBaseline, wipe bool) []st
 	return args
 }
 
-// coldBootTimeout bounds a cold boot until the guest reports boot completion:
-// AGEMU_ANDROID_BOOT_TIMEOUT_S seconds, default 180. A slow host (nested virtualization,
-// software rendering) can need more.
-func coldBootTimeout() time.Duration {
-	return time.Duration(envInt("AGEMU_ANDROID_BOOT_TIMEOUT_S", 180)) * time.Second
+// coldBootTimeout bounds a cold boot until the guest reports boot completion: 180 s, times
+// AGEMU_ANDROID_TIMEOUT_SCALE.
+func coldBootTimeout() time.Duration { return slowHost(180 * time.Second) }
+
+// slowHost scales a bound on guest work by AGEMU_ANDROID_TIMEOUT_SCALE (a number of 1 or more;
+// default 1). A slow host, such as a VM with nested virtualization and software rendering, boots
+// the guest and starts the agent several times slower than the bounds allow.
+func slowHost(d time.Duration) time.Duration {
+	f, err := strconv.ParseFloat(os.Getenv("AGEMU_ANDROID_TIMEOUT_SCALE"), 64)
+	if err != nil || f <= 1 {
+		return d
+	}
+	return time.Duration(float64(d) * f)
 }
 
 // defaultGPU is the emulator's -gpu mode unless AGEMU_ANDROID_GPU sets one: the host GPU, except

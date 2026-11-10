@@ -193,3 +193,12 @@ func TestDialFallsBackToADBWhenTCPHangs(t *testing.T) {
 		t.Fatalf("via %q, want adb", via)
 	}
 }
+
+func TestSlowHostScale(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": 60 * time.Second, "x": 60 * time.Second, "0.5": 60 * time.Second, "1": 60 * time.Second, "2.5": 150 * time.Second} {
+		t.Setenv("AGEMU_ANDROID_TIMEOUT_SCALE", v)
+		if got := slowHost(60 * time.Second); got != want {
+			t.Errorf("scale %q: %v, want %v", v, got, want)
+		}
+	}
+}

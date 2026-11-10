@@ -120,8 +120,8 @@ client library even without audio (`sudo apt install libpulse0`); a boot that fa
 `~/.agemu/android/<device>.log`. On a Linux host without a display (a server, CI) agemu starts the
 emulator with software rendering (`-gpu auto`); with a display, and on Windows, with the host GPU.
 `AGEMU_ANDROID_GPU` overrides both. On a slow host (a VM with nested virtualization, software
-rendering) a first cold boot can outlast its 180 s bound; `AGEMU_ANDROID_BOOT_TIMEOUT_S=600`
-raises it.
+rendering) the guest boots and starts agemu's agent several times slower than agemu waits for;
+`AGEMU_ANDROID_TIMEOUT_SCALE=4` waits four times as long.
 
 What is different from the Mac:
 
