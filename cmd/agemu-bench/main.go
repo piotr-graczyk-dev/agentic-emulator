@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Command agemu-bench measures agent-loop operations: the standard tool (baseline)
 // versus agemu, on the same device, and prints a table with speedups.
 //

@@ -10,10 +10,13 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
 // Minimal client for the adb server's smart-socket protocol (the same protocol the adb
@@ -149,6 +152,39 @@ func adbHostQuery(ctx context.Context, req string) (string, error) {
 	return s, ctxErr(ctx, err)
 }
 
+// adbReconnect asks the adb server to drop and reopen its connection to this one device, as
+// `adb -s <serial> reconnect` does (the server accepts it for an offline device). Errors are
+// ignored: it is a nudge.
+func adbReconnect(ctx context.Context, serial string) {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", adbServerAddr())
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		c.SetDeadline(dl)
+	}
+	_ = adbRequest(c, "host-serial:"+serial+":reconnect")
+}
+
+var (
+	reconnectMu   sync.Mutex
+	lastReconnect = map[string]time.Time{}
+)
+
+// reconnectDue reports whether a reconnect of serial may be sent now (none in the last every),
+// and if so records it, so concurrent waits on one device share the cooldown.
+func reconnectDue(serial string, every time.Duration) bool {
+	reconnectMu.Lock()
+	defer reconnectMu.Unlock()
+	if time.Since(lastReconnect[serial]) < every {
+		return false
+	}
+	lastReconnect[serial] = time.Now()
+	return true
+}
+
 // adbState returns "device", "offline", ... for the serial, or an error when unknown.
 func adbState(ctx context.Context, serial string) (string, error) {
 	return adbHostQuery(ctx, "host-serial:"+serial+":get-state")
@@ -212,10 +248,49 @@ func adbShellOK(ctx context.Context, serial, cmd string) (string, error) {
 	return r.Stdout, nil
 }
 
+// ensureADBKey makes sure the host has an adb key before an emulator starts. The emulator
+// installs the host's public key (adbkey.pub in the Android user directory) into the guest as it
+// boots, and the Play Store images accept adb only from such a key. On a computer where adb never
+// ran (a new Linux or Windows install, CI) there is none yet: the adb server creates it when it
+// first starts, which would be after the emulator, and every adb call would then fail with
+// "device unauthorized". Starting the server first creates the key; with a key present this does
+// nothing.
+func ensureADBKey(ctx context.Context) {
+	home, _ := os.UserHomeDir()
+	if adbKeyPresent(home, os.Getenv) {
+		return
+	}
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(c, toolchain.ADB(), "start-server").CombinedOutput(); err != nil {
+		logf("adb start-server (to create the adb key before the emulator starts): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
+// adbKeyPresent reports whether an adb public key exists where adb and the emulator look for it.
+func adbKeyPresent(home string, getenv func(string) string) bool {
+	var dirs []string
+	for _, k := range []string{"ANDROID_USER_HOME", "ANDROID_EMULATOR_HOME"} {
+		if v := getenv(k); v != "" {
+			dirs = append(dirs, v)
+		}
+	}
+	if v := getenv("ANDROID_SDK_HOME"); v != "" {
+		dirs = append(dirs, filepath.Join(v, ".android"))
+	}
+	dirs = append(dirs, filepath.Join(home, ".android"))
+	for _, d := range dirs {
+		if st, err := os.Stat(filepath.Join(d, "adbkey.pub")); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 // adbExec runs the adb binary (used for push / install, which need the sync protocol).
 func adbExec(ctx context.Context, serial string, args ...string) (string, error) {
 	full := append([]string{"-s", serial}, args...)
-	out, err := exec.CommandContext(ctx, sdkTool("platform-tools", "adb"), full...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, toolchain.ADB(), full...).CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("adb %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}

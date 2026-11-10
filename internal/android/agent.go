@@ -15,8 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 // The on-device agent (android-agent/, built by android-agent/build.sh).
@@ -58,25 +59,39 @@ func (a *agentClient) transport() string {
 	return a.via
 }
 
-// dial opens a connection to the agent: TCP when available, adb otherwise.
+// dial opens a connection to the agent: TCP when available, adb otherwise. The TCP attempt gets
+// at most half of ctx's remaining time: a forwarded connection the guest never answers (its
+// network not up yet on a slow host) would otherwise use all of it, and adb none.
 func (a *agentClient) dial(ctx context.Context) (net.Conn, *bufio.Reader, string, error) {
+	var tcpErr error
 	if a.tcp != nil && a.token != "" {
+		tctx := ctx
+		if dl, ok := ctx.Deadline(); ok {
+			var cancel context.CancelFunc
+			tctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Until(dl)/2))
+			defer cancel()
+		}
 		for attempt := 0; attempt < 2; attempt++ {
-			hp, err := a.tcp(ctx, attempt > 0)
+			hp, err := a.tcp(tctx, attempt > 0)
 			if err != nil {
+				tcpErr = err
 				break
 			}
-			c, r, err := dialAgentTCP(ctx, hp, a.token)
+			c, r, err := dialAgentTCP(tctx, hp, a.token)
 			if err == nil {
 				return c, r, "tcp", nil
 			}
-			if !errors.Is(err, syscall.ECONNREFUSED) {
+			tcpErr = err
+			if !osproc.IsConnRefused(err) {
 				break
 			}
 		}
 	}
 	c, err := adbOpen(ctx, a.serial, "localabstract:"+agentSocket)
 	if err != nil {
+		if tcpErr != nil {
+			return nil, nil, "", fmt.Errorf("%w (and over TCP: %v)", err, tcpErr)
+		}
 		return nil, nil, "", err
 	}
 	return c, bufio.NewReaderSize(c, 1<<20), "adb", nil
@@ -260,10 +275,11 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 		tcpArgs = fmt.Sprintf("AGEMU_TOKEN=%s ", a.token)
 	}
 	start := fmt.Sprintf("for p in $(pidof agemu-agent); do kill $p; done; %sCLASSPATH=%s nohup app_process /system/bin --nice-name=agemu-agent agemu.Agent %s %d >/data/local/tmp/agemu-agent.log 2>&1 &", tcpArgs, agentDevicePath, agentSocket, agentGuestPort)
-	if _, err := adbShell(ctx, a.serial, start); err != nil {
+	started, err := adbShell(ctx, a.serial, start)
+	if err != nil {
 		return true, fmt.Errorf("starting agent: %w", err)
 	}
-	deadline := time.Now().Add(60 * time.Second) // app_process + UiAutomation connect can be slow on a loaded host
+	deadline := time.Now().Add(slowHost(60 * time.Second)) // app_process + UiAutomation connect can be slow on a loaded host
 	for {
 		pctx, cancel := context.WithTimeout(ctx, time.Second)
 		p, err = a.ping(pctx)
@@ -276,7 +292,13 @@ func ensureAgent(ctx context.Context, a *agentClient, logf func(string, ...any))
 			if err == nil {
 				err = fmt.Errorf("version %s", p.Version)
 			}
-			return true, fmt.Errorf("agent did not start: %v; log: %s", err, lastLines(log.Stdout, 8))
+			msg := fmt.Sprintf("agent did not start: %v; log: %s", err, lastLines(log.Stdout, 8))
+			if strings.TrimSpace(log.Stdout) == "" { // it never ran: say what the device shows
+				diag, derr := adbShell(ctx, a.serial, "ls -l "+agentDevicePath+" /data/local/tmp/agemu-agent.log; pidof agemu-agent; getprop sys.boot_completed")
+				msg += fmt.Sprintf("; start command: exit %d %q; device: %q %q %v", started.Exit,
+					strings.TrimSpace(started.Stdout+started.Stderr), strings.TrimSpace(diag.Stdout), strings.TrimSpace(diag.Stderr), derr)
+			}
+			return true, errors.New(msg)
 		}
 		select {
 		case <-ctx.Done():
@@ -347,12 +369,29 @@ func agentToken(avd string) string {
 // every snapshot load, which agemu itself does not wait for).
 func waitDevice(ctx context.Context, serial string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var offlineSince time.Time
 	for {
 		c, cancel := context.WithTimeout(ctx, 2*time.Second)
 		st, err := adbState(c, serial)
 		cancel()
 		if err == nil && st == "device" {
 			return nil
+		}
+		// adb reconnects 0.2-0.6 s after a snapshot load on macOS; on a Linux host it stayed
+		// offline for minutes after a reset. After a few seconds offline, ask the adb server to
+		// reconnect this device (`adb -s <serial> reconnect`; other devices are left alone), at
+		// most every 10 s per device across all callers.
+		if st == "offline" || (err != nil && strings.Contains(err.Error(), "offline")) { // the server answers "device offline" as an error
+			if offlineSince.IsZero() {
+				offlineSince = time.Now()
+			}
+			if time.Since(offlineSince) > 3*time.Second && reconnectDue(serial, 10*time.Second) {
+				rc, rcancel := context.WithTimeout(ctx, 2*time.Second)
+				adbReconnect(rc, serial)
+				rcancel()
+			}
+		} else {
+			offlineSince = time.Time{}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%s not online in adb after %v (state %q, %v)", serial, timeout, st, err)

@@ -1,0 +1,102 @@
+name: e2e-windows
+
+# The Android end-to-end run (scripts/e2e-android.sh, in Git Bash) on a real emulator on Windows.
+# The probe app for the capability checks is built on Linux (testapps/android/build.sh is a bash
+# script around the SDK's build tools and the NDK) and handed over as an artifact.
+#
+# Run it by hand, on a runner with real hardware virtualization (runs-on below). On GitHub's
+# hosted windows-latest (2026-11) the emulator starts under nested WHPX and the guest reports boot
+# completion after about 5 minutes, but its system services then fail binder calls
+# (DeadObjectException from the accessibility manager, "Broken pipe" for the emulator's own `am`
+# calls), so agemu's on-device agent cannot register its UiAutomation and the run fails there.
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: "Runner label (a self-hosted Windows machine with WHPX is best)"
+        default: windows-latest
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: build the probe app for x86_64
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" > /dev/null
+          AGEMU_PROBE_ABI=x86_64 testapps/android/build.sh "$PWD/agemu-probe.apk"
+          unzip -l agemu-probe.apk | grep 'lib/x86_64/libprobe.so'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-apk
+          path: agemu-probe.apk
+          retention-days: 3
+
+  android:
+    needs: probe
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGE: "system-images;android-37.1;google_apis_playstore_ps16k;x86_64"
+      AGEMU_ANDROID_TIMEOUT_SCALE: "5" # nested virtualization and software rendering are slow
+      AGEMU_E2E_TIMEOUT_SCALE: "6"
+      AGEMU_ANDROID_RAM_MB: "4096" # at 2 GB the x86_64 guest's lmkd killed Settings during its search
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/download-artifact@v4
+        with:
+          name: probe-apk
+      - name: install the emulator and the x86_64 system image
+        run: |
+          sm="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat"
+          yes | "$sm" --licenses > /dev/null || true
+          "$sm" --install emulator platform-tools "$IMAGE" > /dev/null
+          "$ANDROID_HOME/emulator/emulator.exe" -version | head -1
+      - name: build (Android only)
+        run: |
+          go build -o bin/android/agemu.exe ./cmd/agemu
+          go build -tags noios -o bin/android/agemud.exe ./cmd/agemud
+      - name: doctor
+        run: |
+          export AGEMU_HOME="$RUNNER_TEMP/agemu-e2e"
+          bin/android/agemu.exe doctor
+      - name: e2e
+        run: |
+          export AGEMU_HOME="$RUNNER_TEMP/agemu-e2e"
+          AGEMU_BIN="$PWD/bin/android/agemu.exe" AGEMU_E2E_PROBE_APK="$PWD/agemu-probe.apk" PYTHON=python \
+            scripts/e2e-android.sh agemu-ci
+      - name: logs
+        if: failure()
+        run: |
+          adb="$ANDROID_HOME/platform-tools/adb.exe"
+          "$adb" version || true
+          "$adb" devices -l || true
+          tasklist | grep -i -E 'adb|qemu|emulator' || true
+          "$adb" -s emulator-5580 shell 'ls -l /data/local/tmp; cat /data/local/tmp/agemu-agent.log; logcat -d -t 300 | grep -i -E "agemu|AndroidRuntime|app_process" | tail -n 40' || true
+          tail -n 200 "$RUNNER_TEMP/agemu-e2e/daemon.log" || true
+          tail -n 100 "$RUNNER_TEMP"/agemu-e2e/android/*.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-windows-logs
+          path: |
+            ${{ runner.temp }}/agemu-e2e/daemon.log
+            ${{ runner.temp }}/agemu-e2e/android/*.log
+          retention-days: 7
+          if-no-files-found: ignore

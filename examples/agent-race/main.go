@@ -1,3 +1,5 @@
+//go:build !windows
+
 // agent-race runs one shopping task in the Agemu Shop example app (examples/shop) the way an
 // agent's tool calls would, and records it: the screen (host-side: the emulator's gRPC frame
 // stream, or the Simulator's own video), every tool call with its start and end, and the CPU and

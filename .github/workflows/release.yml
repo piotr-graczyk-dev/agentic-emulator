@@ -1,7 +1,8 @@
 name: release
 
-# Pushing a tag vX.Y.Z builds the binaries on Apple Silicon, publishes a GitHub release with the
-# tarball install.sh downloads, and publishes the npm package agentic-emulator. A tag with a
+# Pushing a tag vX.Y.Z builds the binaries on Apple Silicon (and cross-compiles the Linux and
+# Windows ones), publishes a GitHub release with the archives install.sh and install.ps1
+# download, and publishes the npm package agentic-emulator, which holds every platform's binaries. A tag with a
 # suffix (v0.2.0-rc.1) is a prerelease on GitHub and goes to npm's "next" tag.
 # Run it by hand (Actions > release > Run workflow) for a dry run: it builds and packages, and
 # uploads the files as an artifact without publishing anything.
@@ -59,10 +60,10 @@ jobs:
         # A rerun (say after a failed npm publish) reuses the release and replaces its files.
         run: |
           if gh release view "$VERSION" > /dev/null 2>&1; then
-            gh release upload "$VERSION" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS --clobber
+            gh release upload "$VERSION" dist/*.tar.gz dist/*.zip dist/*.tgz dist/SHA256SUMS --clobber
           else
             pre=""; case "$VERSION" in *-*) pre="--prerelease";; esac
-            gh release create "$VERSION" dist/*.tar.gz dist/*.tgz dist/SHA256SUMS \
+            gh release create "$VERSION" dist/*.tar.gz dist/*.zip dist/*.tgz dist/SHA256SUMS \
               --title "$VERSION" --generate-notes $pre
           fi
       - name: npm publish

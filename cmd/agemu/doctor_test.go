@@ -7,12 +7,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -156,7 +158,7 @@ func fakeHungDaemon() {
 	if err != nil {
 		os.Exit(3)
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := osproc.TryLock(lock, true); err != nil {
 		os.Exit(4)
 	}
 	_, _ = lock.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
@@ -174,6 +176,15 @@ func fakeHungDaemon() {
 	}
 }
 
+// sockTmp is where tests put an AGEMU_HOME with the daemon's socket: /tmp, since unix socket
+// paths are limited to about 100 bytes and $TMPDIR on macOS is long; the default elsewhere.
+func sockTmp() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "/tmp"
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("AGEMU_TEST_FAKE_HUNG_DAEMON") == "1" {
 		fakeHungDaemon()
@@ -183,8 +194,8 @@ func TestMain(m *testing.M) {
 
 func TestStopAHungDaemon(t *testing.T) {
 	defer func(g time.Duration) { stopGrace = g }(stopGrace)
-	stopGrace = 500 * time.Millisecond              // the fake ignores SIGTERM: it gets SIGKILL after this
-	home, err := os.MkdirTemp("/tmp", "agemu-hung") // unix socket paths are limited to 104 bytes
+	stopGrace = 500 * time.Millisecond                 // the fake ignores SIGTERM: it gets SIGKILL after this
+	home, err := os.MkdirTemp(sockTmp(), "agemu-hung") // unix socket paths are limited to 104 bytes
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +242,11 @@ func TestStopAHungDaemon(t *testing.T) {
 }
 
 // fakePingDaemon answers ping with p on $AGEMU_HOME's socket until the test ends.
-func fakePingDaemon(t *testing.T, p daemon.Ping) {
+func fakePingDaemon(t *testing.T, p daemon.Ping) { fakePingDaemonExit(t, p, nil) }
+
+// fakePingDaemonExit is fakePingDaemon whose exit method runs onExit (the process stand-in exits,
+// as a real daemon does; `agemu daemon stop` asks for it on Windows).
+func fakePingDaemonExit(t *testing.T, p daemon.Ping, onExit func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", daemon.SocketPath())
 	if err != nil {
@@ -253,6 +268,10 @@ func fakePingDaemon(t *testing.T, p daemon.Ping) {
 						return
 					}
 					res, _ := json.Marshal(p)
+					if req.Method == "exit" && onExit != nil {
+						onExit()
+						res = json.RawMessage(`{"ok":true}`)
+					}
 					resp, _ := json.Marshal(daemon.Response{ID: req.ID, Result: res})
 					if _, err := conn.Write(append(resp, '\n')); err != nil {
 						return
@@ -269,7 +288,7 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 	defer func(v string) { daemon.Version = v }(daemon.Version)
 	daemon.Version = "v0.2.0"
 	for _, preparing := range [][]string{{"android:agemu-pixel-9"}, nil} {
-		home, err := os.MkdirTemp("/tmp", "agemu-prep") // unix socket paths are limited to 104 bytes
+		home, err := os.MkdirTemp(sockTmp(), "agemu-prep") // unix socket paths are limited to 104 bytes
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -282,8 +301,8 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 		}
 		exited := make(chan struct{})
 		go func() { old.Wait(); close(exited) }()
-		fakePingDaemon(t, daemon.Ping{OK: true, PID: old.Process.Pid, Version: "v0.1.0", Exe: "/elsewhere/agemud",
-			Started: time.Now(), Preparing: preparing})
+		fakePingDaemonExit(t, daemon.Ping{OK: true, PID: old.Process.Pid, Version: "v0.1.0", Exe: "/elsewhere/agemud",
+			Started: time.Now(), Preparing: preparing}, func() { _ = old.Process.Kill() })
 
 		restartIfOutdated()
 		select {
@@ -301,6 +320,9 @@ func TestRestartIfOutdatedSkipsAPreparingDaemon(t *testing.T) {
 }
 
 func TestFrameworksCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake helpers are shell scripts; the iOS checks run on macOS only")
+	}
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		name, script string

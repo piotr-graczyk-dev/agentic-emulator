@@ -3,12 +3,16 @@ package toolchain
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 // fakeJava puts a java on PATH that reports version v.
 func fakeJava(t *testing.T, v string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake java is a shell script")
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "java")
 	script := "#!/bin/sh\necho 'openjdk version \"" + v + "\" 2025-01-21' >&2\n"
@@ -49,7 +53,7 @@ func TestJavaSkipsAnOldJavaOnPath(t *testing.T) {
 	bin := fakeJava(t, "1.8.0_402")
 	got, home := Java()
 	if got == bin {
-		if javaHomeTool("-v", "17+") != "" || isFile(filepath.Join(AndroidStudioJBR, "bin", "java")) {
+		if javaHomeTool("-v", "17+") != "" || isFile(filepath.Join(AndroidStudioJBR(), "bin", "java")) {
 			t.Fatalf("Java() kept Java 8 on PATH over a JDK 17+")
 		}
 		return // no JDK 17+ on this Mac: the old one is reported
@@ -68,5 +72,44 @@ func TestParseJavaVersion(t *testing.T) {
 		if got, err := ParseJavaVersion(out); err != nil || got != want {
 			t.Errorf("ParseJavaVersion(%q) = %d, %v; want %d", out, got, err, want)
 		}
+	}
+}
+
+func TestDefaultAndroidImageMatchesHostArchitecture(t *testing.T) {
+	for goarch, want := range map[string]string{
+		"arm64": "system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a",
+		"amd64": "system-images;android-37.1;google_apis_playstore_ps16k;x86_64",
+	} {
+		if got := defaultAndroidImage(goarch); got != want {
+			t.Errorf("defaultAndroidImage(%q) = %q, want %q", goarch, got, want)
+		}
+	}
+}
+
+func TestStudioSDKPerOS(t *testing.T) {
+	for _, c := range []struct{ goos, home, lad, want string }{
+		{"darwin", "/Users/a", "", filepath.Join("/Users/a", "Library", "Android", "sdk")},
+		{"linux", "/home/a", "", filepath.Join("/home/a", "Android", "Sdk")},
+		{"windows", `C:\Users\a`, `C:\Users\a\AppData\Local`, filepath.Join(`C:\Users\a\AppData\Local`, "Android", "Sdk")},
+		{"windows", `C:\Users\a`, "", filepath.Join(`C:\Users\a`, "AppData", "Local", "Android", "Sdk")},
+	} {
+		if got := studioSDK(c.goos, c.home, c.lad); got != c.want {
+			t.Errorf("studioSDK(%s) = %q, want %q", c.goos, got, c.want)
+		}
+	}
+}
+
+func TestToolNamesPerOS(t *testing.T) {
+	t.Setenv("ANDROID_HOME", filepath.Join("sdk"))
+	emu, adb, avd := Emulator(), ADB(), AVDManager()
+	if runtime.GOOS == "windows" {
+		if filepath.Ext(emu) != ".exe" || filepath.Ext(adb) != ".exe" || filepath.Ext(avd) != ".bat" {
+			t.Fatalf("Windows tool names: %s %s %s", emu, adb, avd)
+		}
+		return
+	}
+	if emu != filepath.Join("sdk", "emulator", "emulator") || adb != filepath.Join("sdk", "platform-tools", "adb") ||
+		avd != filepath.Join("sdk", "cmdline-tools", "latest", "bin", "avdmanager") {
+		t.Fatalf("tool paths: %s %s %s", emu, adb, avd)
 	}
 }

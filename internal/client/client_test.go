@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -96,7 +97,11 @@ func TestTheCrashNoticeSurvivesTheSocket(t *testing.T) {
 // A daemon that restarts between two calls must not break a long-lived client (an MCP session):
 // the request found the old connection closed, so it is sent again on a new one.
 func TestClientReconnectsAfterTheDaemonRestarts(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "agemu-client") // unix socket paths are limited to 104 bytes
+	root := "/tmp" // unix socket paths are limited to 104 bytes; $TMPDIR on macOS is long
+	if runtime.GOOS == "windows" {
+		root = ""
+	}
+	dir, err := os.MkdirTemp(root, "agemu-client")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Fast animations (opt-in, AGEMU_IOS_ANIMATIONS). UIKit multiplies the duration (and the delay)

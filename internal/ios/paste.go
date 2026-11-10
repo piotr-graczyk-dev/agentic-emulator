@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Confirming a paste (docs/IOS.md "type").

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end proof for the Android backend. Everything goes through the agemu CLI
 # ($AGEMU_BIN, default bin/android/agemu; agemud must sit next to it)
-# (no adb, no emulator commands); `sips` only reads PNG sizes on the host.
+# (no adb, no emulator commands); python3 reads PNG sizes and times steps on the host
+# ($PYTHON names another interpreter, e.g. python on Windows); AGEMU_E2E_TIMEOUT_SCALE
+# lengthens its waits on a slow host. It runs on macOS, Linux and in
+# Git Bash on Windows. $AGEMU_E2E_PROBE_APK uses a prebuilt probe app instead of building it.
 #
 #   scripts/e2e-android.sh [avd-name]        default: agemu-pixel
 #
@@ -19,20 +22,39 @@ PASS=0
 
 [[ -x "$AG" ]] || { echo "build first: make android-build (or make build and AGEMU_BIN=bin/agemu)" >&2; exit 2; }
 
+# py runs Python; Windows' Python ends lines with CRLF, so the CR is dropped for bash.
+py() { "${PYTHON:-python3}" "$@" | tr -d '\r'; }
 step() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '   ok: %s\n' "$*"; }
-fail() { printf '   FAIL: %s\n' "$*" >&2; exit 1; }
-ag() { "$AG" "$@" -d "$DEV"; }
+fail() {
+  printf '   FAIL: %s\n' "$*" >&2
+  "$AG" ui -d "$DEV" >"$OUT/fail-ui.txt" 2>&1 || true # what the screen showed, for the artifacts
+  "$AG" screenshot -o "$OUT/fail.png" -d "$DEV" >/dev/null 2>&1 || true
+  exit 1
+}
+# ag runs agemu on the device. AGEMU_E2E_TIMEOUT_SCALE (a whole number, default 1) multiplies
+# every --timeout-ms, for a slow host where the guest's apps react slowly (CI with software
+# rendering or nested virtualization).
+ag() {
+  local a=() scale="${AGEMU_E2E_TIMEOUT_SCALE:-1}" next=0
+  for x in "$@"; do
+    if ((next)); then x=$((x * scale)); next=0; fi
+    [[ "$x" == --timeout-ms ]] && next=1
+    a+=("$x")
+  done
+  "$AG" "${a[@]}" -d "$DEV"
+}
 # timed runs a command and prints its wall time.
 timed() {
   local t0 t1 out
-  t0=$(python3 -c 'import time; print(time.time())')
+  t0=$(py -c 'import time; print(time.time())')
   out=$("$@") || { echo "$out"; return 1; }
-  t1=$(python3 -c 'import time; print(time.time())')
-  printf '   (%s: %.0f ms)\n' "$*" "$(python3 -c "print(($t1-$t0)*1000)")" >&2
+  t1=$(py -c 'import time; print(time.time())')
+  printf '   (%s: %.0f ms)\n' "$*" "$(py -c "print(($t1-$t0)*1000)")" >&2
   printf '%s' "$out"
 }
-png_size() { sips -g pixelWidth -g pixelHeight "$1" | awk '/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{print w "x" h}'; }
+# png_size reads a PNG's width and height from its IHDR chunk (sips on macOS is not needed).
+png_size() { py -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"; }
 
 step "create (if missing) and boot $DEV"
 if "$AG" devices | grep -q "\"id\":\"$DEV\""; then
@@ -79,20 +101,41 @@ ag find --id open_search_view_edit_text --json >"$OUT/field.json"
 cat "$OUT/field.json"; echo
 grep -q '"text":"network"' "$OUT/field.json" || fail "typed text not in the UI tree (want \"network\": the second type appends)"
 ok "search field contains \"network\" (two type calls, appended at the cursor)"
-ag wait --id breadcrumb --timeout-ms 15000 >"$OUT/result.json" || fail "Settings search showed no results for \"network\""
-ag find --id breadcrumb >"$OUT/results.txt"
-head -3 "$OUT/results.txt"
-ok "Settings search lists $(wc -l <"$OUT/results.txt" | tr -d ' ') results for \"network\" (TextWatcher ran the query)"
+# search_ran waits for Settings' answer to the query: results, or (on a fresh guest whose
+# search index is still empty, seen on CI emulators) its "No results" screen. Either shows that
+# the app's TextWatcher ran the query; it prints which.
+search_ran() {
+  if ag wait --id breadcrumb --timeout-ms 15000 >/dev/null 2>&1; then
+    echo results
+  elif ag find --contains "No results" --json 2>/dev/null | grep -q '"ref"'; then # its id varies by version
+    echo none
+  else
+    return 1
+  fi
+}
+answer=$(search_ran) || fail "Settings search did not answer the query \"network\""
+if [[ "$answer" == results ]]; then
+  ag find --id breadcrumb >"$OUT/results.txt"
+  head -3 "$OUT/results.txt"
+  ok "Settings search lists $(wc -l <"$OUT/results.txt" | tr -d ' ') results for \"network\" (TextWatcher ran the query)"
+else
+  ok "Settings search answered \"network\" with No results (TextWatcher ran the query; this guest's search index is empty)"
+fi
 ag screenshot -o "$OUT/shot-search.png" >/dev/null
 
 step "type --keys (one key event per character through the keyboard)"
 ag tap --text "Clear text" >/dev/null || fail "no Clear text button"
 ag wait --id breadcrumb --gone --timeout-ms 8000 >/dev/null || fail "results did not clear"
+# Key events typed while the field still clears can be lost: wait until it is empty.
+for _ in $(seq 40); do
+  ag find --id open_search_view_edit_text --json | grep -q '"text":"network"' || break
+  sleep 0.25
+done
 timed ag type --keys "wifi" >/dev/null
 ag find --id open_search_view_edit_text --json >"$OUT/field-keys.json"
 grep -q '"text":"wifi"' "$OUT/field-keys.json" || fail "type --keys: field is $(cat "$OUT/field-keys.json")"
-ag wait --id breadcrumb --timeout-ms 15000 >/dev/null || fail "Settings search showed no results for \"wifi\""
-ok "type --keys typed \"wifi\" and Settings lists results"
+answer=$(search_ran) || fail "Settings search did not answer the query \"wifi\""
+ok "type --keys typed \"wifi\" and Settings answered ($answer)"
 ag key back >/dev/null
 ag key back >/dev/null
 ag wait --text "Search Settings" --timeout-ms 8000 >/dev/null || ag key back >/dev/null
@@ -147,7 +190,9 @@ ag key home >/dev/null
 # (testapps/android) is built with the SDK build tools. Without them the run fails, unless
 # AGEMU_E2E_SKIP_CAPS=1 asks to skip this part (then it does not claim that all checks passed).
 PROBE=dev.agemu.probe
-if ! testapps/android/build.sh "$OUT/agemu-probe.apk" >"$OUT/probe-build.log" 2>&1; then
+if [[ -n "${AGEMU_E2E_PROBE_APK:-}" ]]; then
+  cp "$AGEMU_E2E_PROBE_APK" "$OUT/agemu-probe.apk" || fail "no probe app at $AGEMU_E2E_PROBE_APK"
+elif ! testapps/android/build.sh "$OUT/agemu-probe.apk" >"$OUT/probe-build.log" 2>&1; then
   if [[ "${AGEMU_E2E_SKIP_CAPS:-0}" == 1 ]]; then
     printf '\n== capabilities: SKIPPED (could not build the probe app, see %s)\n' "$OUT/probe-build.log"
     printf '\n%d CHECKS PASSED, CAPABILITY CHECKS SKIPPED (artifacts in %s)\n' "$PASS" "$OUT"
@@ -253,8 +298,8 @@ ok "push answers not implemented (exit 3)"
 # its :remote process.
 LAB="$PROBE/.LabActivity"
 # entries prints "level process tag message" per entry of a logs --json result on stdin.
-entries() { python3 -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
-cursor() { python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
+entries() { py -c 'import json,sys; [print(e["level"], e.get("process",""), e.get("tag",""), (e["message"].splitlines() or [""])[0]) for e in json.load(sys.stdin)["entries"]]'; }
+cursor() { py -c 'import json,sys; print(json.load(sys.stdin)["cursor"])'; }
 lab() { ag launch "$LAB" >/dev/null; ag wait --contains "lab: ready" --timeout-ms 8000 >/dev/null || fail "lab screen did not start"; }
 
 step "logs: levels, the app's processes only, cursor, since launch"

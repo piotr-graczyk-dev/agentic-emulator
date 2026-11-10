@@ -1,9 +1,11 @@
 # bin/agemu      thin CLI + MCP server (one process per agent action, so it stays small)
 # bin/agemud     device daemon with both backends, started on demand by agemu
-# bin/agemu-ios-helper, bin/agemu-bench
-# Platform-specific build steps live in mk/<platform>.mk and hook into build-extra.
+# bin/agemu-ios-helper (macOS only), bin/agemu-bench
+# Platform-specific build steps live in mk/<platform>.mk and hook into build-extra. On Linux the
+# same targets build and install agemu and agemud (Android only). On Windows build with plain Go:
+#   go build -o bin\agemu.exe .\cmd\agemu  and  go build -o bin\agemud.exe .\cmd\agemud
 #
-#   make install     build, copy agemu, agemud and agemu-ios-helper to $(PREFIX)/bin,
+#   make install     build, copy agemu, agemud (and on macOS agemu-ios-helper) to $(PREFIX)/bin,
 #                    restart a running daemon on the new build, run `agemu doctor`
 #   make uninstall   remove them (devices and ~/.agemu stay)
 .PHONY: build test vet build-extra install uninstall
@@ -11,7 +13,10 @@ BIN := bin
 PREFIX ?= $(HOME)/.local
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/piotr-graczyk-dev/agentic-emulator/internal/daemon.Version=$(VERSION)
-INSTALL_BINS := agemu agemud agemu-ios-helper
+INSTALL_BINS := agemu agemud
+ifeq ($(shell uname -s),Darwin)
+INSTALL_BINS += agemu-ios-helper
+endif
 
 build: build-extra
 	go build -ldflags "$(LDFLAGS)" -o $(BIN)/agemu ./cmd/agemu
@@ -22,8 +27,8 @@ test:
 	go vet ./...
 	go test ./...
 
-# The three binaries must stay together: agemu starts the agemud next to it, and agemud the
-# helper next to itself. All three are copied before any is replaced, so a failed copy leaves
+# The binaries must stay together: agemu starts the agemud next to it, and agemud the
+# helper next to itself. All are copied before any is replaced, so a failed copy leaves
 # the installation as it was, and moved into place, never rewritten: macOS SIGKILLs a signed
 # binary rewritten in place.
 install: build

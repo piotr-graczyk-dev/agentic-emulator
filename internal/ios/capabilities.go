@@ -1,3 +1,5 @@
+//go:build !windows
+
 package ios
 
 // Test capabilities (docs/CAPABILITIES.md, docs/IOS.md "Test capabilities"). Each is the call

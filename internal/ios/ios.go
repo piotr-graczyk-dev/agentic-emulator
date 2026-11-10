@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package ios is the iOS Simulator backend. It drives the real iOS Simulator runtime
 // through CoreSimulator, via the long-lived agemu-ios-helper process (ios-helper/), which
 // reads the framebuffer, injects HID events and reads the accessibility tree in-process.

@@ -97,8 +97,8 @@ method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/A
   the system has settled, so every later boot and reset is fast and quiet.
 - **More devices don't add up.** On a 16 GB Mac, total throughput levels off at about 2.5 devices'
   worth.
-- **It needs an Apple Silicon Mac, and iOS support relies on private Xcode APIs.** See
-  [Known limitations](#known-limitations).
+- **iOS needs an Apple Silicon Mac and relies on private Xcode APIs.** Android also runs on Linux
+  and Windows, where it is newer and less measured. See [Known limitations](#known-limitations).
 
 ## Install
 
@@ -113,7 +113,8 @@ fine.
 
 | | Needed for |
 |---|---|
-| Apple Silicon Mac | everything |
+| Apple Silicon Mac | everything on macOS |
+| or Linux (x86-64, arm64) with KVM, or Windows (x86-64) with WHPX | Android ([Linux and Windows](docs/INSTALL.md#linux-and-windows); the image is the `x86_64` one on x86-64) |
 | Xcode with an iOS Simulator runtime | iOS |
 | Android SDK (emulator, platform-tools, command-line tools), the arm64 image `system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a` and Java 17+ | Android |
 
@@ -121,8 +122,10 @@ For agents that use a shell, put `agemu` on `PATH`:
 
 ```sh
 npm install -g agentic-emulator
-# or without Node, into ~/.local/bin:
+# or without Node, into ~/.local/bin (macOS, Linux):
 curl -fsSL https://raw.githubusercontent.com/piotr-graczyk-dev/agentic-emulator/main/install.sh | sh
+# or on Windows, in PowerShell:
+irm https://raw.githubusercontent.com/piotr-graczyk-dev/agentic-emulator/main/install.ps1 | iex
 ```
 
 Other MCP clients, updates, uninstalling, building from source and troubleshooting:
@@ -184,7 +187,7 @@ shell. Devices keep running across a restart.
 | `AGEMU_IOS_IDLE_EXIT` | on | Lean simulators end the on-demand daemons that stay idle after boot, except those found behind public app APIs. `all`: those too (an app's first call to one then waits for its restart, up to 2-3 s); `0`: none. |
 | `AGEMU_IOS_IDLE_KEEP` | unset | Comma-separated daemon names (executable file names) that are never ended as idle. |
 | `AGEMU_ANDROID_LEAN` | `1` | `0`: keep the Google apps (applies when a baseline is taken). |
-| `AGEMU_ANDROID_GPU` | `host` | `auto`: software rendering. |
+| `AGEMU_ANDROID_GPU` | `host` (`auto` on Linux without a display) | `auto`: software rendering. |
 | `AGEMU_ANDROID_SNAPSHOT_COMPRESS` | `1` | `0`: raw baseline (applies when a baseline is taken). |
 | `AGEMU_ANDROID_BASELINE_UPTIME_S` | `420` | Guest uptime (and a quiet minute) the baseline waits for; a first boot then takes 7-8 min (at most 20), during which the device is `preparing`; `0`: save at once (applies when a baseline is taken). |
 | `AGEMU_ANDROID_FIRSTBOOT_REPAIR` | `1` | `0`: do not boot an AVD whose first boot was interrupted before it ever completed with `-wipe-data` (two interruptions about 10 s in leave it unbootable otherwise). |
@@ -216,6 +219,11 @@ shell. Devices keep running across a restart.
 - **Android profiles other than the AVD's native one are resampled.** Create the AVD with
   `--profile <name>` to make that profile pixel-exact.
 - **Rotation isn't handled**, and iPad Split View and Slide Over are untested.
+- **Android on Windows is a preview.** On GitHub's Windows runner the emulator boots under agemu,
+  but the guest's services fail under nested virtualization, so the UI tree and taps are not yet
+  verified on Windows. CI covers the unit tests, the daemon and the installers there, and runs the
+  Android end-to-end test on Linux with KVM. Windows screenshots use the gRPC reply for now (see
+  [docs/INSTALL.md](docs/INSTALL.md#linux-and-windows)).
 
 ## Documentation
 

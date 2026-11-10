@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/android/emupb"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/osproc"
 )
 
 // emuClient is a gRPC connection to one running emulator (EmulatorController + SnapshotService).
@@ -65,7 +66,7 @@ func (e *emuClient) Close() error {
 // enableShm switches screenshots to the MMAP transport (AGEMU_ANDROID_SHM=0 disables it) and
 // starts the frame stream (AGEMU_ANDROID_STREAM=0 disables it), which uses its own mapping.
 func (e *emuClient) enableShm(path string, w, h int) {
-	if env("AGEMU_ANDROID_SHM", "1") == "0" || w <= 0 || h <= 0 {
+	if env("AGEMU_ANDROID_SHM", defaultSHM(runtime.GOOS)) == "0" || w <= 0 || h <= 0 {
 		return
 	}
 	s, err := openShm(path, w, h)
@@ -83,6 +84,16 @@ func (e *emuClient) enableShm(path string, w, h int) {
 		return
 	}
 	e.stream = startFrameStream(e.ctl, ss, path, w, h, streamIdle())
+}
+
+// defaultSHM is AGEMU_ANDROID_SHM's default: on, except on Windows, where the emulator's file
+// mapping of the frame has not been verified yet; frames then travel in the gRPC reply
+// (AGEMU_ANDROID_SHM=1 turns the mapping on there).
+func defaultSHM(goos string) string {
+	if goos == "windows" {
+		return "0"
+	}
+	return "1"
 }
 
 func (e *emuClient) status(ctx context.Context) (*emupb.EmulatorStatus, error) {
@@ -153,7 +164,7 @@ func openShm(path string, w, h int) (*shm, error) {
 	if err := f.Truncate(int64(size)); err != nil {
 		return nil, err
 	}
-	data, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	data, err := osproc.MapFile(f, size)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +179,7 @@ func (s *shm) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.data != nil {
-		_ = syscall.Munmap(s.data)
+		_ = osproc.Unmap(s.data)
 		s.data = nil
 	}
 }

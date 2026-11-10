@@ -19,8 +19,9 @@ import (
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
 
-// `agemu doctor` checks everything agemu needs on this Mac, per platform, and prints the
-// commands that fix what is missing. It runs in the CLI and does not start the daemon.
+// `agemu doctor` checks everything agemu needs on this computer, per platform, and prints the
+// commands that fix what is missing. It runs in the CLI and does not start the daemon. iOS is
+// checked on macOS only: the iOS Simulator does not exist anywhere else.
 
 type checkStatus string
 
@@ -113,6 +114,15 @@ func runDoctor(only string) doctorReport {
 		if only != "" && only != plat.key {
 			continue
 		}
+		if plat.key == "ios" && runtime.GOOS != "darwin" {
+			if only == "ios" {
+				s := doctorSection{Title: "iOS", Ready: new(bool), Checks: []check{{Name: "macOS", Status: statusFail,
+					Detail: "the iOS Simulator runs only on macOS with Xcode; on " + osName(runtime.GOOS) + " agemu drives Android"}}}
+				rep.Ready["ios"] = false
+				rep.Sections = append(rep.Sections, s)
+			}
+			continue
+		}
 		s := plat.run(d)
 		if d.lacks(api.Platform(plat.key)) {
 			s.add(check{Name: "daemon backend", Status: statusFail,
@@ -186,13 +196,7 @@ func mcpBinary() string {
 func coreChecks(d daemonInfo) doctorSection {
 	s := doctorSection{Title: "agemu"}
 
-	host := check{Name: "Apple Silicon Mac", Status: statusOK}
-	ver, _ := output(5*time.Second, "sw_vers", "-productVersion")
-	host.Detail = strings.TrimSpace("macOS " + ver + " (" + runtime.GOARCH + ")")
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		host.Status, host.Detail = statusFail, fmt.Sprintf("%s/%s: agemu runs on Apple Silicon Macs only", runtime.GOOS, runtime.GOARCH)
-	}
-	s.add(host)
+	s.add(hostCheck(runtime.GOOS, runtime.GOARCH))
 
 	if p, err := client.DaemonPath(); err != nil {
 		s.add(check{Name: "agemud", Status: statusFail, Detail: err.Error(), Fix: []string{"make build    # in the agemu checkout; or: make install"}})
@@ -228,13 +232,19 @@ func coreChecks(d daemonInfo) doctorSection {
 		dir := filepath.Dir(self)
 		onPath.Status = statusWarn
 		onPath.Detail = "agemu is not on PATH; agents and MCP configs then need its full path"
+		rc := "~/.zshrc && exec zsh"
+		if runtime.GOOS == "linux" {
+			rc = "~/.bashrc && exec bash"
+		}
 		switch _, mk := os.Stat(filepath.Join(dir, "..", "Makefile")); {
+		case runtime.GOOS == "windows":
+			onPath.Fix = []string{`[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";` + dir + `", "User")    # PowerShell; then open a new terminal`}
 		case strings.HasSuffix(dir, "/.local/bin"):
-			onPath.Fix = []string{`echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh`}
+			onPath.Fix = []string{`echo 'export PATH="$HOME/.local/bin:$PATH"' >> ` + rc}
 		case mk == nil && filepath.Base(dir) == "bin":
 			onPath.Fix = []string{"make install    # in " + tilde(filepath.Dir(dir)) + ": copies agemu to ~/.local/bin"}
 		default:
-			onPath.Fix = []string{`echo 'export PATH="` + dir + `:$PATH"' >> ~/.zshrc && exec zsh`}
+			onPath.Fix = []string{`echo 'export PATH="` + dir + `:$PATH"' >> ` + rc}
 		}
 	} else if r, _ := filepath.EvalSymlinks(p); r != self {
 		onPath.Status = statusWarn
@@ -430,9 +440,7 @@ func androidChecks(d daemonInfo) doctorSection {
 		where += " (" + source + ")"
 	}
 	if st, err := os.Stat(sdk); err != nil || !st.IsDir() {
-		fix := []string{
-			"brew install --cask android-commandlinetools temurin    # agemu finds this SDK by itself",
-		}
+		fix := installSDKFix(runtime.GOOS)
 		if source[0] == '$' {
 			fix = append([]string{"Point " + source[1:] + " at an Android SDK, or unset it and:"}, fix...)
 		}
@@ -458,19 +466,18 @@ func androidChecks(d daemonInfo) doctorSection {
 	switch {
 	case java == "":
 		s.add(check{Name: "Java", Status: statusFail, Detail: "no Java runtime; the SDK's avdmanager and sdkmanager need Java 17+",
-			Fix: []string{"brew install --cask temurin"}})
+			Fix: []string{installJavaFix(runtime.GOOS)}})
 	case err != nil:
 		s.add(check{Name: "Java", Status: statusFail, Detail: "the Java runtime at " + tilde(java) + " does not run: " + firstLine(err.Error()),
-			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
+			Fix: []string{installJavaFix(runtime.GOOS) + "    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
 	case major < toolchain.MinJava:
 		s.add(check{Name: "Java", Status: statusFail, Detail: fmt.Sprintf("Java %d at %s; avdmanager needs %d+", major, tilde(java), toolchain.MinJava),
-			Fix: []string{"brew install --cask temurin    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
+			Fix: []string{installJavaFix(runtime.GOOS) + "    # then unset JAVA_HOME (or point it at the new JDK), or put it first on PATH"}})
 	default:
 		s.add(check{Name: "Java", Status: statusOK, Detail: fmt.Sprintf("Java %d, %s", major, tilde(java))})
 	}
 
-	sdkmanager := filepath.Join(sdk, "cmdline-tools", "latest", "bin", "sdkmanager")
-	avdmanager := filepath.Join(sdk, "cmdline-tools", "latest", "bin", "avdmanager")
+	sdkmanager, avdmanager := toolchain.SDKManager(), toolchain.AVDManager()
 	if !isExecutable(avdmanager) {
 		fix := []string{"Android Studio › Settings › Languages & Frameworks › Android SDK › SDK Tools › Android SDK Command-line Tools (latest)"}
 		if sdk == toolchain.HomebrewAndroidSDK {
@@ -485,8 +492,8 @@ func androidChecks(d daemonInfo) doctorSection {
 	image := toolchain.AndroidImage()
 	var missing []string // sdkmanager packages
 	for _, p := range []struct{ name, pkg, file string }{
-		{"emulator", "emulator", filepath.Join(sdk, "emulator", "emulator")},
-		{"platform-tools (adb)", "platform-tools", filepath.Join(sdk, "platform-tools", "adb")},
+		{"emulator", "emulator", toolchain.Emulator()},
+		{"platform-tools (adb)", "platform-tools", toolchain.ADB()},
 		{"system image", image, filepath.Join(toolchain.AndroidImageDir(image), "system.img")},
 	} {
 		c := check{Name: p.name, Status: statusOK, Detail: tilde(filepath.Dir(p.file))}
@@ -518,8 +525,14 @@ func androidChecks(d daemonInfo) doctorSection {
 			"yes | " + sm + " --licenses > /dev/null",
 			sm + " --install " + strings.Join(pkgs, " ") + "    # the image takes about 8 GB of disk",
 		}
-		if java != "" && os.Getenv("JAVA_HOME") == "" && java == toolchain.AndroidStudioJBR {
-			fix = append([]string{"export JAVA_HOME=" + shellQuote(java)}, fix...)
+		if runtime.GOOS == "windows" {
+			fix = []string{
+				`& "` + sdkmanager + `" --licenses    # accept each license with y`,
+				`& "` + sdkmanager + `" --install '` + strings.Join(missing, `' '`) + `'    # the image takes about 8 GB of disk`,
+			}
+		}
+		if jbr := toolchain.AndroidStudioJBR(); java != "" && jbr != "" && os.Getenv("JAVA_HOME") == "" && strings.HasPrefix(java, jbr) && runtime.GOOS != "windows" {
+			fix = append([]string{"export JAVA_HOME=" + shellQuote(jbr)}, fix...)
 		}
 		// One fix for all missing packages, attached to the first of them.
 		for i := range s.Checks {
@@ -528,6 +541,9 @@ func androidChecks(d daemonInfo) doctorSection {
 				break
 			}
 		}
+	}
+	if runtime.GOOS != "darwin" && isExecutable(toolchain.Emulator()) {
+		s.add(accelCheck(runtime.GOOS, toolchain.Emulator()))
 	}
 	return s
 }
@@ -623,17 +639,28 @@ func output(timeout time.Duration, name string, args ...string) (string, error) 
 	return strings.TrimSpace(string(out)), nil
 }
 
-// isExecutable reports whether p is a regular file someone may execute.
+// isExecutable reports whether p is a regular file someone may execute (on Windows: a program or
+// batch file, which Windows tells by the extension).
 func isExecutable(p string) bool {
 	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		switch strings.ToLower(filepath.Ext(p)) {
+		case ".exe", ".bat", ".cmd", ".com":
+			return true
+		}
+		return false
+	}
+	return st.Mode().Perm()&0o111 != 0
 }
 
 func firstLine(s string) string { l, _, _ := strings.Cut(s, "\n"); return l }
 
 // tilde shortens a path under the home directory for display.
 func tilde(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home+"/") {
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(p, home+string(filepath.Separator)) {
 		return "~" + p[len(home):]
 	}
 	return p

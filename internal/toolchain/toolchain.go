@@ -11,22 +11,51 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// DefaultAndroidImage is the system image agemu creates Android devices from.
-const DefaultAndroidImage = "system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a"
+// DefaultAndroidImage is the system image agemu creates Android devices from: the arm64 image on
+// an arm64 host (Apple Silicon, Linux on ARM) and its x86_64 build on an x86-64 host (Windows,
+// Linux). Each runs at near-native speed only on its own CPU architecture.
+var DefaultAndroidImage = defaultAndroidImage(runtime.GOARCH)
+
+func defaultAndroidImage(goarch string) string {
+	abi := "arm64-v8a"
+	if goarch == "amd64" {
+		abi = "x86_64"
+	}
+	return "system-images;android-37.1;google_apis_playstore_ps16k;" + abi
+}
 
 // HomebrewAndroidSDK is where `brew install --cask android-commandlinetools` puts the SDK.
 const HomebrewAndroidSDK = "/opt/homebrew/share/android-commandlinetools"
 
-// AndroidStudioJBR is the Java runtime bundled with Android Studio.
-const AndroidStudioJBR = "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+// AndroidStudioJBR is the Java runtime bundled with Android Studio in its default install
+// location on this OS ("" when that has none to look in).
+func AndroidStudioJBR() string { return androidStudioJBR(runtime.GOOS) }
 
-// AndroidSDK is the Android SDK root: $ANDROID_HOME, $ANDROID_SDK_ROOT, Android Studio's
-// ~/Library/Android/sdk, or Homebrew's android-commandlinetools when only that exists.
+func androidStudioJBR(goos string) string {
+	switch goos {
+	case "darwin":
+		return "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+	case "windows":
+		pf := os.Getenv("ProgramFiles")
+		if pf == "" {
+			pf = `C:\Program Files`
+		}
+		return filepath.Join(pf, "Android", "Android Studio", "jbr")
+	case "linux":
+		return "/opt/android-studio/jbr"
+	}
+	return ""
+}
+
+// AndroidSDK is the Android SDK root: $ANDROID_HOME, $ANDROID_SDK_ROOT, else where Android Studio
+// puts it on this OS (~/Library/Android/sdk, %LOCALAPPDATA%\Android\Sdk, ~/Android/Sdk), or on a
+// Mac Homebrew's android-commandlinetools when only that exists.
 func AndroidSDK() string {
 	sdk, _ := AndroidSDKSource()
 	return sdk
@@ -41,16 +70,53 @@ func AndroidSDKSource() (string, string) {
 		}
 	}
 	home, _ := os.UserHomeDir()
-	studio := filepath.Join(home, "Library", "Android", "sdk")
-	if !isDir(studio) && isDir(HomebrewAndroidSDK) {
+	studio := studioSDK(runtime.GOOS, home, os.Getenv("LOCALAPPDATA"))
+	if runtime.GOOS == "darwin" && !isDir(studio) && isDir(HomebrewAndroidSDK) {
 		return HomebrewAndroidSDK, "homebrew"
 	}
 	return studio, "default"
 }
 
+// studioSDK is where Android Studio installs the SDK on goos.
+func studioSDK(goos, home, localAppData string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "Android", "sdk")
+	case "windows":
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "Android", "Sdk")
+	}
+	return filepath.Join(home, "Android", "Sdk")
+}
+
 // AndroidTool is a path inside the SDK.
 func AndroidTool(parts ...string) string {
 	return filepath.Join(append([]string{AndroidSDK()}, parts...)...)
+}
+
+// Emulator, ADB, AVDManager and SDKManager are the SDK programs agemu runs, with the file
+// extension they have on this OS.
+func Emulator() string   { return exe(AndroidTool("emulator", "emulator")) }
+func ADB() string        { return exe(AndroidTool("platform-tools", "adb")) }
+func AVDManager() string { return script(AndroidTool("cmdline-tools", "latest", "bin", "avdmanager")) }
+func SDKManager() string { return script(AndroidTool("cmdline-tools", "latest", "bin", "sdkmanager")) }
+
+// exe adds Windows' .exe to a program's path.
+func exe(p string) string {
+	if runtime.GOOS == "windows" {
+		return p + ".exe"
+	}
+	return p
+}
+
+// script adds Windows' .bat to the path of one of the SDK's shell scripts.
+func script(p string) string {
+	if runtime.GOOS == "windows" {
+		return p + ".bat"
+	}
+	return p
 }
 
 // AndroidImage is the system image agemu creates devices from ($AGEMU_ANDROID_IMAGE overrides).
@@ -75,7 +141,7 @@ const MinJava = 17
 // is then the JAVA_HOME JavaEnv sets so the tools use it. bin is "" when there is no Java at all.
 func Java() (bin, home string) {
 	if v := os.Getenv("JAVA_HOME"); v != "" {
-		return filepath.Join(v, "bin", "java"), v
+		return exe(filepath.Join(v, "bin", "java")), v
 	}
 	pathJava := ""
 	// /usr/bin/java is macOS's stub, which runs java_home's default: the fallbacks cover it.
@@ -88,8 +154,8 @@ func Java() (bin, home string) {
 	if jh := javaHomeTool("-v", fmt.Sprintf("%d+", MinJava)); jh != "" {
 		return filepath.Join(jh, "bin", "java"), jh
 	}
-	if isFile(filepath.Join(AndroidStudioJBR, "bin", "java")) {
-		return filepath.Join(AndroidStudioJBR, "bin", "java"), AndroidStudioJBR
+	if jbr := AndroidStudioJBR(); jbr != "" && isFile(exe(filepath.Join(jbr, "bin", "java"))) {
+		return exe(filepath.Join(jbr, "bin", "java")), jbr
 	}
 	if pathJava != "" { // too old or broken; `agemu doctor` says which
 		return pathJava, ""
@@ -100,8 +166,12 @@ func Java() (bin, home string) {
 	return "", ""
 }
 
-// javaHomeTool runs macOS's /usr/libexec/java_home with args; "" when it finds no JDK.
+// javaHomeTool runs macOS's /usr/libexec/java_home with args; "" when it finds no JDK (and on
+// every other OS).
 func javaHomeTool(args ...string) string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
 	out, err := exec.Command("/usr/libexec/java_home", args...).Output()
 	if err != nil {
 		return ""
