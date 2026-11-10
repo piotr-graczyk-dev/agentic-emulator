@@ -369,12 +369,29 @@ func agentToken(avd string) string {
 // every snapshot load, which agemu itself does not wait for).
 func waitDevice(ctx context.Context, serial string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var offlineSince, asked time.Time
 	for {
 		c, cancel := context.WithTimeout(ctx, 2*time.Second)
 		st, err := adbState(c, serial)
 		cancel()
 		if err == nil && st == "device" {
 			return nil
+		}
+		// adb reconnects 0.2-0.6 s after a snapshot load on macOS; on a Linux host it stayed
+		// offline for minutes after a reset. After a few seconds offline, ask the adb server to
+		// reconnect offline devices (`adb reconnect offline`), at most every 10 s.
+		if st == "offline" {
+			if offlineSince.IsZero() {
+				offlineSince = time.Now()
+			}
+			if time.Since(offlineSince) > 3*time.Second && time.Since(asked) > 10*time.Second {
+				asked = time.Now()
+				rc, rcancel := context.WithTimeout(ctx, 2*time.Second)
+				adbReconnectOffline(rc)
+				rcancel()
+			}
+		} else {
+			offlineSince = time.Time{}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%s not online in adb after %v (state %q, %v)", serial, timeout, st, err)

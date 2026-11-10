@@ -152,6 +152,21 @@ func adbHostQuery(ctx context.Context, req string) (string, error) {
 	return s, ctxErr(ctx, err)
 }
 
+// adbReconnectOffline asks the adb server to drop and reopen its offline device connections, as
+// `adb reconnect offline` does. Errors are ignored: it is a nudge.
+func adbReconnectOffline(ctx context.Context) {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", adbServerAddr())
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		c.SetDeadline(dl)
+	}
+	_ = adbRequest(c, "host:reconnect-offline")
+}
+
 // adbState returns "device", "offline", ... for the serial, or an error when unknown.
 func adbState(ctx context.Context, serial string) (string, error) {
 	return adbHostQuery(ctx, "host-serial:"+serial+":get-state")
