@@ -52,6 +52,7 @@ jobs:
     env:
       IMAGE: "system-images;android-37.1;google_apis_playstore_ps16k;x86_64"
       AGEMU_ANDROID_TIMEOUT_SCALE: "5" # nested virtualization and software rendering are slow
+      AGEMU_E2E_TIMEOUT_SCALE: "6"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

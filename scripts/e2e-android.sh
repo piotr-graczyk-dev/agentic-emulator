@@ -2,7 +2,8 @@
 # End-to-end proof for the Android backend. Everything goes through the agemu CLI
 # ($AGEMU_BIN, default bin/android/agemu; agemud must sit next to it)
 # (no adb, no emulator commands); python3 reads PNG sizes and times steps on the host
-# ($PYTHON names another interpreter, e.g. python on Windows). It runs on macOS, Linux and in
+# ($PYTHON names another interpreter, e.g. python on Windows); AGEMU_E2E_TIMEOUT_SCALE
+# lengthens its waits on a slow host. It runs on macOS, Linux and in
 # Git Bash on Windows. $AGEMU_E2E_PROBE_APK uses a prebuilt probe app instead of building it.
 #
 #   scripts/e2e-android.sh [avd-name]        default: agemu-pixel
@@ -25,8 +26,24 @@ PASS=0
 py() { "${PYTHON:-python3}" "$@" | tr -d '\r'; }
 step() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '   ok: %s\n' "$*"; }
-fail() { printf '   FAIL: %s\n' "$*" >&2; exit 1; }
-ag() { "$AG" "$@" -d "$DEV"; }
+fail() {
+  printf '   FAIL: %s\n' "$*" >&2
+  "$AG" ui -d "$DEV" >"$OUT/fail-ui.txt" 2>&1 || true # what the screen showed, for the artifacts
+  "$AG" screenshot -o "$OUT/fail.png" -d "$DEV" >/dev/null 2>&1 || true
+  exit 1
+}
+# ag runs agemu on the device. AGEMU_E2E_TIMEOUT_SCALE (a whole number, default 1) multiplies
+# every --timeout-ms, for a slow host where the guest's apps react slowly (CI with software
+# rendering or nested virtualization).
+ag() {
+  local a=() scale="${AGEMU_E2E_TIMEOUT_SCALE:-1}" next=0
+  for x in "$@"; do
+    if ((next)); then x=$((x * scale)); next=0; fi
+    [[ "$x" == --timeout-ms ]] && next=1
+    a+=("$x")
+  done
+  "$AG" "${a[@]}" -d "$DEV"
+}
 # timed runs a command and prints its wall time.
 timed() {
   local t0 t1 out
