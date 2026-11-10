@@ -1037,6 +1037,20 @@ func process(_ line: Data) {
     }
 }
 
+// `agemu-ios-helper --check` (agemu doctor): load the private frameworks, print one JSON line
+// with their versions or the error, and exit 0 or 1.
+if CommandLine.arguments.dropFirst().first == "--check" {
+    do {
+        try loadFrameworks()
+        send(["ok": true, "versions": AGFrameworkVersions()])
+        exit(0)
+    } catch {
+        let message = (error as? HelperError)?.description ?? error.localizedDescription
+        send(["ok": false, "error": message])
+        exit(1)
+    }
+}
+
 do {
     try loadFrameworks()
 } catch {

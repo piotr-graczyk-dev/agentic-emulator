@@ -287,11 +287,13 @@ func iosChecks(d daemonInfo) doctorSection {
 		s.add(check{Name: "iOS Simulator runtime", Status: statusOK, Detail: detail})
 	}
 
+	helper := ""
 	if p := os.Getenv("AGEMU_IOS_HELPER"); p != "" {
 		if !isExecutable(p) {
 			s.add(check{Name: "agemu-ios-helper", Status: statusFail, Detail: "AGEMU_IOS_HELPER=" + p + " is not an executable file", Fix: []string{"unset AGEMU_IOS_HELPER"}})
 		} else {
 			s.add(check{Name: "agemu-ios-helper", Status: statusOK, Detail: tilde(p) + " (AGEMU_IOS_HELPER)"})
+			helper = p
 		}
 	} else if d, err := client.DaemonPath(); err == nil {
 		if r, err := filepath.EvalSymlinks(d); err == nil {
@@ -303,9 +305,62 @@ func iosChecks(d daemonInfo) doctorSection {
 				Fix: []string{"make build    # in the agemu checkout (needs Xcode's Swift); or: make install"}})
 		} else {
 			s.add(check{Name: "agemu-ios-helper", Status: statusOK, Detail: tilde(h)})
+			helper = h
 		}
 	}
+	if helper != "" {
+		s.add(frameworksCheck(helper))
+	}
 	return s
+}
+
+// frameworksCheck has the helper load CoreSimulator, SimulatorKit and
+// AccessibilityPlatformTranslation the way the daemon will (`agemu-ios-helper --check`), so a
+// framework Xcode moved or dropped fails here instead of at the first command.
+func frameworksCheck(helper string) check {
+	c := check{Name: "private frameworks"}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, helper, "--check")
+	cmd.WaitDelay = 2 * time.Second // do not wait on pipes a killed helper's children hold open
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, runErr := cmd.Output()
+	var res struct {
+		OK       bool              `json:"ok"`
+		Error    string            `json:"error"`
+		Versions map[string]string `json:"versions"`
+	}
+	if line := strings.TrimSpace(firstLine(string(out))); line == "" || json.Unmarshal([]byte(line), &res) != nil {
+		if runErr == nil {
+			// A helper from before --check reads requests from stdin and exits when it closes.
+			c.Status, c.Detail = statusWarn, "not checked: this agemu-ios-helper has no --check"
+			return c
+		}
+		msg := firstLine(strings.TrimSpace(stderr.String()))
+		if msg == "" {
+			msg = runErr.Error()
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			msg = "timed out after 30 s"
+		}
+		c.Status, c.Detail = statusFail, "agemu-ios-helper --check failed: "+msg
+		return c
+	}
+	if !res.OK {
+		c.Status, c.Detail = statusFail, res.Error
+		c.Fix = []string{
+			"sudo xcodebuild -runFirstLaunch    # finishes Xcode's install of the simulator frameworks",
+			"If it still fails, update agemu (npm install -g agentic-emulator@latest) or open an issue with: agemu doctor --json",
+		}
+		return c
+	}
+	c.Status = statusOK
+	c.Detail = fmt.Sprintf("CoreSimulator %s, SimulatorKit %s", res.Versions["coreSimulator"], res.Versions["simulatorKit"])
+	if p := res.Versions["simulatorKitPath"]; p != "" {
+		c.Detail += " (" + tilde(p) + ")"
+	}
+	return c
 }
 
 // iosRuntimeAvailable reports whether `simctl list runtimes -j` has the runtime with this

@@ -2031,8 +2031,11 @@ and 8 History taps sent 0-1.6 s after the tab opened.
   in `@try/@catch`. Verified with Xcode 26.6 (CoreSimulator 1051.55, SimulatorKit 955.7), iOS
   26.5 runtime, macOS 26.6. Xcode updates can break them: idb documents that on Xcode 27 /
   CoreSimulator 1155.4 the legacy Indigo HID path no longer delivers buttons and keys and
-  touches become unreliable (`dtuhidd` replaces it). `agemu-ios-helper` reports the framework
-  versions it loaded (`hello`).
+  touches become unreliable (`dtuhidd` replaces it). SimulatorKit is loaded from
+  `Contents/Developer/Library/PrivateFrameworks` (Xcode up to 26) or `Contents/SharedFrameworks`
+  (Xcode 27). `agemu-ios-helper` reports the framework versions and the SimulatorKit path it
+  loaded (`hello`); `agemu-ios-helper --check` loads the frameworks and exits, and `agemu doctor`
+  runs it.
 - **HID keyboard.** `type --keys` (and `type` of a single character) uses a US hardware
   keyboard layout, and iOS's hardware-keyboard auto-capitalization (on by default) applies, so
   `type --keys hello` into an empty field with sentence capitalization can produce "Hello",
