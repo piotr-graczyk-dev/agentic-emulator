@@ -81,7 +81,8 @@ so publish the entry once the version is on npm, with
 (`brew install mcp-publisher`):
 
 ```sh
-dir="$(mktemp -d)" && sed 's/"version": "0.0.0"/"version": "0.2.1"/' server.json > "$dir/server.json"
+v=0.2.1 # the version that was just released
+dir="$(mktemp -d)" && sed "s/\"version\": \"0.0.0\"/\"version\": \"$v\"/" server.json > "$dir/server.json"
 (cd "$dir" && mcp-publisher login github && mcp-publisher publish)
 ```
 
