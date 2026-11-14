@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.piotr-graczyk-dev/agemu",
+  "title": "agemu",
+  "description": "Fast Android emulator and iOS Simulator control for coding agents: screenshots, UI tree, taps, logs",
+  "repository": {
+    "url": "https://github.com/piotr-graczyk-dev/agentic-emulator",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agentic-emulator",
+      "version": "0.0.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

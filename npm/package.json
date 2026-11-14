@@ -2,6 +2,7 @@
   "name": "agentic-emulator",
   "version": "0.0.0",
   "description": "Agent-first runtime for the Android emulator (macOS, Linux, Windows) and the iOS Simulator (Apple Silicon Macs): a CLI and MCP server with millisecond screenshots, UI trees and taps.",
+  "mcpName": "io.github.piotr-graczyk-dev/agemu",
   "keywords": [
     "mcp",
     "mcp-server",
@@ -10,7 +11,12 @@
     "ai-agents",
     "mobile-testing",
     "automation",
-    "claude-code"
+    "claude-code",
+    "codex",
+    "cursor",
+    "react-native",
+    "expo",
+    "ui-testing"
   ],
   "homepage": "https://github.com/piotr-graczyk-dev/agentic-emulator#readme",
   "bugs": "https://github.com/piotr-graczyk-dev/agentic-emulator/issues",

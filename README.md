@@ -4,7 +4,20 @@
 [![CI](https://github.com/piotr-graczyk-dev/agentic-emulator/actions/workflows/ci.yml/badge.svg)](https://github.com/piotr-graczyk-dev/agentic-emulator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**A fast Android emulator and iOS Simulator for coding agents that build mobile apps.**
+**A fast control layer for the Android emulator and iOS Simulator, for coding agents that build
+mobile apps. A screenshot takes 4-5 ms and reading the screen 2-23 ms.**
+
+[![The same agent task with adb, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
+
+The same 18-step shopping flow (sign in, search, cart, checkout) driven by four tool stacks.
+[Montage](examples/agent-race/out/montage.mp4) ·
+[Android race](examples/agent-race/out/android/race.mp4) ·
+[iOS race](examples/agent-race/out/ios/race.mp4) ·
+[method](examples/agent-race)
+
+```sh
+claude mcp add agemu -- npx -y agentic-emulator@latest mcp
+```
 
 When an agent builds an app, writing the code is quick. Checking the result on a device is slow.
 Every screenshot, screen read, tap and reset goes through `adb`, `simctl` or Maestro, and each call
@@ -14,18 +27,6 @@ the agent spends most of its time waiting for the emulator instead of building.
 agemu replaces that control layer and leaves the devices stock: the Android SDK's arm64 image and
 Xcode's Simulator runtime. Your app behaves exactly as it does on the standard emulator and
 Simulator. Agents use agemu through an MCP server or a CLI.
-
-```sh
-claude mcp add agemu -- npx -y agentic-emulator@latest mcp
-```
-
-[![The same agent task with adb, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
-
-The same 18-step shopping flow (sign in, search, cart, checkout) driven by four tool stacks.
-[Montage](examples/agent-race/out/montage.mp4) ·
-[Android race](examples/agent-race/out/android/race.mp4) ·
-[iOS race](examples/agent-race/out/ios/race.mp4) ·
-[method](examples/agent-race)
 
 ## Where it helps
 
@@ -91,6 +92,7 @@ method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/A
 
 ## Where it doesn't help
 
+- **Real phones and tablets.** agemu drives the Android emulator and the iOS Simulator only.
 - **Boots, app launches and your app's own animations take as long as before.** That time belongs
   to the OS and the app. `AGEMU_ANDROID_ANIMATIONS=0` and `AGEMU_IOS_ANIMATIONS=0` shorten
   animations if you opt in.
@@ -101,12 +103,35 @@ method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/A
 - **iOS needs an Apple Silicon Mac and relies on private Xcode APIs.** Android also runs on Linux
   and Windows, where it is newer and less measured. See [Known limitations](#known-limitations).
 
+## agemu and other tools
+
+agemu does one job: it makes the emulator and the Simulator fast and light for an agent's build,
+run and check loop. Other tools cover more ground. agemu runs next to them, because it touches
+only devices named `agemu-*`.
+
+| You need | Use |
+|---|---|
+| A fast loop on an emulator or simulator: millisecond screenshots and screen reads, lighter devices, a 2 s reset | agemu |
+| Real phones and tablets | [mobile-mcp](https://github.com/mobile-next/mobile-mcp) or [agent-device](https://github.com/callstack/agent-device) |
+| TVs, HarmonyOS, web and desktop apps | [agent-device](https://github.com/callstack/agent-device); [Argent](https://github.com/software-mansion/argent) for TVs and desktop apps |
+| React Native profiling, network inspection, recorded replays or visual diffs | [Argent](https://github.com/software-mansion/argent) |
+
+The [agent race](examples/agent-race) measures agemu against `adb`, agent-device and Argent on one
+task. mobile-mcp is not in it yet.
+
 ## Install
 
 ```sh
 claude mcp add agemu -- npx -y agentic-emulator@latest mcp   # Claude Code
 codex mcp add agemu -- npx -y agentic-emulator@latest mcp    # Codex CLI
 npx -y agentic-emulator doctor                               # checks this Mac, prints fixes
+```
+
+Cursor (`~/.cursor/mcp.json`), Gemini CLI (`~/.gemini/settings.json`), Claude Desktop and other
+clients that read an `mcpServers` config:
+
+```json
+{"mcpServers": {"agemu": {"command": "npx", "args": ["-y", "agentic-emulator@latest", "mcp"]}}}
 ```
 
 `agemu doctor` checks each platform separately. One is enough: an iOS-only or Android-only Mac is

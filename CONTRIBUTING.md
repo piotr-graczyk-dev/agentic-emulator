@@ -74,6 +74,17 @@ to set up or rotate. If the npm publish step fails, rerun the release job from t
 and the npm step does nothing when that version is already on npm. The manual run is only a
 dry run, so it can't be used to retry.
 
+The [MCP Registry](https://registry.modelcontextprotocol.io) lists agemu from
+[server.json](server.json). The registry checks that the npm package carries the same `mcpName`,
+so publish the entry once the version is on npm, with
+[`mcp-publisher`](https://modelcontextprotocol.io/registry/quickstart)
+(`brew install mcp-publisher`):
+
+```sh
+dir="$(mktemp -d)" && sed 's/"version": "0.0.0"/"version": "0.2.1"/' server.json > "$dir/server.json"
+(cd "$dir" && mcp-publisher login github && mcp-publisher publish)
+```
+
 `scripts/package.sh <version>` builds the same files locally from `bin/`
 (`make build VERSION=<version>` first). After changing `go.mod`, regenerate
 `THIRD_PARTY_NOTICES.md` with `scripts/third-party-notices.sh > THIRD_PARTY_NOTICES.md`.
