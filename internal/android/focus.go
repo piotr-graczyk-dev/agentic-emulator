@@ -62,6 +62,11 @@ func fieldAt(t *api.UITree, x, y int) *api.Element {
 // field was still without it when the wait gave up. It returns at once when the tap is old,
 // when it did not land on a text field, or when the field has the focus already. read returns
 // a fresh UI tree; a failed read ends the wait (the text is typed as before).
+//
+// focusWaitFor bounds the polling, not a read in flight: read keeps the caller's ctx. A read
+// is slow when the app's UI thread is, and the text call that follows (findFocus,
+// ACTION_SET_TEXT) waits for the same thread, so cutting the read short would save no time. It
+// would drop the agent connection (agentClient.call) and type before the focus is known.
 func awaitTapFocus(ctx context.Context, tap tapMark, read func() (*api.UITree, error)) (gaveUp bool) {
 	if tap.at.IsZero() || time.Since(tap.at) > focusTapWindow {
 		return false
