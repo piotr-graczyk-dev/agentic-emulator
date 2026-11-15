@@ -86,6 +86,7 @@ type device struct {
 	// lastInput is when agemu last sent input (unix ns); screenshots taken right after an
 	// input wait for the frame that shows its effect (see frameStream.get).
 	lastInput atomic.Int64
+	tap       tapMark // the latest tap: typed text waits for the field under it to take the focus (focus.go)
 
 	lastLoad time.Time // when the last in-place snapshot load finished (see loadBaseline)
 	fix      gpsFix    // the emulator's default GPS fix (see recordDefaultFix)
@@ -1784,6 +1785,7 @@ func (b *Backend) Tap(ctx context.Context, id string, x, y int) error {
 	if err := e.touch(ctx, px, py, 1); err != nil {
 		return err
 	}
+	d.noteTap(x, y)
 	return e.touch(ctx, px, py, 0)
 }
 
@@ -1853,6 +1855,16 @@ func (b *Backend) typeText(ctx context.Context, id string, text string, keys boo
 	}
 	if text == "" {
 		return nil
+	}
+	// The field a tap just hit may not have the focus yet (focus.go). The tree is read past the
+	// accessibility cache, which can hold the old focus until the event about it arrives.
+	if awaitTapFocus(ctx, d.lastTap(), func() (*api.UITree, error) {
+		if err := d.call(ctx, map[string]any{"cmd": "clearcache"}, nil); err != nil {
+			return nil, err
+		}
+		return b.UITree(ctx, id)
+	}) {
+		logf("%s: type: the text field tapped %v ago still has no focus; typing into what has it", d.name, time.Since(d.lastTap().at).Round(time.Millisecond))
 	}
 	defer d.markInputFrom(e, e.stream.screenNow())
 	var res struct {
