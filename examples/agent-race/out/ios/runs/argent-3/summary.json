@@ -1,11 +1,11 @@
 {
   "arm": "argent",
-  "date": "2026-11-08T03:49:35+01:00",
+  "date": "2026-11-15T03:48:49+01:00",
   "device": "460BF55D-8220-4D6E-9766-D1C297251683",
   "error": "",
   "frame_h": 1174,
   "frame_w": 540,
-  "loadavg": "{ 7.67 8.89 9.56 }",
+  "loadavg": "{ 5.43 5.83 7.85 }",
   "ok": true,
   "platform": "ios",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 66,
-  "tool_s": 18.486837211000008,
-  "total_s": 18.492255417,
+  "tool_s": 18.426702662,
+  "total_s": 18.4330205,
   "versions": {
-    "argent": "0.32.0"
+    "argent": "0.33.0"
   }
 }

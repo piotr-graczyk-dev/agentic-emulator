@@ -1,11 +1,11 @@
 {
   "arm": "argent",
-  "date": "2026-11-08T03:57:43+01:00",
+  "date": "2026-11-15T05:23:56+01:00",
   "device": "Pixel_9_Pro",
   "error": "",
   "frame_h": 1204,
   "frame_w": 540,
-  "loadavg": "{ 3.91 4.94 7.16 }",
+  "loadavg": "{ 4.58 4.32 5.99 }",
   "ok": true,
   "platform": "android",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 66,
-  "tool_s": 29.393679288999998,
-  "total_s": 29.398496,
+  "tool_s": 29.862294586999994,
+  "total_s": 29.867265083,
   "versions": {
-    "argent": "0.32.0"
+    "argent": "0.33.0"
   }
 }
