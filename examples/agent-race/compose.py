@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Side-by-side video of 2-4 agent-race runs, in real time.
+"""Side-by-side video of 2-5 agent-race runs, in real time.
 
     uv run -q --with pillow examples/agent-race/compose.py \
         --run classic=runs/classic-2 --run agent-device=runs/agent-device-1 \
@@ -12,7 +12,7 @@ Columns follow the order of --run. Each side shows the recorded screen, the elap
 current step, the tool calls as they run (the running one with a live timer) and the device's CPU
 and memory; bars at the bottom show every side's progress through the plan, and a closing card
 compares the runs once the slowest one has finished. Two runs get the wide side-by-side layout,
-three or four get columns. Needs Pillow and ffmpeg. montage.py reuses Race and the card helpers.
+three to five get columns. Needs Pillow and ffmpeg. montage.py reuses Race and the card helpers.
 """
 import argparse
 import bisect
@@ -38,6 +38,8 @@ RED = (240, 90, 90)
 ARMS = {
     "classic": {"color": (242, 166, 90), "name": "Standard emulator + adb", "short": "Standard + adb",
                 "sub": "adb shell input · uiautomator dump · screencap", "plane": "adb server"},
+    "mobile-mcp": {"color": (244, 114, 182), "name": "mobile-mcp", "short": "mobile-mcp",
+                   "sub": "MCP server · batch: tap by ref + list elements", "plane": "mcp-server-mobile"},
     "agent-device": {"color": (167, 139, 250), "name": "agent-device", "short": "agent-device",
                      "sub": "agent-device CLI · press/fill by selector · wait text", "plane": "agent-device"},
     "argent": {"color": (96, 165, 250), "name": "Argent", "short": "Argent",
@@ -46,7 +48,7 @@ ARMS = {
               "sub": "agemu CLI · action + wait in one call", "plane": "agemud"},
 }
 TASK = "Agemu Shop · sign in, scroll, search, add to cart, check out"
-NUM_WORDS = {1: "one", 2: "two", 3: "three", 4: "four"}
+NUM_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
 
 
 def font(size, weight="Regular", mono=False):
@@ -286,7 +288,7 @@ def draw_log(draw, shown, t, x, y, w, row_h, col, f, fb):
 
 
 # ---------------------------------------------------------------------------------------------
-# Three or four runs: columns.
+# Three to five runs: columns.
 
 COL_STATS_H = 318  # height of the stats block under the phone
 
@@ -465,11 +467,11 @@ def draw_card(img, runs):
 # ---------------------------------------------------------------------------------------------
 
 class Race:
-    """Layout and frame drawing for 2-4 runs. frame(t) draws the scene at task time t."""
+    """Layout and frame drawing for 2-5 runs. frame(t) draws the scene at task time t."""
 
     def __init__(self, runs, title=None, subtitle=None):
-        if not 2 <= len(runs) <= 4:
-            sys.exit("need 2 to 4 runs")
+        if not 2 <= len(runs) <= 5:
+            sys.exit("need 2 to 5 runs")
         self.runs = runs
         n = len(runs)
         self.title = title or f"One agent task, {NUM_WORDS[n]} tool stacks"
@@ -555,9 +557,9 @@ def parse_run(spec):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Side-by-side video of 2-4 agent-race runs.")
+    ap = argparse.ArgumentParser(description="Side-by-side video of 2-5 agent-race runs.")
     ap.add_argument("--run", action="append", default=[], metavar="ARM=DIR",
-                    help=f"a run directory and its arm ({', '.join(ARMS)}); 2-4 times, in column order")
+                    help=f"a run directory and its arm ({', '.join(ARMS)}); 2-5 times, in column order")
     ap.add_argument("--left", help="old two-arm call: classic run directory")
     ap.add_argument("--right", help="old two-arm call: agemu run directory")
     ap.add_argument("--title", help="headline (default: 'One agent task, N tool stacks')")
@@ -571,8 +573,8 @@ def main():
         if not (args.left and args.right) or specs:
             sys.exit("use --left and --right together, or --run")
         specs = [("classic", args.left), ("agemu", args.right)]
-    if not 2 <= len(specs) <= 4:
-        sys.exit("give 2 to 4 --run ARM=DIR")
+    if not 2 <= len(specs) <= 5:
+        sys.exit("give 2 to 5 --run ARM=DIR")
     race = Race([load_run(d, arm) for arm, d in specs], title=args.title)
 
     end_t = race.slow + HOLD
