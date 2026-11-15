@@ -1,11 +1,11 @@
 {
   "arm": "agemu",
-  "date": "2026-11-08T03:55:57+01:00",
+  "date": "2026-11-15T05:20:59+01:00",
   "device": "agemu-lab",
   "error": "",
   "frame_h": 1212,
   "frame_w": 540,
-  "loadavg": "{ 4.10 5.49 7.63 }",
+  "loadavg": "{ 4.45 4.29 6.38 }",
   "ok": true,
   "platform": "android",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 34,
-  "tool_s": 10.526773913000001,
-  "total_s": 10.527322167,
+  "tool_s": 10.055039419000002,
+  "total_s": 10.055534042,
   "versions": {
-    "agemu": "23389c6"
+    "agemu": "v0.2.1 (7a10d24) + the type-after-tap fix"
   }
 }

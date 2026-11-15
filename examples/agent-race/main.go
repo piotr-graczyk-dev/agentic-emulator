@@ -8,6 +8,7 @@
 //	agent-race run --platform android --arm classic      --device Pixel_9_Pro --out runs/classic-1
 //	agent-race run --platform android --arm agent-device --device Pixel_9_Pro --out runs/agent-device-1
 //	agent-race run --platform android --arm argent       --device Pixel_9_Pro --out runs/argent-1
+//	agent-race run --platform android --arm mobile-mcp   --device Pixel_9_Pro --out runs/mobile-mcp-1
 //	agent-race run --platform android --arm agemu        --device agemu-lab   --out runs/agemu-1
 //	agent-race run --platform ios     --arm agemu        --device <udid>      --out runs/agemu-1
 //
@@ -16,6 +17,8 @@
 //     poll it until the expected screen shows, adb exec-out screencap;
 //   - agent-device: its CLI, press/fill by selector, wait text, scroll --until, snapshot;
 //   - argent: its CLI (argent run <tool>), describe + gesture-tap, fill, await-ui-element;
+//   - mobile-mcp: its MCP server, one process for the run, an action and a read of the screen in
+//     one mobile_batch_commands call, taps by the ref the element list gives;
 //   - agemu: the agemu CLI, one process per call, an action and its wait in one call.
 //
 // There is no model think time: the next call starts as soon as the previous one returns, so the
@@ -73,10 +76,22 @@ func (r *Recorder) run(display string, name string, args ...string) ([]byte, err
 			err = fmt.Errorf("%v: %s", err, lastLine(string(out)))
 		}
 	}
+	r.log(display, start, end, err)
+	return out, err
+}
+
+// call logs one tool call that is not a process of its own: a request to an MCP server.
+func (r *Recorder) call(display string, f func() ([]byte, error)) ([]byte, error) {
+	start := time.Now()
+	out, err := f()
+	r.log(display, start, time.Now(), err)
+	return out, err
+}
+
+func (r *Recorder) log(display string, start, end time.Time, err error) {
 	r.mu.Lock()
 	r.events = append(r.events, Event{Step: r.step, Label: r.label, Cmd: display, Start: r.since(start), End: r.since(end), OK: err == nil})
 	r.mu.Unlock()
-	return out, err
 }
 
 func lastLine(s string) string {
@@ -90,23 +105,23 @@ func lastLine(s string) string {
 	return s
 }
 
-var arms = map[string]bool{"classic": true, "agemu": true, "agent-device": true, "argent": true}
+var arms = map[string]bool{"classic": true, "agemu": true, "agent-device": true, "argent": true, "mobile-mcp": true}
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: agent-race run --platform android|ios --arm classic|agemu|agent-device|argent --device NAME --out DIR")
+		fmt.Fprintln(os.Stderr, "usage: agent-race run --platform android|ios --arm classic|agemu|agent-device|argent|mobile-mcp --device NAME --out DIR")
 		os.Exit(2)
 	}
 	home, _ := os.UserHomeDir()
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	o := opts{}
 	fs.StringVar(&o.platform, "platform", "android", "android or ios")
-	fs.StringVar(&o.arm, "arm", "", "classic (Android), agemu, agent-device or argent")
+	fs.StringVar(&o.arm, "arm", "", "classic (Android), agemu, agent-device, argent or mobile-mcp")
 	fs.StringVar(&o.device, "device", "", "Android: the running emulator's AVD name; iOS: the simulator's UDID")
 	fs.StringVar(&o.out, "out", "", "output directory")
 	fs.StringVar(&o.agemu, "agemu", "bin/agemu", "agemu CLI")
 	fs.StringVar(&o.tools, "tools", filepath.Join(home, ".cache", "agemu-race-tools", "node_modules", ".bin"),
-		"directory with the agent-device and argent CLIs")
+		"directory with the agent-device and argent CLIs and mobile-mcp's server (mcp-server-mobile)")
 	fs.IntVar(&o.width, "width", 540, "recorded frame width")
 	_ = fs.Parse(os.Args[2:])
 	if o.out == "" || o.device == "" || !arms[o.arm] || (o.platform != "android" && o.platform != "ios") ||
@@ -161,6 +176,7 @@ func runRace(o opts) error {
 	var d Driver
 	var plane func(map[int]proc) []int
 	var warm [][]string // untimed: start the tool's daemons before the task
+	var mobileMCPVersion string
 	adBin, arBin := filepath.Join(o.tools, "agent-device"), filepath.Join(o.tools, "argent")
 	switch o.arm {
 	case "classic":
@@ -179,6 +195,15 @@ func runRace(o opts) error {
 		d = &argent{r: rec, bin: arBin, udid: udid, tmp: shots, plat: o.platform}
 		plane = byArgs([]string{"argent"})
 		warm = [][]string{{arBin, "run", "launch-app", "--udid", udid, "--bundleId", appID}, {arBin, "run", "describe", "--udid", udid}}
+	case "mobile-mcp":
+		// Its warm-up is in newMobileMCP: the server is one process for the whole run.
+		m, err := newMobileMCP(rec, filepath.Join(o.tools, "mcp-server-mobile"), o.device, shots, !ios)
+		if err != nil {
+			return fmt.Errorf("mobile-mcp: %w", err)
+		}
+		defer m.c.close()
+		d, mobileMCPVersion = m, m.c.version
+		plane = byArgs([]string{"mcp-server-mobile"}, []string{"mobilecli"})
 	}
 	for _, w := range warm { // a daemon's first start can time out; it is retried
 		var err error
@@ -237,6 +262,10 @@ func runRace(o opts) error {
 
 	fw, fh, sw, sh := frames.size()
 	load, _ := exec.Command("sysctl", "-n", "vm.loadavg").Output()
+	versions := toolVersions(o, adBin, arBin, agemuAbs)
+	if mobileMCPVersion != "" {
+		versions["mobile-mcp"] = mobileMCPVersion
+	}
 	summary := map[string]any{
 		"platform":   o.platform,
 		"arm":        o.arm,
@@ -254,7 +283,7 @@ func runRace(o opts) error {
 		"screen_h":   sh,
 		"loadavg":    strings.TrimSpace(string(load)),
 		"date":       time.Now().Format(time.RFC3339),
-		"versions":   toolVersions(o, adBin, arBin, agemuAbs),
+		"versions":   versions,
 	}
 	if err := writeJSON(filepath.Join(o.out, "summary.json"), summary); err != nil {
 		return err
@@ -284,7 +313,9 @@ func toolVersions(o opts, adBin, arBin, agemuBin string) map[string]string {
 	case "argent":
 		v["argent"] = get(arBin, "--version")
 	case "agemu":
-		v["agemu"] = get("git", "-C", filepath.Dir(agemuBin), "rev-parse", "--short", "HEAD")
+		// The binary's own version and the tree it was built from, uncommitted changes included.
+		v["agemu"] = strings.Fields(get(agemuBin, "version") + " ?")[1] + " (" +
+			get("git", "-C", filepath.Dir(agemuBin), "describe", "--tags", "--always", "--dirty") + ")"
 	}
 	return v
 }

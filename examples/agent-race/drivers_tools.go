@@ -161,8 +161,9 @@ func (a *argent) run(tool string, args ...string) ([]byte, error) {
 	return a.r.run(display, a.bin, append([]string{"run", tool, "--udid", a.udid}, args...)...)
 }
 
-// describeLine: `  Button "Sign in" [clickable]  (0.047, 0.345, 0.906, 0.050)`.
-var describeLine = regexp.MustCompile(`^\s*(\S+)\s+"((?:[^"\\]|\\.)*)"(.*)\(([0-9.]+), ([0-9.]+), ([0-9.]+), ([0-9.]+)\)\s*$`)
+// describeLine: `  Button "Sign in" [clickable]  (0.047,0.345,0.906,0.050)` (with a space after each comma
+// before Argent 0.33).
+var describeLine = regexp.MustCompile(`^\s*(\S+)\s+"((?:[^"\\]|\\.)*)"(.*)\(([0-9.]+), ?([0-9.]+), ?([0-9.]+), ?([0-9.]+)\)\s*$`)
 
 type axEl struct {
 	role, label, flags string

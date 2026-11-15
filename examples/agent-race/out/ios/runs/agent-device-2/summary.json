@@ -1,11 +1,11 @@
 {
   "arm": "agent-device",
-  "date": "2026-11-08T03:46:43+01:00",
+  "date": "2026-11-15T03:42:18+01:00",
   "device": "460BF55D-8220-4D6E-9766-D1C297251683",
   "error": "",
   "frame_h": 1174,
   "frame_w": 540,
-  "loadavg": "{ 14.70 9.18 9.75 }",
+  "loadavg": "{ 5.92 6.61 9.23 }",
   "ok": true,
   "platform": "ios",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 26,
-  "tool_s": 36.76879895800001,
-  "total_s": 36.77036925,
+  "tool_s": 34.92504166499998,
+  "total_s": 34.925740167,
   "versions": {
-    "agent-device": "0.21.36"
+    "agent-device": "0.21.37"
   }
 }

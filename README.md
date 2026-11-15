@@ -7,9 +7,9 @@
 **A fast control layer for the Android emulator and iOS Simulator, for coding agents that build
 mobile apps. A screenshot takes 4-5 ms and reading the screen 2-23 ms.**
 
-[![The same agent task with adb, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
+[![The same agent task with adb, mobile-mcp, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
 
-The same 18-step shopping flow (sign in, search, cart, checkout) driven by four tool stacks.
+The same 18-step shopping flow (sign in, search, cart, checkout) driven by five tool stacks.
 [Montage](examples/agent-race/out/montage.mp4) ·
 [Android race](examples/agent-race/out/android/race.mp4) ·
 [iOS race](examples/agent-race/out/ios/race.mp4) ·
@@ -33,12 +33,12 @@ Simulator. Agents use agemu through an MCP server or a CLI.
 The build, run and check loop: the agent changes code, installs the app, looks at the screen, taps
 through a flow, reads the logs, resets, and goes again.
 
-**A whole test flow** (the race above, 3 runs per tool, medians):
+**A whole test flow** (the race above, 5 runs per tool, medians):
 
-| | standard emulator + `adb` | agent-device | Argent | agemu |
-|---|---|---|---|---|
-| Android | 74 s | 24 s | 30 s | **10.5 s** |
-| iOS | - | 36 s | 18 s | **17 s** |
+| | standard emulator + `adb` | mobile-mcp | agent-device | Argent | agemu |
+|---|---|---|---|---|---|
+| Android | 74 s | 29 s | 24 s | 30 s | **10.6 s** |
+| iOS | - | 38 s | 35 s | 18 s | **16 s** |
 
 On iOS most of the flow's time belongs to the app itself, so the gap is smaller there.
 
@@ -62,7 +62,7 @@ On iOS most of the flow's time belongs to the app itself, so the gap is smaller 
 | Android emulator, CPU in the first minute after boot | 202% of a core | **120%** |
 | iOS simulator, memory with no app | 4.0 GB | **2.5 GB** |
 | iOS simulator, CPU at idle | 20% of a core | **1.5%** |
-| iOS simulator, memory with the app running (the race) | 4.3-4.6 GB | **2.1-2.3 GB** |
+| iOS simulator, memory with the app running (the race) | 3.8-4.0 GB | **1.9 GB** |
 
 The standard Android emulator is the AVD as Android Studio runs it: 4 GB of guest RAM, a window and
 audio. agemu runs it headless with 2 GB, the host GPU and preinstalled Google apps turned off. The
@@ -116,8 +116,8 @@ only devices named `agemu-*`.
 | TVs, HarmonyOS, web and desktop apps | [agent-device](https://github.com/callstack/agent-device); [Argent](https://github.com/software-mansion/argent) for TVs and desktop apps |
 | React Native profiling, network inspection, recorded replays or visual diffs | [Argent](https://github.com/software-mansion/argent) |
 
-The [agent race](examples/agent-race) measures agemu against `adb`, agent-device and Argent on one
-task. mobile-mcp is not in it yet.
+The [agent race](examples/agent-race) measures agemu against `adb`, mobile-mcp, agent-device and
+Argent on one task.
 
 ## Install
 

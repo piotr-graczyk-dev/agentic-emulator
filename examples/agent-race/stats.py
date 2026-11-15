@@ -9,8 +9,9 @@ import os
 import statistics
 import sys
 
-ORDER = ["classic", "agent-device", "argent", "agemu"]
-NAMES = {"classic": "standard + adb", "agent-device": "agent-device", "argent": "Argent", "agemu": "agemu"}
+ORDER = ["classic", "mobile-mcp", "agent-device", "argent", "agemu"]
+NAMES = {"classic": "standard + adb", "mobile-mcp": "mobile-mcp", "agent-device": "agent-device", "argent": "Argent",
+         "agemu": "agemu"}
 
 
 def run_stats(d):

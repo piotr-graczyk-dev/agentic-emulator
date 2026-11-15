@@ -1,0 +1,64 @@
+{"step":1,"label":"Open the app","cmd":"adb shell am start -W -n dev.agemu.shop/.LoginActivity","start":0.000017,"end":0.357274875,"ok":true}
+{"step":1,"label":"Open the app","cmd":"adb exec-out uiautomator dump /dev/tty","start":0.357280875,"end":2.6712279580000002,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"adb exec-out uiautomator dump /dev/tty","start":2.6720708330000003,"end":4.93807475,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"adb shell input tap 640 589","start":4.938268958,"end":5.007800208,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"adb shell input text test@agemu.dev","start":5.007879791,"end":5.309746166,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"adb exec-out uiautomator dump /dev/tty","start":5.309757,"end":7.425772458,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"adb shell input tap 640 777","start":7.425938416,"end":7.4825275829999995,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"adb shell input text hunter2","start":7.482569875,"end":7.653924333,"ok":true}
+{"step":4,"label":"Sign in","cmd":"adb exec-out uiautomator dump /dev/tty","start":7.653930083,"end":9.750268083,"ok":true}
+{"step":4,"label":"Sign in","cmd":"adb shell input tap 640 1058","start":9.750429833,"end":9.811322708,"ok":true}
+{"step":4,"label":"Sign in","cmd":"adb exec-out uiautomator dump /dev/tty","start":9.811336708,"end":12.6071955,"ok":true}
+{"step":4,"label":"Sign in","cmd":"adb exec-out screencap -p \u003e catalog.png","start":12.607739916,"end":12.782183541,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"adb shell input swipe 640 2056 640 913 500","start":12.782510833,"end":13.315065833,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"adb exec-out uiautomator dump /dev/tty","start":13.315072,"end":15.673624333,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"adb shell input swipe 640 2056 640 913 500","start":15.674603291,"end":16.235184166,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"adb exec-out uiautomator dump /dev/tty","start":16.235192958,"end":18.591617125,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"adb exec-out uiautomator dump /dev/tty","start":18.59245175,"end":20.855123958,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"adb shell input tap 561 2173","start":20.856655166,"end":20.906369916,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"adb exec-out uiautomator dump /dev/tty","start":20.90641575,"end":22.884051083,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":22.884231916,"end":24.865676583,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"adb shell input tap 640 1267","start":24.866087291,"end":24.892618708,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":24.892637791,"end":26.839746791,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"adb exec-out screencap -p \u003e towel.png","start":26.839928333,"end":27.013890333,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"adb exec-out uiautomator dump /dev/tty","start":27.014137791,"end":28.926223,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"adb shell input tap 192 252","start":28.926405958,"end":28.95239525,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"adb exec-out uiautomator dump /dev/tty","start":28.952424291,"end":30.913888666,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"adb exec-out uiautomator dump /dev/tty","start":30.914252375,"end":32.891812708,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"adb shell input tap 640 461","start":32.892579541,"end":32.928314625,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"adb shell input text lamp","start":32.928335583,"end":32.988208,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"adb exec-out uiautomator dump /dev/tty","start":32.988215833,"end":35.244712958,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"adb exec-out uiautomator dump /dev/tty","start":35.244921958,"end":37.420060083,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"adb shell input tap 561 726","start":37.420353541,"end":37.473785833,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"adb exec-out uiautomator dump /dev/tty","start":37.473802791,"end":39.488781625,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"adb exec-out uiautomator dump /dev/tty","start":39.488956458,"end":41.4073735,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"adb shell input tap 1136 1086","start":41.407560208,"end":41.433740833,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"adb exec-out uiautomator dump /dev/tty","start":41.433754791,"end":43.38453525,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":43.384740916,"end":45.306317375,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"adb shell input tap 640 1326","start":45.306787916,"end":45.329524375,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":45.329532291,"end":47.258679916,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":47.258885791,"end":49.180701583,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"adb shell input tap 640 1607","start":49.181013166,"end":49.212030458,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"adb exec-out uiautomator dump /dev/tty","start":49.212055833,"end":51.195049375,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"adb exec-out screencap -p \u003e cart.png","start":51.195430583,"end":51.375391083,"ok":true}
+{"step":14,"label":"Check the total","cmd":"adb exec-out uiautomator dump /dev/tty","start":51.375701333,"end":53.315083708,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"adb exec-out uiautomator dump /dev/tty","start":53.315421333,"end":55.266111791,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"adb shell input tap 640 1214","start":55.266500541,"end":55.327057125,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"adb exec-out uiautomator dump /dev/tty","start":55.327079958,"end":57.309881375,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb exec-out uiautomator dump /dev/tty","start":57.310042375,"end":59.252559625,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input tap 640 565","start":59.252732916,"end":59.277743416,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input text Ada%sLovelace","start":59.277763625,"end":59.373712833,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb exec-out uiautomator dump /dev/tty","start":59.373721541,"end":61.316400583,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input tap 640 753","start":61.316796,"end":61.385351291,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input text 12%sAnalytical%sSt","start":61.385383958,"end":61.692314666,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb exec-out uiautomator dump /dev/tty","start":61.692321541,"end":63.807586791,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input tap 640 941","start":63.807868916,"end":63.8726615,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input text London","start":63.872701458,"end":64.045288791,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb exec-out uiautomator dump /dev/tty","start":64.045313125,"end":66.200937541,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input tap 640 1129","start":66.2011905,"end":66.240354166,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"adb shell input text N1%s9GU","start":66.240415833,"end":66.486247875,"ok":true}
+{"step":17,"label":"Place the order","cmd":"adb exec-out uiautomator dump /dev/tty","start":66.486254208,"end":68.687798625,"ok":true}
+{"step":17,"label":"Place the order","cmd":"adb shell input tap 640 1410","start":68.687961,"end":68.750548208,"ok":true}
+{"step":17,"label":"Place the order","cmd":"adb exec-out uiautomator dump /dev/tty","start":68.750565291,"end":71.629403875,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"adb exec-out uiautomator dump /dev/tty","start":71.629532541,"end":73.558097583,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"adb exec-out screencap -p \u003e confirmation.png","start":73.558204541,"end":73.727548666,"ok":true}

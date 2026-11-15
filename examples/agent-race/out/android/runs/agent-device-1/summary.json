@@ -1,11 +1,11 @@
 {
   "arm": "agent-device",
-  "date": "2026-11-08T03:54:26+01:00",
+  "date": "2026-11-15T05:19:08+01:00",
   "device": "Pixel_9_Pro",
   "error": "",
   "frame_h": 1204,
   "frame_w": 540,
-  "loadavg": "{ 4.11 6.03 8.06 }",
+  "loadavg": "{ 3.82 3.95 6.57 }",
   "ok": true,
   "platform": "android",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 33,
-  "tool_s": 24.790384542999995,
-  "total_s": 24.790914125,
+  "tool_s": 24.236736665,
+  "total_s": 24.237305291,
   "versions": {
-    "agent-device": "0.21.36"
+    "agent-device": "0.21.37"
   }
 }

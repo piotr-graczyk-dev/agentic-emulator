@@ -1,11 +1,11 @@
 {
   "arm": "agemu",
-  "date": "2026-11-08T03:45:35+01:00",
-  "device": "ED6C55BD-83FB-49B9-93A2-54BA0AD521DD",
+  "date": "2026-11-15T03:45:40+01:00",
+  "device": "8A09E1E1-E261-4978-BA66-842FF7DF7F65",
   "error": "",
   "frame_h": 1174,
   "frame_w": 540,
-  "loadavg": "{ 11.15 7.35 9.21 }",
+  "loadavg": "{ 5.29 5.90 8.37 }",
   "ok": true,
   "platform": "ios",
   "result": {
@@ -35,9 +35,9 @@
     "Read the order number"
   ],
   "tool_calls": 35,
-  "tool_s": 16.764345081000002,
-  "total_s": 16.76522875,
+  "tool_s": 15.689209793,
+  "total_s": 15.690686458,
   "versions": {
-    "agemu": "23389c6"
+    "agemu": "v0.2.1 (7a10d24)"
   }
 }

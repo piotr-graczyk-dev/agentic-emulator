@@ -1,0 +1,33 @@
+{"step":1,"label":"Open the app","cmd":"mobile_batch_commands launch dev.agemu.shop + list","start":0.000012,"end":1.6132934589999999,"ok":true}
+{"step":2,"label":"Enter the e-mail","cmd":"mobile_batch_commands click @e4, type \"test@agemu.dev\" + list","start":1.6133335,"end":2.99916675,"ok":true}
+{"step":3,"label":"Enter the password","cmd":"mobile_batch_commands click @e5, type \"hunter2\" + list","start":2.999317667,"end":4.04231025,"ok":true}
+{"step":4,"label":"Sign in","cmd":"mobile_batch_commands click @e6 + list","start":4.042455584,"end":4.869523167,"ok":true}
+{"step":4,"label":"Sign in","cmd":"mobile_list_elements_on_screen","start":4.869577459,"end":5.031608709,"ok":true}
+{"step":4,"label":"Sign in","cmd":"mobile_list_elements_on_screen","start":5.031667834,"end":6.238984834,"ok":true}
+{"step":4,"label":"Sign in","cmd":"mobile_save_screenshot catalog.png","start":6.239116125,"end":6.414498417,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"mobile_get_screen_size","start":6.414501209,"end":6.469116709,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"mobile_batch_commands swipe up + list","start":6.469143042,"end":8.449098959,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"mobile_batch_commands swipe up + list","start":8.44924475,"end":11.206835834,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"mobile_batch_commands swipe up + list","start":11.207080417,"end":13.361104625,"ok":true}
+{"step":5,"label":"Scroll to Bath Towel","cmd":"mobile_batch_commands swipe up + list","start":13.36126875,"end":15.456634917,"ok":true}
+{"step":6,"label":"Open Bath Towel","cmd":"mobile_batch_commands click @e19 + list","start":15.456854417,"end":16.899475084,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"mobile_batch_commands click @e10 + list","start":16.899566125,"end":17.550783209,"ok":true}
+{"step":7,"label":"Add it to the cart","cmd":"mobile_save_screenshot towel.png","start":17.550872834,"end":17.682607542,"ok":true}
+{"step":8,"label":"Back to the catalog","cmd":"mobile_batch_commands click @e2 + list","start":17.6826225,"end":18.872600042,"ok":true}
+{"step":9,"label":"Search for \"lamp\"","cmd":"mobile_batch_commands click @e4, type \"lamp\" + list","start":18.87272475,"end":20.092761084,"ok":true}
+{"step":10,"label":"Open Desk Lamp","cmd":"mobile_batch_commands click @e7 + list","start":20.092832042,"end":21.338317792,"ok":true}
+{"step":11,"label":"Set quantity to 2","cmd":"mobile_batch_commands click @e9 + list","start":21.338395709,"end":21.976879542,"ok":true}
+{"step":12,"label":"Add 2 to the cart","cmd":"mobile_batch_commands click @e10 + list","start":21.9769445,"end":22.616716209,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"mobile_batch_commands click @e12 + list","start":22.616779625,"end":23.869244542,"ok":true}
+{"step":13,"label":"Open the cart","cmd":"mobile_save_screenshot cart.png","start":23.869303417,"end":24.011366,"ok":true}
+{"step":15,"label":"Go to checkout","cmd":"mobile_batch_commands click @e10 + list","start":24.011374459,"end":25.248571459,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"mobile_batch_commands click @e4, type \"Ada Lovelace\" + list","start":25.2486305,"end":26.199277667,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"mobile_batch_commands click @e5, type \"12 Analytical St\" + list","start":26.199324292,"end":26.932655167,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"mobile_batch_commands click @e6, type \"London\" + list","start":26.932703125,"end":27.675034834,"ok":true}
+{"step":16,"label":"Fill in the shipping address","cmd":"mobile_batch_commands click @e7, type \"N1 9GU\" + list","start":27.675085709,"end":28.518761375,"ok":true}
+{"step":17,"label":"Place the order","cmd":"mobile_batch_commands click @e8 + list","start":28.518808125,"end":29.162866709,"ok":true}
+{"step":17,"label":"Place the order","cmd":"mobile_list_elements_on_screen","start":29.162934584,"end":29.285574084,"ok":true}
+{"step":17,"label":"Place the order","cmd":"mobile_list_elements_on_screen","start":29.285615167,"end":29.401820334,"ok":true}
+{"step":17,"label":"Place the order","cmd":"mobile_list_elements_on_screen","start":29.401859959,"end":29.522881959,"ok":true}
+{"step":17,"label":"Place the order","cmd":"mobile_list_elements_on_screen","start":29.522923959,"end":30.682217042,"ok":true}
+{"step":18,"label":"Read the order number","cmd":"mobile_save_screenshot confirmation.png","start":30.682248875,"end":30.80390425,"ok":true}

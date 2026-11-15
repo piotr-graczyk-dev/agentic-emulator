@@ -251,7 +251,7 @@ def write_webp(path, src, fps):
 def main():
     ap = argparse.ArgumentParser(description="Highlight video from several agent races.")
     ap.add_argument("--race", action="append", required=True, metavar="NAME=ARM:DIR,...",
-                    help="a race: its name and 2-4 runs in column order; repeat per platform")
+                    help="a race: its name and 2-5 runs in column order; repeat per platform")
     ap.add_argument("--out", required=True, help="output mp4")
     ap.add_argument("--gif", help="also write a ~960 px teaser (.gif, or .webp)")
     ap.add_argument("--gif-race", type=int, default=1, help="which race (1-based) the teaser shows (default 1)")

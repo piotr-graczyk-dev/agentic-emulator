@@ -5,18 +5,23 @@
 #
 #   examples/agent-race/run.sh [android|ios|all] [out-dir]     default: all examples/agent-race/out
 #
-# Arms. Android: classic (adb + uiautomator), agent-device and Argent on the standard emulator, agemu
-# on an agemu device. iOS: agent-device and Argent on a standard Simulator, agemu on an agemu one.
+# Arms. Android: classic (adb + uiautomator), mobile-mcp, agent-device and Argent on the standard
+# emulator, agemu on an agemu device. iOS: mobile-mcp, agent-device and Argent on a standard
+# Simulator, agemu on an agemu one.
 #
-# Needs: Go, ffmpeg, uv (Pillow), the agent-device and Argent CLIs in $TOOLS (installed there with
-#   npm install --prefix ~/.cache/agemu-race-tools @swmansion/argent@0.32.0 agent-device@0.21.36),
+# Needs: Go, ffmpeg, uv (Pillow), the agent-device and Argent CLIs and mobile-mcp's server in $TOOLS
+# (installed there with
+#   npm install --prefix ~/.cache/agemu-race-tools @swmansion/argent@0.33.0 agent-device@0.21.37 \
+#     @mobilenext/mobile-mcp@1.0.17),
 # and running devices:
 #   STD_AVD        standard emulator (default Pixel_9_Pro), started with -grpc for the recording:
 #                  emulator -avd Pixel_9_Pro -port 5600 -grpc 8600
 #   AGEMU_AVD      agemu Android device (default agemu-lab)
 #   STD_SIM        standard Simulator's UDID (default: the simulator named race-iphone-17-pro)
 #   AGEMU_SIM      agemu iOS device's UDID (default: the simulator named agemu-iphone-17-pro)
-#   ROUNDS         runs per arm (default 3)
+#   ROUNDS         runs per arm (default 5)
+#   QUIET_WAIT     seconds a run may wait for a quiet host before it starts (default 0: it does
+#                  not wait); quiet is a 1-minute load average below QUIET_LOAD (default 5)
 # While an arm runs on one device, the other platform's devices are expected to be off, and the
 # other device of the same platform is paused where that is possible (emulator console
 # `avd stop`, agemu park); a standard Simulator cannot be paused and stays idle.
@@ -25,8 +30,9 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 WHICH="${1:-all}"
 OUT="${2:-examples/agent-race/out}"
-ROUNDS="${ROUNDS:-3}"
-FIRST_ROUND="${FIRST_ROUND:-1}" # to continue an interrupted series
+ROUNDS="${ROUNDS:-5}"
+FIRST_ROUND="${FIRST_ROUND:-1}" # to continue an interrupted series; with SKIP_DONE=1 a run that
+                                # already has its summary.json is not run again
 TOOLS="${TOOLS:-$HOME/.cache/agemu-race-tools/node_modules/.bin}"
 STD_AVD="${STD_AVD:-Pixel_9_Pro}"
 AGEMU_AVD="${AGEMU_AVD:-agemu-lab}"
@@ -57,16 +63,30 @@ serial_of() {
 # t runs a command with a time limit (macOS has no timeout(1)).
 t() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 
-# release stops the agent-device and Argent daemons and their on-device helpers, which hold
+# quiet holds a run back while someone else's build loads the host, for QUIET_WAIT seconds at most.
+quiet() {
+  local end=$(( $(date +%s) + ${QUIET_WAIT:-0} ))
+  while (( $(date +%s) < end )) && ! sysctl -n vm.loadavg | awk -v max="${QUIET_LOAD:-5}" '{ exit !($2 < max) }'; do
+    sleep 5
+  done
+}
+
+have() { [[ -n "${SKIP_DONE:-}" && -f "$1/summary.json" ]]; }
+
+# release stops the agent-device, Argent and mobile-mcp daemons and their on-device helpers, which hold
 # Android's one UiAutomation connection (and the iOS runners), so the next arm starts clean.
 release() {
   t 30 "$AD" close >/dev/null 2>&1 || true
   t 30 "$AD" daemon stop >/dev/null 2>&1 || true
   t 30 "$AR" server stop >/dev/null 2>&1 || true
+  # mobile-mcp's server ends with its run; mobilecli, which it starts, may outlive it.
+  pkill -f "$(cd "$TOOLS/.." && pwd)/@mobilenext/" >/dev/null 2>&1 || true
   if [[ -n "${STD_SERIAL:-}" ]]; then
-    for p in com.callstack.agentdevice.snapshothelper com.callstack.agentdevice.imehelper com.argent.androiddevtools; do
+    for p in com.callstack.agentdevice.snapshothelper com.callstack.agentdevice.imehelper com.argent.androiddevtools \
+      com.mobilenext.devicekit; do
       t 10 "$ADB" -s "$STD_SERIAL" shell am force-stop "$p" >/dev/null 2>&1 || true
     done
+    t 10 "$ADB" -s "$STD_SERIAL" shell pkill -f com.mobilenext.mobilecli >/dev/null 2>&1 || true
   fi
   sleep 2
 }
@@ -92,21 +112,25 @@ race_android() {
   # injected touches and then covers the screen for every later arm; it is turned off once.
   "$ADB" -s "$STD_SERIAL" emu avd start >/dev/null 2>&1 || true
   "$ADB" -s "$STD_SERIAL" shell settings put secure stylus_handwriting_enabled 0
+  # So is Google's "Save password?" sheet, which covers the catalog after the sign-in.
+  "$ADB" -s "$STD_SERIAL" shell settings put secure autofill_service null
   release
-  local arms=(classic agent-device argent agemu)
+  local arms=(classic mobile-mcp agent-device argent agemu)
   for i in $(seq "$FIRST_ROUND" "$ROUNDS"); do
-    for k in 0 1 2 3; do
-      local arm="${arms[$(( (k + i - 1) % 4 ))]}"
+    for k in $(seq 0 $(( ${#arms[@]} - 1 ))); do
+      local arm="${arms[$(( (k + i - 1) % ${#arms[@]} ))]}"
+      have "$dir/runs/$arm-$i" && continue
       if [[ "$arm" == agemu ]]; then
         "$ADB" -s "$STD_SERIAL" emu avd stop >/dev/null 2>&1 || true
         "$AGEMU" resume -d "android:$AGEMU_AVD" >/dev/null
-        sleep 15
+        sleep 15; quiet
         "$RACE" run --platform android --arm agemu --device "$AGEMU_AVD" --agemu "$AGEMU" --out "$dir/runs/agemu-$i" || true
       else
         "$AGEMU" park -d "android:$AGEMU_AVD" >/dev/null
         "$ADB" -s "$STD_SERIAL" emu avd start >/dev/null 2>&1 || true
         sleep 15
         [[ "$arm" == argent ]] && argent_up
+        quiet
         "$RACE" run --platform android --arm "$arm" --device "$STD_AVD" --out "$dir/runs/$arm-$i" || true
         release # while the emulator still runs: a paused one does not answer adb
       fi
@@ -114,10 +138,10 @@ race_android() {
   done
   "$ADB" -s "$STD_SERIAL" emu avd start >/dev/null 2>&1 || true
   STD_SERIAL=""
-  pick "$dir" classic agent-device argent agemu
+  pick "$dir" classic mobile-mcp agent-device argent agemu
   python3 examples/agent-race/stats.py "$dir"
-  uv run -q --with pillow examples/agent-race/compose.py $(runs_args "$dir" classic agent-device argent agemu) \
-    --title "Android · one agent task, four tool stacks" --out "$dir/race.mp4" --poster "$dir/race.png"
+  uv run -q --with pillow examples/agent-race/compose.py $(runs_args "$dir" classic mobile-mcp agent-device argent agemu) \
+    --title "Android · one agent task, five tool stacks" --out "$dir/race.mp4" --poster "$dir/race.png"
 }
 
 race_ios() {
@@ -130,28 +154,30 @@ race_ios() {
   "$AGEMU" boot "ios:$agm" >/dev/null
   "$AGEMU" install "$app" -d "ios:$agm" >/dev/null
   release
-  local arms=(agent-device argent agemu)
+  local arms=(mobile-mcp agent-device argent agemu)
   for i in $(seq "$FIRST_ROUND" "$ROUNDS"); do
-    for k in 0 1 2; do
-      local arm="${arms[$(( (k + i - 1) % 3 ))]}"
+    for k in $(seq 0 $(( ${#arms[@]} - 1 ))); do
+      local arm="${arms[$(( (k + i - 1) % ${#arms[@]} ))]}"
+      have "$dir/runs/$arm-$i" && continue
       if [[ "$arm" == agemu ]]; then
         "$AGEMU" resume -d "ios:$agm" >/dev/null
-        sleep 15
+        sleep 15; quiet
         "$RACE" run --platform ios --arm agemu --device "$agm" --agemu "$AGEMU" --out "$dir/runs/agemu-$i" || true
       else
         "$AGEMU" park -d "ios:$agm" >/dev/null
         sleep 15
         [[ "$arm" == argent ]] && argent_up
+        quiet
         "$RACE" run --platform ios --arm "$arm" --device "$std" --out "$dir/runs/$arm-$i" || true
         release
       fi
     done
   done
   release
-  pick "$dir" agent-device argent agemu
+  pick "$dir" mobile-mcp agent-device argent agemu
   python3 examples/agent-race/stats.py "$dir"
-  uv run -q --with pillow examples/agent-race/compose.py $(runs_args "$dir" agent-device argent agemu) \
-    --title "iOS · one agent task, three tool stacks" --out "$dir/race.mp4" --poster "$dir/race.png"
+  uv run -q --with pillow examples/agent-race/compose.py $(runs_args "$dir" mobile-mcp agent-device argent agemu) \
+    --title "iOS · one agent task, four tool stacks" --out "$dir/race.mp4" --poster "$dir/race.png"
 }
 
 # pick writes results.md (every run) and picked.json (the median successful run of each arm).
@@ -216,12 +242,12 @@ esac
 
 if [[ -f "$OUT/android/picked.json" && -f "$OUT/ios/picked.json" ]]; then
   uv run -q --with pillow examples/agent-race/montage.py \
-    --race "$(race_spec Android "$OUT/android" classic agent-device argent agemu)" \
-    --race "$(race_spec iOS "$OUT/ios" agent-device argent agemu)" \
+    --race "$(race_spec Android "$OUT/android" classic mobile-mcp agent-device argent agemu)" \
+    --race "$(race_spec iOS "$OUT/ios" mobile-mcp agent-device argent agemu)" \
     --out "$OUT/montage.mp4" --gif "$OUT/teaser.gif"
   uv run -q --with pillow examples/agent-race/montage.py \
-    --race "$(race_spec Android "$OUT/android" classic agent-device argent agemu)" \
-    --race "$(race_spec iOS "$OUT/ios" agent-device argent agemu)" \
+    --race "$(race_spec Android "$OUT/android" classic mobile-mcp agent-device argent agemu)" \
+    --race "$(race_spec iOS "$OUT/ios" mobile-mcp agent-device argent agemu)" \
     --out "$OUT/.montage-ios.mp4" --gif "$OUT/ios/race.gif" --gif-race 2
   rm -f "$OUT/.montage-ios.mp4"
 fi
