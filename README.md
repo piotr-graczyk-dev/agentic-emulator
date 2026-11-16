@@ -7,10 +7,13 @@
 **A fast control layer for the Android emulator and iOS Simulator, for coding agents that build
 mobile apps. A screenshot takes 4-5 ms and reading the screen 2-23 ms.**
 
-[![The same agent task with adb, mobile-mcp, agent-device, Argent and agemu, on Android and iOS](examples/agent-race/out/teaser.gif)](examples/agent-race/out/montage.mp4)
+<p align="center">
+  <a href="examples/agent-race/out/grand-prix.mp4"><img src="examples/agent-race/out/grand-prix.gif" width="600" alt="The Agent Grand Prix: one 18-step checkout driven by adb, mobile-mcp, agent-device, Argent and agemu on the Android emulator. agemu finishes in 10.6 s, the others in 24 to 74 s."></a>
+</p>
 
-The same 18-step shopping flow (sign in, search, cart, checkout) driven by five tool stacks.
-[Montage](examples/agent-race/out/montage.mp4) ·
+The same 18-step shopping flow (sign in, search, cart, checkout) driven by five tool stacks, cut as
+a race. [The Grand Prix cut](examples/agent-race/out/grand-prix.mp4) ·
+[montage](examples/agent-race/out/montage.mp4) ·
 [Android race](examples/agent-race/out/android/race.mp4) ·
 [iOS race](examples/agent-race/out/ios/race.mp4) ·
 [method](examples/agent-race)
