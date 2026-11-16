@@ -7,11 +7,18 @@ and Argent, against agemu.
 Every run is recorded; the median run of each stack is rendered side by side, per platform and in
 one montage.
 
+<p align="center">
+  <a href="out/grand-prix.mp4"><img src="out/grand-prix.gif" width="600" alt="The Agent Grand Prix: the median Android run of every stack as a race, then both platforms' results"></a>
+</p>
+
+The side-by-side recordings:
+
 | Android | iOS |
 |---|---|
 | [![Android race](out/teaser.gif)](out/android/race.mp4) | [![iOS race](out/ios/race.gif)](out/ios/race.mp4) |
 
-**Videos:** [montage, both platforms (62 s)](out/montage.mp4) ·
+**Videos:** [the Grand Prix cut (34 s)](out/grand-prix.mp4) ·
+[montage, both platforms (62 s)](out/montage.mp4) ·
 [Android race, 5 stacks, real time](out/android/race.mp4) ·
 [iOS race, 4 stacks, real time](out/ios/race.mp4)
 
@@ -206,7 +213,20 @@ and renders with [compose.py](compose.py) (2-5 stacks side by side) and [montage
 (the montage and the GIF teaser; Pillow through `uv`, and ffmpeg). On a Mac that does other work
 too, `QUIET_WAIT=900` makes every run wait, for that many seconds at most, until the 1-minute load
 average is under `QUIET_LOAD` (default 5); `FIRST_ROUND=3 SKIP_DONE=1` continues a series that
-was interrupted. One run on its own:
+was interrupted.
+
+The Grand Prix cut is rendered on its own, from the same picked runs:
+
+```sh
+uv run --with pillow examples/agent-race/grandprix.py \
+  --out examples/agent-race/out/grand-prix.mp4 --gif examples/agent-race/out/grand-prix.gif
+```
+
+[grandprix.py](grandprix.py) reads every time on screen from the runs; its commentary lines are
+written for the committed runs (which step each stack was in at that second), so read them again
+after a new series. It needs macOS's fonts.
+
+One run on its own:
 
 ```sh
 go run ./examples/agent-race run --platform ios --arm argent --device <udid> --out /tmp/race/argent
