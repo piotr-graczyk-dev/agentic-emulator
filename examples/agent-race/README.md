@@ -17,7 +17,7 @@ The side-by-side recordings:
 |---|---|
 | [![Android race](out/teaser.gif)](out/android/race.mp4) | [![iOS race](out/ios/race.gif)](out/ios/race.mp4) |
 
-**Videos:** [the Grand Prix cut (34 s)](out/grand-prix.mp4) ·
+**Videos:** [the Grand Prix cut (38 s)](out/grand-prix.mp4) ·
 [montage, both platforms (62 s)](out/montage.mp4) ·
 [Android race, 5 stacks, real time](out/android/race.mp4) ·
 [iOS race, 4 stacks, real time](out/ios/race.mp4)

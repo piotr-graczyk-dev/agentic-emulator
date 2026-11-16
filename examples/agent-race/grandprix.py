@@ -3,13 +3,15 @@
 
 Cream paper, race numbers, five lanes for five tool stacks, a commentary strip. It shows the
 median Android run of every stack from out/android (the runs picked for race.mp4), fast-forwards
-once agemu has finished, and closes with both platforms' medians.
+once agemu has finished, and closes with both platforms' medians, the single-call timings and
+what a device costs the Mac.
 
     uv run --with pillow examples/agent-race/grandprix.py --out out/grand-prix.mp4 --gif out/grand-prix.gif
     uv run --with pillow examples/agent-race/grandprix.py --sheet sheet.png --at 0.5,5,12,16.1,23,33
 
-Every time on screen is read from the runs' summary.json and events.jsonl; the three single-call
-timings on the pit-stop card are the ones in the main README. The commentary lines are written
+Every time on screen is read from the runs' summary.json and events.jsonl; the single-call
+timings on the pit-stop card and the memory and CPU figures on the weigh-in card are the ones in
+the main README's tables. The commentary lines are written
 for the committed runs and name what each stack was doing at that second, so check them after a
 new series. It needs the frames of the picked runs (not committed) and macOS's fonts (Futura,
 Avenir Next Condensed, SignPainter, American Typewriter).
@@ -120,8 +122,9 @@ T_FF0, T_FF1, T_FF2 = 17.5, 19.5, 20.7   # fast-forward: to the third finisher, 
 T_CLASS = 21.3
 T_IOS = 24.7
 T_PITS = 27.2
-T_CARD = 30.4
-T_END = 34.5
+T_WEIGH = 30.4
+T_CARD = T_WEIGH + 3.084             # the weigh-in lasts one bar of the music it was cut to
+T_END = T_CARD + 4.1
 R_MID = 30.6                         # race time at T_FF1 (the field but adb is home)
 
 
@@ -296,12 +299,14 @@ def commentary(r, t):
         return "Starting grid. Same app, same 18 steps, same Mac.", INK
     if r < 2.9:
         return "Lights out. adb opens with a 2.6-second screen read.", INK
-    if r < 5.6:
+    if r < 4.35:
         return "agemu is signed in and scrolling the catalog.", INK
-    if r < 8.1:
-        return "agemu has a towel in the cart. adb is typing the password.", INK
+    if r < 5.65:
+        return "agemu puts a towel in the cart. adb is entering the e-mail.", INK
+    if r < 8.15:
+        return "agemu adds two lamps and opens the cart. adb is entering the password.", INK
     if r < AGE["total"]:
-        return "agemu is checking out. adb has just pressed Sign in.", INK
+        return "agemu is checking out. adb is still signing in.", INK
     if t < T_FF0:
         return f"Chequered flag: agemu, {AGE['total']:.1f} s. adb is on step {step_of(ADB, r)} of {N}.", RED
     if r < ADB["total"]:
@@ -537,6 +542,71 @@ def scene_pits(t):
     return img
 
 
+def scene_weigh(t):
+    """The other half of the result: what a device costs the Mac while it is tested (README table)."""
+    img = BG.copy()
+    d = ImageDraw.Draw(img, "RGBA")
+    ft = fit(d, "fut", "THE WEIGH-IN", 640, 124)
+    for off, col in (((5, 5), RED), ((0, 0), INK)):
+        d.text((40 + off[0], 104 + off[1]), "THE WEIGH-IN", font=ft, fill=rgba(col), anchor="lm")
+    text(d, (44, 210), "Each device uses less of your Mac. Room for the IDE and the build.", F("avd", 36), INK,
+         prog(t, T_WEIGH + 0.15, 0.3), anchor="lm")
+    d.rectangle([36, 240, 1044, 246], fill=rgba(RED))
+    d.rectangle([36, 250, 1044, 252], fill=rgba(INK))
+
+    # the scale: the needle falls from the standard emulator's weight to agemu's
+    cx, cy, R, top = 880, 172, 132, 8.0
+
+    def at(v, r):
+        a = math.radians(180 + 180 * v / top)
+        return cx + r * math.cos(a), cy + r * math.sin(a)
+
+    d.pieslice([cx - R, cy - R, cx + R, cy + R], 180, 360, fill=rgba(CREAM), outline=rgba(INK), width=5)
+    d.arc([cx - R + 12, cy - R + 12, cx + R - 12, cy + R - 12], 180 + 180 * 4.3 / top, 180 + 180 * 5.4 / top,
+          fill=rgba(TEAL), width=16)
+    for v in range(0, int(top) + 1):
+        d.line([at(v, R - 6), at(v, R - (26 if v % 4 == 0 else 16))], fill=rgba(INK), width=4 if v % 4 == 0 else 2)
+    d.line([at(7.5, R - 6), at(7.5, R - 30)], fill=rgba(RED), width=7)
+    for v in (0, 4, 8):
+        text(d, at(v, R - 46), str(v), F("avh", 24), INK)
+    text(d, (cx, cy - 34), "GB", F("avh", 22), FADED)
+    q = max(0.0, t - (T_WEIGH + 0.55))
+    v = 4.85 + 2.65 * math.exp(-3.4 * q) * math.cos(8.5 * q)
+    d.line([(cx, cy), at(v, R - 22)], fill=rgba(INK), width=7)
+    d.ellipse([cx - 11, cy - 11, cx + 11, cy + 11], fill=rgba(RED))
+
+    rows = [("ANDROID EMULATOR  ·  MEMORY", "7.5 GB", "4.3–5.4 GB", "as Android Studio runs it"),
+            ("iOS SIMULATOR  ·  MEMORY DURING THE RACE", "3.8–4.0 GB", "1.9 GB", "the standard Simulator"),
+            ("ANDROID EMULATOR  ·  CPU AT IDLE", "86%", "19–24%", "of one core")]
+    fo = F("fut", 76)
+    size = 132     # one size for the three new values: the largest that fits every row
+    for _, old, new, _ in rows:
+        room = 1040 - (44 + d.textlength(old, font=fo) + 56 + 96 + 34)
+        size = min(size, fit(d, "fut", new, room, 132).size)
+    for i, (label, old, new, via) in enumerate(rows):
+        p = ease_out(prog(t, T_WEIGH + 0.45 + 0.4 * i, 0.3))
+        if p <= 0:
+            continue
+        y = 352 + i * 208
+        x = (1 - p) * 90
+        tracked(d, 44 + x, y - 62, label, F("avh", 31), INK, 2.4, p, align="l")
+        wo = d.textlength(old, font=fo)
+        text(d, (44 + x, y + 26), old, fo, FADED, p, anchor="lm")
+        st = ease_out(prog(t, T_WEIGH + 0.7 + 0.4 * i, 0.2))
+        if st > 0:
+            d.line([(36 + x, y + 30), (36 + x + (wo + 16) * st, y + 22)], fill=rgba(RED), width=9)
+        text(d, (44 + x, y + 88), via, F("avm", 26), FADED, p, anchor="lm")
+        ax = 44 + x + wo + 56
+        d.rectangle([ax, y + 21, ax + 70, y + 29], fill=rgba(INK, p))
+        d.polygon([(ax + 62, y + 4), (ax + 96, y + 25), (ax + 62, y + 46)], fill=rgba(INK, p))
+        text(d, (1040 + x, y + 26), new, F("fut", size), TEAL, p, anchor="rm")
+        if i < 2:
+            d.rectangle([36, y + 132, 1044, y + 133], fill=rgba(RULE, p))
+    text(d, (W / 2, 1046), "Per device, on an M2 Pro Mac  ·  the idle figure is one session on a busy Mac, so it is rough",
+         F("avm", 22), FADED, prog(t, T_WEIGH + 1.5, 0.3))
+    return img
+
+
 def scene_card(t):
     img = BG.copy()
     d = ImageDraw.Draw(img, "RGBA")
@@ -566,7 +636,8 @@ def scene_card(t):
     return img
 
 
-SCENES = [(0.0, scene_title), (T_GRID, scene_race), (T_CLASS, scene_class), (T_PITS, scene_pits), (T_CARD, scene_card)]
+SCENES = [(0.0, scene_title), (T_GRID, scene_race), (T_CLASS, scene_class), (T_PITS, scene_pits),
+          (T_WEIGH, scene_weigh), (T_CARD, scene_card)]
 WIPE = 0.34
 
 
