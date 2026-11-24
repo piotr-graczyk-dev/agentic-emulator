@@ -1,0 +1,40 @@
+{"start": 3.702, "end": 4.34, "tool": "mobile_launch_app", "args": {"packageName": "dev.agemu.shop"}, "error": false}
+{"start": 4.307, "end": 6.182, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 9.004, "end": 14.685, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e3"}}, {"name": "mobile_type_keys", "arguments": {"text": "test@agemu.dev"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e4"}}, {"name": "mobile_type_keys", "arguments": {"text": "hunter2"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e5"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 16.756, "end": 17.106, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 20.023, "end": 22.549, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 158}}, {"name": "mobile_type_keys", "arguments": {"text": "Bath Towel"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 25.122, "end": 25.849, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e5"}, "error": false}
+{"start": 25.257, "end": 26.207, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 28.909, "end": 29.592, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e11"}, "error": false}
+{"start": 29.703, "end": 30.376, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e3"}, "error": false}
+{"start": 29.727, "end": 30.688, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 33.798, "end": 34.457, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e1"}, "error": false}
+{"start": 33.863, "end": 34.839, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 37.393, "end": 37.966, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 41.048, "end": 41.582, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 250}, "error": false}
+{"start": 41.154, "end": 41.936, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 44.902, "end": 45.438, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 379}, "error": false}
+{"start": 44.951, "end": 45.981, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 49.596, "end": 50.13, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 65, "y": 89}, "error": false}
+{"start": 49.642, "end": 50.508, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 53.336, "end": 53.337, "tool": "mobile_triple_tap_placeholder", "args": {}, "error": true}
+{"start": 58.104, "end": 59.194, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 158}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_type_keys", "arguments": {"text": "Desk Lamp"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 61.989, "end": 62.706, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e11"}, "error": false}
+{"start": 62.911, "end": 64.508, "tool": "mobile_type_keys", "args": {"text": "Desk Lamp"}, "error": false}
+{"start": 63.768, "end": 65.044, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 250}, "error": false}
+{"start": 63.769, "end": 65.576, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 67.849, "end": 68.166, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 70.809, "end": 71.47, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e8"}, "error": false}
+{"start": 71.529, "end": 72.185, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e9"}, "error": false}
+{"start": 71.536, "end": 72.479, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 74.968, "end": 75.608, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e11"}, "error": false}
+{"start": 75.05, "end": 75.931, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 78.577, "end": 79.233, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e11"}, "error": false}
+{"start": 78.68, "end": 79.523, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 81.649, "end": 81.953, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 84.841, "end": 85.446, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 379}, "error": false}
+{"start": 84.849, "end": 85.775, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 89.285, "end": 98.136, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 187}}, {"name": "mobile_type_keys", "arguments": {"text": "Ada Lovelace"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 249}}, {"name": "mobile_type_keys", "arguments": {"text": "12 Analytical St"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 311}}, {"name": "mobile_type_keys", "arguments": {"text": "London"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 373}}, {"name": "mobile_type_keys", "arguments": {"text": "N1 9GU"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 100.693, "end": 101.402, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e7"}, "error": false}
+{"start": 100.699, "end": 101.761, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 103.967, "end": 104.291, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}

@@ -1,0 +1,33 @@
+{"start": 3.708, "end": 8.914, "tool": "launch-app", "args": {"bundleId": "dev.agemu.shop"}, "error": false}
+{"start": 11.455, "end": 12.376, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.227}, "error": false}
+{"start": 12.267, "end": 14.253, "tool": "keyboard", "args": {"text": "test@agemu.dev"}, "error": false}
+{"start": 12.668, "end": 15.248, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.298}, "error": false}
+{"start": 13.53, "end": 16.379, "tool": "keyboard", "args": {"text": "hunter2"}, "error": false}
+{"start": 13.589, "end": 16.825, "tool": "keyboard", "args": {"key": "enter"}, "error": false}
+{"start": 21.321, "end": 22.119, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.227}, "error": false}
+{"start": 21.646, "end": 22.13, "tool": "keyboard", "args": {"key": "command+a"}, "error": true}
+{"start": 26.482, "end": 29.855, "tool": "run-sequence", "args": {"steps": [{"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "gesture-tap", "args": {"x": 0.563, "y": 0.891}}, {"tool": "keyboard", "args": {"text": "agemu.dev"}}]}, "error": false}
+{"start": 33.068, "end": 34.633, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.369}, "error": false}
+{"start": 38.128, "end": 38.741, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.181}, "error": false}
+{"start": 38.609, "end": 40.243, "tool": "keyboard", "args": {"text": "Bath Towel"}, "error": false}
+{"start": 43.073, "end": 43.59, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.293}, "error": false}
+{"start": 46.055, "end": 46.702, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.434}, "error": false}
+{"start": 49.617, "end": 50.165, "tool": "gesture-tap", "args": {"x": 0.17, "y": 0.102}, "error": false}
+{"start": 54.409, "end": 57.675, "tool": "run-sequence", "args": {"steps": [{"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"text": "desk lamp"}}]}, "error": false}
+{"start": 61.761, "end": 62.915, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.293}, "error": false}
+{"start": 62.12, "end": 63.51, "tool": "gesture-tap", "args": {"x": 0.9, "y": 0.35}, "error": false}
+{"start": 66.589, "end": 67.184, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.458}, "error": false}
+{"start": 67.186, "end": 68.48, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.526}, "error": false}
+{"start": 71.835, "end": 73.118, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.434}, "error": false}
+{"start": 77.093, "end": 77.846, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.214}, "error": false}
+{"start": 77.928, "end": 79.629, "tool": "keyboard", "args": {"text": "Ada Lovelace"}, "error": false}
+{"start": 78.407, "end": 80.124, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.285}, "error": false}
+{"start": 79.268, "end": 82.259, "tool": "keyboard", "args": {"text": "12 Analytical St"}, "error": false}
+{"start": 80.094, "end": 82.756, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.356}, "error": false}
+{"start": 81.071, "end": 83.807, "tool": "keyboard", "args": {"text": "London"}, "error": false}
+{"start": 81.529, "end": 84.314, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.427}, "error": false}
+{"start": 82.112, "end": 85.438, "tool": "keyboard", "args": {"text": "N1 9GU"}, "error": false}
+{"start": 93.956, "end": 96.847, "tool": "run-sequence", "args": {"steps": [{"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "keyboard", "args": {"key": "backspace"}}, {"tool": "gesture-tap", "args": {"x": 0.076, "y": 0.83}}, {"tool": "keyboard", "args": {"text": "N"}}, {"tool": "keyboard", "args": {"text": "1 9"}}, {"tool": "gesture-tap", "args": {"x": 0.076, "y": 0.83}}, {"tool": "keyboard", "args": {"text": "G"}}, {"tool": "gesture-tap", "args": {"x": 0.076, "y": 0.83}}, {"tool": "keyboard", "args": {"text": "U"}}]}, "error": false}
+{"start": 101.294, "end": 102.237, "tool": "gesture-tap", "args": {"x": 0.5, "y": 0.498}, "error": false}
+{"start": 107.072, "end": 107.606, "tool": "await-ui-element", "args": {"condition": "exists", "selector": {"text": "order"}, "timeoutMs": 1}, "error": false}
+{"start": 107.444, "end": 107.927, "tool": "await-screen-idle", "args": {"timeoutMs": 8000}, "error": false}

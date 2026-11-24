@@ -1,0 +1,49 @@
+{
+ "wall_s": 108.877,
+ "startup_s": 0.367,
+ "tool_s": 20.521,
+ "tool_calls": 82,
+ "messages": 32,
+ "tools": {
+  "launch": 2,
+  "tap": 21,
+  "type_text": 13,
+  "ui_tree": 6,
+  "wait_for": 4,
+  "screenshot": 7,
+  "find": 3,
+  "press_key": 26
+ },
+ "tool_errors": 5,
+ "answer": "The order went through. The cart showed 1 \u00d7 Bath Towel ($32.00) and 2 \u00d7 Desk Lamp ($59.98), with a total of $91.98, as expected. The confirmation screen says \"Order #31.614\", with 3 items for $91.98.\n\nORDER 31.614",
+ "turns": 83,
+ "cost_usd": 0.2590241,
+ "api_s": 90.946,
+ "tokens": {
+  "input": 64,
+  "cache_read": 713636,
+  "cache_write": 36801,
+  "output": 9553
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 87.989,
+ "median_call_s": 0.035,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "7.08 4.43 7.11",
+ "loadavg": "3.68 4.06 6.66",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T01:47:02+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-6-g31b5481"
+ }
+}

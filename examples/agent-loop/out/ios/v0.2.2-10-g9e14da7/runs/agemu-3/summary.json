@@ -1,0 +1,46 @@
+{
+ "wall_s": 43.477,
+ "startup_s": 0.369,
+ "tool_s": 19.616,
+ "tool_calls": 22,
+ "messages": 15,
+ "tools": {
+  "launch": 1,
+  "type_text": 8,
+  "tap": 10,
+  "ui_tree": 2,
+  "wait_for": 1
+ },
+ "tool_errors": 1,
+ "answer": "I signed in, added one Bath Towel and two Desk Lamps, and checked the cart. The total was $91.98, as expected. I placed the order with the Ada Lovelace address, and the confirmation screen shows 3 items for $91.98.\n\nThe order number is displayed as \"31.614\", with a period in it. I've reported it exactly as shown.\n\nORDER 31.614",
+ "turns": 23,
+ "cost_usd": 0.07392670000000001,
+ "api_s": 24.626,
+ "tokens": {
+  "input": 30,
+  "cache_read": 239717,
+  "cache_write": 11730,
+  "output": 2057
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 23.492,
+ "median_call_s": 0.501,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "3.01 3.96 5.65",
+ "loadavg": "3.23 3.91 5.55",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:25:58+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-10-g9e14da7"
+ }
+}

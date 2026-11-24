@@ -1,0 +1,85 @@
+{"start": 2.707, "end": 2.757, "tool": "launch", "args": {"app": "dev.agemu.shop", "returnUi": true}, "error": true}
+{"start": 4.772, "end": 5.971, "tool": "launch", "args": {"app": "dev.agemu.shop", "returnUi": true}, "error": false}
+{"start": 8.162, "end": 8.195, "tool": "tap", "args": {"id": "e4"}, "error": true}
+{"start": 8.57, "end": 10.641, "tool": "type_text", "args": {"text": "test@agemu.dev"}, "error": false}
+{"start": 9.47, "end": 10.873, "tool": "tap", "args": {"x": 600, "y": 782}, "error": false}
+{"start": 9.79, "end": 11.145, "tool": "type_text", "args": {"text": "hunter2"}, "error": false}
+{"start": 9.795, "end": 11.28, "tool": "tap", "args": {"text": "Sign in", "returnUi": true}, "error": false}
+{"start": 13.987, "end": 14.102, "tool": "tap", "args": {"x": 600, "y": 598}, "error": false}
+{"start": 13.994, "end": 14.425, "tool": "type_text", "args": {"text": "test@agemu.dev", "returnUi": true}, "error": false}
+{"start": 16.871, "end": 17.534, "tool": "tap", "args": {"text": "Sign in", "role": "button", "returnUi": true}, "error": false}
+{"start": 19.817, "end": 19.902, "tool": "wait_for", "args": {"text": "Signing in…", "gone": true}, "error": false}
+{"start": 19.925, "end": 19.978, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 22.691, "end": 22.885, "tool": "tap", "args": {"x": 600, "y": 475}, "error": false}
+{"start": 23.002, "end": 23.223, "tool": "type_text", "args": {"text": "Bath Towel", "returnUi": true}, "error": false}
+{"start": 25.297, "end": 25.324, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 27.447, "end": 27.661, "tool": "tap", "args": {"text": "Bath Towel", "role": "text", "returnUi": true}, "error": false}
+{"start": 29.551, "end": 29.576, "tool": "screenshot", "args": {"scale": 0.3}, "error": false}
+{"start": 32.039, "end": 32.243, "tool": "tap", "args": {"text": "Add to cart", "returnUi": true}, "error": false}
+{"start": 32.396, "end": 32.74, "tool": "tap", "args": {"text": "Catalog", "returnUi": true}, "error": true}
+{"start": 34.849, "end": 35.14, "tool": "tap", "args": {"contains": "Catalog", "role": "button", "returnUi": true}, "error": false}
+{"start": 37.325, "end": 37.348, "tool": "screenshot", "args": {"scale": 0.3}, "error": false}
+{"start": 39.998, "end": 40.123, "tool": "tap", "args": {"x": 600, "y": 475}, "error": false}
+{"start": 40.043, "end": 40.25, "tool": "type_text", "args": {"text": "Desk Lamp"}, "error": false}
+{"start": 42.172, "end": 42.196, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 44.36, "end": 44.468, "tool": "type_text", "args": {"text": "Desk Lamp", "keys": false}, "error": false}
+{"start": 46.744, "end": 46.765, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 48.796, "end": 48.804, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 52.286, "end": 52.398, "tool": "type_text", "args": {"text": "□", "keys": true}, "error": false}
+{"start": 54.9, "end": 55.006, "tool": "type_text", "args": {"text": "\n\n", "keys": true, "returnUi": true}, "error": false}
+{"start": 57.806, "end": 59.423, "tool": "swipe", "args": {"x": 1000, "y": 475, "x2": 110, "y2": 475, "durationMs": 1200}, "error": false}
+{"start": 61.496, "end": 61.519, "tool": "screenshot", "args": {"scale": 0.3}, "error": false}
+{"start": 64.877, "end": 65.104, "tool": "tap", "args": {"x": 600, "y": 475}, "error": false}
+{"start": 65.248, "end": 65.252, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 65.678, "end": 65.686, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 66.094, "end": 66.102, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 66.64, "end": 66.648, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 67.437, "end": 67.442, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 67.781, "end": 67.788, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 68.04, "end": 68.046, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 68.043, "end": 68.049, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 69.842, "end": 69.883, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 75.835, "end": 75.957, "tool": "tap", "args": {"x": 1050, "y": 475}, "error": false}
+{"start": 76.166, "end": 76.174, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 76.59, "end": 76.602, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 77.004, "end": 77.011, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 77.502, "end": 77.508, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 78.355, "end": 78.363, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 78.757, "end": 78.764, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 79.214, "end": 79.222, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 79.652, "end": 79.661, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 80.063, "end": 80.072, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 80.555, "end": 80.562, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 80.894, "end": 80.903, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 81.321, "end": 81.33, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 81.801, "end": 81.81, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 82.232, "end": 82.244, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 82.651, "end": 82.655, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 83.061, "end": 83.069, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 83.493, "end": 83.498, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 84.025, "end": 84.03, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 84.419, "end": 84.428, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 84.426, "end": 84.431, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 86.423, "end": 86.463, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 89.341, "end": 89.348, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 89.756, "end": 89.764, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 90.14, "end": 90.149, "tool": "press_key", "args": {"key": "delete"}, "error": false}
+{"start": 90.193, "end": 90.368, "tool": "type_text", "args": {"text": "Desk Lamp"}, "error": false}
+{"start": 93.308, "end": 93.543, "tool": "tap", "args": {"text": "Desk Lamp", "role": "text", "returnUi": true}, "error": false}
+{"start": 95.633, "end": 95.757, "tool": "tap", "args": {"x": 1083, "y": 981}, "error": false}
+{"start": 98.053, "end": 98.214, "tool": "tap", "args": {"text": "Add to cart", "returnUi": true}, "error": false}
+{"start": 100.398, "end": 100.587, "tool": "tap", "args": {"text": "View cart", "returnUi": true}, "error": false}
+{"start": 102.561, "end": 102.592, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 104.87, "end": 105.056, "tool": "tap", "args": {"text": "Checkout", "returnUi": true}, "error": false}
+{"start": 106.969, "end": 107.005, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 109.425, "end": 109.622, "tool": "tap", "args": {"x": 600, "y": 562}, "error": false}
+{"start": 109.844, "end": 109.986, "tool": "type_text", "args": {"text": "Ada Lovelace"}, "error": false}
+{"start": 110.735, "end": 110.861, "tool": "tap", "args": {"x": 600, "y": 748}, "error": false}
+{"start": 111.147, "end": 111.26, "tool": "type_text", "args": {"text": "12 Analytical St"}, "error": false}
+{"start": 111.559, "end": 111.72, "tool": "tap", "args": {"x": 600, "y": 934}, "error": false}
+{"start": 111.974, "end": 112.096, "tool": "type_text", "args": {"text": "London"}, "error": false}
+{"start": 112.835, "end": 112.964, "tool": "tap", "args": {"x": 600, "y": 1120}, "error": false}
+{"start": 112.84, "end": 113.122, "tool": "type_text", "args": {"text": "N1 9GU", "returnUi": true}, "error": false}
+{"start": 115.509, "end": 115.689, "tool": "tap", "args": {"text": "Place order", "waitFor": {"contains": "order"}, "returnUi": true}, "error": false}
+{"start": 118.231, "end": 118.253, "tool": "wait_for", "args": {"contains": "Order", "timeoutMs": 15000}, "error": false}
+{"start": 118.301, "end": 118.324, "tool": "ui_tree", "args": {}, "error": false}

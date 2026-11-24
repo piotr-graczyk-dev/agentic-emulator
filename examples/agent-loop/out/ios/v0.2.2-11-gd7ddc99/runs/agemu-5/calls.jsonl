@@ -1,0 +1,23 @@
+{"start": 2.483, "end": 3.651, "tool": "launch", "args": {"app": "dev.agemu.shop", "returnUi": true}, "error": false}
+{"start": 6.073, "end": 6.552, "tool": "type_text", "args": {"text": "test@agemu.dev", "into": {"text": "E-mail"}}, "error": false}
+{"start": 6.08, "end": 6.89, "tool": "type_text", "args": {"text": "hunter2", "into": {"text": "Password"}}, "error": false}
+{"start": 6.161, "end": 7.753, "tool": "tap", "args": {"text": "Sign in", "returnUi": true}, "error": false}
+{"start": 9.429, "end": 19.755, "tool": "wait_for", "args": {"text": "Bath Towel"}, "error": true}
+{"start": 21.187, "end": 21.248, "tool": "ui_tree", "args": {}, "error": false}
+{"start": 23.644, "end": 25.155, "tool": "type_text", "args": {"text": "Bath Towel", "into": {"text": "Search products"}, "returnUi": true}, "error": false}
+{"start": 26.896, "end": 27.476, "tool": "tap", "args": {"text": "Bath Towel", "index": 1, "returnUi": true}, "error": false}
+{"start": 29.518, "end": 29.872, "tool": "tap", "args": {"text": "Add to cart", "returnUi": true}, "error": false}
+{"start": 31.864, "end": 31.987, "tool": "tap", "args": {"text": "‹ Catalog"}, "error": false}
+{"start": 32.21, "end": 33.703, "tool": "type_text", "args": {"text": "Desk Lamp", "into": {"text": "Search products"}, "clear": true, "returnUi": true}, "error": false}
+{"start": 35.703, "end": 35.829, "tool": "tap", "args": {"x": 239, "y": 741}, "error": false}
+{"start": 35.788, "end": 36.738, "tool": "tap", "args": {"text": "+", "returnUi": true}, "error": false}
+{"start": 38.703, "end": 38.852, "tool": "tap", "args": {"text": "Add to cart"}, "error": false}
+{"start": 38.938, "end": 39.894, "tool": "tap", "args": {"text": "View cart", "returnUi": true}, "error": false}
+{"start": 41.857, "end": 42.378, "tool": "tap", "args": {"text": "Checkout", "returnUi": true}, "error": false}
+{"start": 44.737, "end": 45.015, "tool": "type_text", "args": {"text": "Ada Lovelace", "into": {"text": "Full name"}}, "error": false}
+{"start": 44.742, "end": 45.324, "tool": "type_text", "args": {"text": "12 Analytical St", "into": {"text": "Street address"}}, "error": false}
+{"start": 45.149, "end": 45.623, "tool": "type_text", "args": {"text": "London", "into": {"text": "City"}}, "error": false}
+{"start": 45.569, "end": 45.894, "tool": "type_text", "args": {"text": "N1 9GU", "into": {"text": "Postal code"}}, "error": false}
+{"start": 45.594, "end": 46.641, "tool": "tap", "args": {"text": "Place order", "returnUi": true}, "error": false}
+{"start": 48.599, "end": 63.756, "tool": "wait_for", "args": {"contains": "order", "timeoutMs": 15000, "gone": true}, "error": true}
+{"start": 65.423, "end": 65.459, "tool": "ui_tree", "args": {}, "error": false}

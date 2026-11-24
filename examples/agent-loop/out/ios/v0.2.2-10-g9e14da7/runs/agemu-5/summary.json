@@ -1,0 +1,46 @@
+{
+ "wall_s": 49.962,
+ "startup_s": 0.388,
+ "tool_s": 19.371,
+ "tool_calls": 26,
+ "messages": 14,
+ "tools": {
+  "launch": 1,
+  "type_text": 8,
+  "tap": 14,
+  "ui_tree": 2,
+  "wait_for": 1
+ },
+ "tool_errors": 4,
+ "answer": "I signed in, added 1 Bath Towel ($32.00) and 2 Desk Lamps ($59.98), and the cart total was $91.98 as expected. I then placed the order with Ada Lovelace, 12 Analytical St, London, N1 9GU. The confirmation screen shows \"Order #31.614\", with the dot as the app prints it, and \"3 items \u00b7 $91.98\".\n\nORDER 31.614",
+ "turns": 27,
+ "cost_usd": 0.0763473,
+ "api_s": 31.376,
+ "tokens": {
+  "input": 28,
+  "cache_read": 219713,
+  "cache_write": 12212,
+  "output": 2379
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 30.203,
+ "median_call_s": 0.488,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "2.92 3.70 5.30",
+ "loadavg": "3.06 3.64 5.19",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:28:15+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-10-g9e14da7"
+ }
+}

@@ -1,0 +1,23 @@
+{"start": 3.975, "end": 5.369, "tool": "open", "args": {"app": "dev.agemu.shop", "foreground": true}, "error": false}
+{"start": 7.755, "end": 9.723, "tool": "fill", "args": {"ref": "@e3", "text": "test@agemu.dev"}, "error": false}
+{"start": 7.762, "end": 9.748, "tool": "fill", "args": {"ref": "@e4", "text": "hunter2"}, "error": true}
+{"start": 7.913, "end": 9.761, "tool": "press", "args": {"ref": "@e5", "settle": true}, "error": true}
+{"start": 12.022, "end": 13.393, "tool": "fill", "args": {"selector": "label=\"Password\"", "text": "hunter2"}, "error": false}
+{"start": 15.235, "end": 17.002, "tool": "press", "args": {"selector": "label=\"Sign in\" role=button", "settle": true}, "error": false}
+{"start": 19.478, "end": 21.643, "tool": "fill", "args": {"selector": "label=\"Search products\"", "text": "Bath Towel", "settle": true}, "error": false}
+{"start": 23.698, "end": 25.05, "tool": "press", "args": {"selector": "label=\"Bath Towel\" role=text", "settle": true}, "error": false}
+{"start": 27.159, "end": 27.996, "tool": "press", "args": {"ref": "@e10~s556893", "settle": true}, "error": false}
+{"start": 30.011, "end": 30.951, "tool": "press", "args": {"selector": "label=\"‹ Catalog\"", "settle": true}, "error": false}
+{"start": 32.997, "end": 33.128, "tool": "fill", "args": {"selector": "label=\"Bath Towel\" role=text-field", "text": "Desk Lamp", "settle": true}, "error": true}
+{"start": 35.204, "end": 39.345, "tool": "fill", "args": {"ref": "@e4~s556898", "text": "Desk Lamp", "settle": true}, "error": false}
+{"start": 41.544, "end": 42.873, "tool": "press", "args": {"ref": "@e7~s556902", "settle": true}, "error": false}
+{"start": 44.963, "end": 45.778, "tool": "press", "args": {"ref": "@e9~s556905", "settle": true}, "error": false}
+{"start": 47.851, "end": 47.864, "tool": "press", "args": {"ref": "@e10~s556905", "settle": true}, "error": true}
+{"start": 49.841, "end": 50.743, "tool": "press", "args": {"selector": "label=\"Add to cart\"", "settle": true}, "error": false}
+{"start": 52.745, "end": 53.974, "tool": "press", "args": {"selector": "label=\"View cart\"", "settle": true}, "error": false}
+{"start": 56.061, "end": 57.332, "tool": "press", "args": {"selector": "label=\"Checkout\"", "settle": true}, "error": false}
+{"start": 59.753, "end": 61.278, "tool": "fill", "args": {"selector": "label=\"Full name\"", "text": "Ada Lovelace"}, "error": false}
+{"start": 59.759, "end": 63.084, "tool": "fill", "args": {"selector": "label=\"Street address\"", "text": "12 Analytical St"}, "error": false}
+{"start": 60.122, "end": 64.615, "tool": "fill", "args": {"selector": "label=\"City\"", "text": "London"}, "error": false}
+{"start": 60.262, "end": 66.174, "tool": "fill", "args": {"selector": "label=\"Postal code\"", "text": "N1 9GU"}, "error": false}
+{"start": 68.117, "end": 69.875, "tool": "press", "args": {"selector": "label=\"Place order\"", "settle": true}, "error": false}

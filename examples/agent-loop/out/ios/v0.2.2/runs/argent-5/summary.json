@@ -1,0 +1,47 @@
+{
+ "wall_s": 157.326,
+ "startup_s": 0.522,
+ "tool_s": 47.812,
+ "tool_calls": 28,
+ "messages": 20,
+ "tools": {
+  "launch-app": 1,
+  "gesture-tap": 14,
+  "keyboard": 5,
+  "run-sequence": 6,
+  "await-ui-element": 1,
+  "describe": 1
+ },
+ "tool_errors": 0,
+ "answer": "The order went through, and the cart total was $91.98 before checkout (2 \u00d7 Desk Lamp $59.98 plus 1 \u00d7 Bath Towel $32.00). The confirmation screen shows 3 items for $91.98, for Ada Lovelace.\n\nORDER #31.614",
+ "turns": 29,
+ "cost_usd": 0.42754949999999997,
+ "api_s": 109.844,
+ "tokens": {
+  "input": 40,
+  "cache_read": 1753945,
+  "cache_write": 64306,
+  "output": 9131
+ },
+ "servers": {
+  "argent": "connected"
+ },
+ "tool_count": 71,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 108.992,
+ "median_call_s": 1.292,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "3.83 3.90 4.31",
+ "loadavg": "3.09 3.56 4.10",
+ "platform": "ios",
+ "arm": "argent",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:18:55+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "argent": "0.33.0"
+ }
+}

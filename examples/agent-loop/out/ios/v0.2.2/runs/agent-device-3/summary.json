@@ -1,0 +1,46 @@
+{
+ "wall_s": 77.972,
+ "startup_s": 0.899,
+ "tool_s": 28.971,
+ "tool_calls": 26,
+ "messages": 22,
+ "tools": {
+  "open": 1,
+  "fill": 10,
+  "press": 11,
+  "snapshot": 3,
+  "find": 1
+ },
+ "tool_errors": 4,
+ "answer": "The cart total was $91.98 as expected, and the order was placed. The confirmation screen reads \"Order #31.614\", and I've copied it exactly as shown.\n\nORDER 31.614",
+ "turns": 27,
+ "cost_usd": 0.3414032,
+ "api_s": 48.242,
+ "tokens": {
+  "input": 44,
+  "cache_read": 1394577,
+  "cache_write": 71175,
+  "output": 2392
+ },
+ "servers": {
+  "agent-device": "connected"
+ },
+ "tool_count": 62,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 48.102,
+ "median_call_s": 1.307,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.21 3.57 4.53",
+ "loadavg": "5.72 4.35 4.74",
+ "platform": "ios",
+ "arm": "agent-device",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:03:38+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agent-device": "0.21.37"
+ }
+}

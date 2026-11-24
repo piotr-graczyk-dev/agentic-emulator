@@ -1,0 +1,50 @@
+{
+ "wall_s": 114.401,
+ "startup_s": 0.787,
+ "tool_s": 42.282,
+ "tool_calls": 43,
+ "messages": 23,
+ "tools": {
+  "mobile_launch_app": 2,
+  "mobile_list_elements_on_screen": 11,
+  "mobile_batch_commands": 3,
+  "mobile_click_on_screen_at_coordinates": 15,
+  "mobile_take_screenshot": 8,
+  "mobile_clipboard": 1,
+  "mobile_type_keys": 1,
+  "mobile_get_foreground_app": 1,
+  "mobile_list_crashes": 1
+ },
+ "tool_errors": 1,
+ "answer": "I signed in, added one Bath Towel and two Desk Lamps, and confirmed the cart total was $91.98. I then checked out with the Ada Lovelace address and placed the order. The confirmation screen showed 3 items for $91.98.\n\nMy first attempt to add the Bath Towel didn't register, because the cart still read (0). I added it again, so the cart held exactly one towel.\n\nORDER #31.614",
+ "turns": 44,
+ "cost_usd": 0.20739390000000008,
+ "api_s": 74.208,
+ "tokens": {
+  "input": 46,
+  "cache_read": 574919,
+  "cache_write": 35776,
+  "output": 6037
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 71.332,
+ "median_call_s": 0.651,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.01 4.37 4.59",
+ "loadavg": "3.04 3.94 4.39",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:14:17+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}

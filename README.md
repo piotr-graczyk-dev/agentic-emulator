@@ -120,7 +120,9 @@ only devices named `agemu-*`.
 | React Native profiling, network inspection, recorded replays or visual diffs | [Argent](https://github.com/software-mansion/argent) |
 
 The [agent race](examples/agent-race) measures agemu against `adb`, mobile-mcp, agent-device and
-Argent on one task.
+Argent on one task, with no model between the calls. The [agent loop](examples/agent-loop) gives
+the task to a real agent with each tool, and shows that the number of calls counts for more than
+their speed.
 
 ## Install
 

@@ -1,0 +1,47 @@
+{
+ "wall_s": 59.74,
+ "startup_s": 0.36,
+ "tool_s": 21.566,
+ "tool_calls": 25,
+ "messages": 17,
+ "tools": {
+  "launch": 1,
+  "type_text": 8,
+  "tap": 11,
+  "wait_for": 2,
+  "screenshot": 2,
+  "find": 1
+ },
+ "tool_errors": 1,
+ "answer": "The cart total was $91.98, as expected, and the order went through. The confirmation screen showed \"Order #31.614\", 3 items, $91.98, for Ada Lovelace.\n\nORDER 31.614",
+ "turns": 26,
+ "cost_usd": 0.08429149999999998,
+ "api_s": 38.669,
+ "tokens": {
+  "input": 34,
+  "cache_read": 281410,
+  "cache_write": 13509,
+  "output": 2231
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 37.814,
+ "median_call_s": 0.496,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "5.02 5.33 5.54",
+ "loadavg": "6.70 5.77 5.68",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:35:51+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-11-gd7ddc99"
+ }
+}

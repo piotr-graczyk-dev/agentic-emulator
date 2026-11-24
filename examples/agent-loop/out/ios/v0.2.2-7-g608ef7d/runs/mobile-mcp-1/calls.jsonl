@@ -1,0 +1,41 @@
+{"start": 3.893, "end": 4.61, "tool": "mobile_launch_app", "args": {"packageName": "dev.agemu.shop"}, "error": false}
+{"start": 3.904, "end": 6.732, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 9.706, "end": 15.386, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e3"}}, {"name": "mobile_type_keys", "arguments": {"text": "test@agemu.dev"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e4"}}, {"name": "mobile_type_keys", "arguments": {"text": "hunter2"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e5"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 17.447, "end": 17.829, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 20.867, "end": 23.189, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 158}}, {"name": "mobile_type_keys", "arguments": {"text": "Bath"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 25.8, "end": 26.537, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e5"}, "error": false}
+{"start": 25.872, "end": 27.109, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 29.464, "end": 30.0, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 378}, "error": false}
+{"start": 30.579, "end": 31.118, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 60, "y": 88}, "error": false}
+{"start": 30.586, "end": 31.669, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 34.294, "end": 34.31, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_clear_app_data_placeholder", "arguments": {}}], "stopOnError": true}, "error": true}
+{"start": 38.723, "end": 39.422, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 200, "y": 158}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_press_button", "arguments": {"button": "BACKSPACE"}}, {"name": "mobile_type_keys", "arguments": {"text": "Desk Lamp"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 100, "y": 246}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"x": 365, "y": 297}}]}, "error": false}
+{"start": 38.726, "end": 40.024, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 42.831, "end": 43.358, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 213, "y": 206}, "error": false}
+{"start": 43.588, "end": 45.201, "tool": "mobile_type_keys", "args": {"text": "Desk Lamp"}, "error": false}
+{"start": 43.643, "end": 45.729, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 48.845, "end": 49.372, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 100, "y": 246}, "error": false}
+{"start": 49.27, "end": 49.912, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 365, "y": 297}, "error": false}
+{"start": 50.322, "end": 50.85, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 378}, "error": false}
+{"start": 50.326, "end": 51.384, "tool": "mobile_take_screenshot", "args": {"maxSize": 500}, "error": false}
+{"start": 54.078, "end": 54.61, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 490}, "error": false}
+{"start": 54.138, "end": 54.925, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 57.368, "end": 58.043, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e11"}, "error": false}
+{"start": 57.46, "end": 58.35, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 60.56, "end": 60.878, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 63.774, "end": 64.448, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e9"}, "error": false}
+{"start": 63.88, "end": 64.786, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 68.241, "end": 77.906, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e6"}}, {"name": "mobile_type_keys", "arguments": {"text": "Ada Lovelace"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e7"}}, {"name": "mobile_type_keys", "arguments": {"text": "12 Analytical St"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e8"}}, {"name": "mobile_type_keys", "arguments": {"text": "London"}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e9"}}, {"name": "mobile_type_keys", "arguments": {"text": "N1 9GU"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 81.981, "end": 87.446, "tool": "mobile_batch_commands", "args": {"steps": [{"name": "mobile_long_press_on_screen_at_coordinates", "arguments": {"x": 373, "y": 725, "duration": 4000}}, {"name": "mobile_click_on_screen_at_coordinates", "arguments": {"ref": "@e3"}}], "listElementsAtEnd": true}, "error": false}
+{"start": 90.317, "end": 91.994, "tool": "mobile_type_keys", "args": {"text": "Ada Lovelace"}, "error": false}
+{"start": 90.671, "end": 92.524, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 249}, "error": false}
+{"start": 95.075, "end": 96.913, "tool": "mobile_type_keys", "args": {"text": "12 Analytical St"}, "error": false}
+{"start": 95.164, "end": 97.281, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 99.773, "end": 100.296, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 311}, "error": false}
+{"start": 100.696, "end": 102.211, "tool": "mobile_type_keys", "args": {"text": "London"}, "error": false}
+{"start": 101.024, "end": 102.748, "tool": "mobile_click_on_screen_at_coordinates", "args": {"x": 200, "y": 373}, "error": false}
+{"start": 101.924, "end": 104.234, "tool": "mobile_type_keys", "args": {"text": "N1 9GU"}, "error": false}
+{"start": 101.925, "end": 104.584, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 107.148, "end": 107.878, "tool": "mobile_click_on_screen_at_coordinates", "args": {"ref": "@e8"}, "error": false}
+{"start": 107.175, "end": 108.244, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
+{"start": 110.477, "end": 110.802, "tool": "mobile_list_elements_on_screen", "args": {}, "error": false}
