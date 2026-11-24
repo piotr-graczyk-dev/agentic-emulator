@@ -1,0 +1,47 @@
+{
+ "wall_s": 92.615,
+ "startup_s": 0.519,
+ "tool_s": 20.118,
+ "tool_calls": 71,
+ "messages": 25,
+ "tools": {
+  "launch": 2,
+  "tap": 18,
+  "type_text": 10,
+  "wait_for": 5,
+  "ui_tree": 12,
+  "press_key": 24
+ },
+ "tool_errors": 3,
+ "answer": "The cart total was $91.98 as expected, and the order was placed. The confirmation screen reads \"Order #31.614\", with the period shown exactly as on screen.\n\nORDER 31.614",
+ "turns": 72,
+ "cost_usd": 0.1830892,
+ "api_s": 74.566,
+ "tokens": {
+  "input": 50,
+  "cache_read": 492042,
+  "cache_write": 22554,
+  "output": 7740
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 71.978,
+ "median_call_s": 0.121,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.72 4.21 4.69",
+ "loadavg": "4.09 4.15 4.61",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:05:33+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-6-g31b5481"
+ }
+}

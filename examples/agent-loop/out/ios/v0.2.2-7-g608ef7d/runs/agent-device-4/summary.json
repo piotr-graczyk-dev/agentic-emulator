@@ -1,0 +1,44 @@
+{
+ "wall_s": 71.959,
+ "startup_s": 0.425,
+ "tool_s": 28.817,
+ "tool_calls": 23,
+ "messages": 19,
+ "tools": {
+  "open": 1,
+  "fill": 10,
+  "press": 12
+ },
+ "tool_errors": 4,
+ "answer": "The order went through. The cart total was $91.98 ($32.00 for the towel plus $59.98 for two lamps), so I placed the order. The confirmation screen showed 3 items for $91.98.\n\nORDER 31.614",
+ "turns": 24,
+ "cost_usd": 0.31366590000000005,
+ "api_s": 42.747,
+ "tokens": {
+  "input": 38,
+  "cache_read": 1181999,
+  "cache_write": 69388,
+  "output": 2192
+ },
+ "servers": {
+  "agent-device": "connected"
+ },
+ "tool_count": 62,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 42.717,
+ "median_call_s": 1.388,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "3.24 11.15 10.41",
+ "loadavg": "3.95 9.70 9.92",
+ "platform": "ios",
+ "arm": "agent-device",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:08:46+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agent-device": "0.21.37"
+ }
+}

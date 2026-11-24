@@ -1,0 +1,45 @@
+{
+ "wall_s": 71.466,
+ "startup_s": 0.423,
+ "tool_s": 27.953,
+ "tool_calls": 26,
+ "messages": 19,
+ "tools": {
+  "open": 1,
+  "fill": 10,
+  "press": 13,
+  "snapshot": 2
+ },
+ "tool_errors": 5,
+ "answer": "I signed in, added one Bath Towel and two Desk Lamps, and the cart total was $91.98 as expected. I then placed the order with Ada Lovelace's address. The confirmation screen showed \"Order confirmed\", \"Order #31.614\" and \"3 items \u00b7 $91.98\".\n\nORDER 31.614",
+ "turns": 27,
+ "cost_usd": 0.32269180000000003,
+ "api_s": 43.14,
+ "tokens": {
+  "input": 38,
+  "cache_read": 1199483,
+  "cache_write": 71495,
+  "output": 2393
+ },
+ "servers": {
+  "agent-device": "connected"
+ },
+ "tool_count": 62,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 43.09,
+ "median_call_s": 1.355,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "2.50 5.20 7.71",
+ "loadavg": "2.70 4.73 7.33",
+ "platform": "ios",
+ "arm": "agent-device",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:15:51+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agent-device": "0.21.37"
+ }
+}

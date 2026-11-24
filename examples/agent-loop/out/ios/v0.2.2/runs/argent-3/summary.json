@@ -1,0 +1,47 @@
+{
+ "wall_s": 108.835,
+ "startup_s": 0.542,
+ "tool_s": 34.818,
+ "tool_calls": 34,
+ "messages": 17,
+ "tools": {
+  "launch-app": 1,
+  "gesture-tap": 20,
+  "keyboard": 9,
+  "run-sequence": 2,
+  "await-ui-element": 1,
+  "await-screen-idle": 1
+ },
+ "tool_errors": 0,
+ "answer": "I placed the order and the confirmation screen shows it. I signed in, added one Bath Towel and two Desk Lamps, and the cart total was $91.98.\n\nThe text I typed came through in lowercase: the confirmation reads \"ada lovelace\", and the address and postcode were saved as \"12 analytical st\", \"london\" and \"n1 9gu\". The simulator's keyboard is set to Polish and dropped the capital letters. It also typed \"@\" as \"2\" in the e-mail, which I corrected by hand before signing in.\n\nORDER #36.030",
+ "turns": 35,
+ "cost_usd": 0.3690523,
+ "api_s": 75.696,
+ "tokens": {
+  "input": 34,
+  "cache_read": 1481768,
+  "cache_write": 66979,
+  "output": 5336
+ },
+ "servers": {
+  "argent": "connected"
+ },
+ "tool_count": 71,
+ "error": "wrong order number 36030 (want 31614)",
+ "claude_code": "2.1.329",
+ "model_s": 73.475,
+ "median_call_s": 1.353,
+ "order": "36030",
+ "ok": false,
+ "loadavg_before": "2.89 3.32 5.04",
+ "loadavg": "3.17 3.46 4.90",
+ "platform": "ios",
+ "arm": "argent",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T01:57:39+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "argent": "0.33.0"
+ }
+}

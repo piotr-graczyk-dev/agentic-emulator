@@ -1,0 +1,48 @@
+{
+ "wall_s": 138.133,
+ "startup_s": 0.656,
+ "tool_s": 48.376,
+ "tool_calls": 67,
+ "messages": 25,
+ "tools": {
+  "mobile_launch_app": 1,
+  "mobile_list_elements_on_screen": 16,
+  "mobile_click_on_screen_at_coordinates": 27,
+  "mobile_type_keys": 12,
+  "mobile_take_screenshot": 7,
+  "mobile_long_press_on_screen_at_coordinates": 3,
+  "mobile_batch_commands": 1
+ },
+ "tool_errors": 0,
+ "answer": "I signed in, filled the cart and placed the order. The cart total was $91.98 (1 \u00d7 Bath Towel $32.00, 2 \u00d7 Desk Lamp $59.98), and the confirmation screen showed \"3 items \u00b7 $91.98\".\n\nThe first Bath Towel add didn't register, because the tap only dismissed the keyboard. I added it again and the cart then showed 1 towel.\n\nORDER #31.614",
+ "turns": 68,
+ "cost_usd": 0.2423721,
+ "api_s": 92.106,
+ "tokens": {
+  "input": 50,
+  "cache_read": 698471,
+  "cache_write": 32730,
+  "output": 9060
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 89.101,
+ "median_call_s": 1.035,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "2.98 5.44 9.40",
+ "loadavg": "2.44 4.40 8.40",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T01:40:12+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}

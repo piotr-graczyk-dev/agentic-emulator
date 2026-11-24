@@ -1,0 +1,49 @@
+{
+ "wall_s": 119.714,
+ "startup_s": 0.734,
+ "tool_s": 44.473,
+ "tool_calls": 45,
+ "messages": 23,
+ "tools": {
+  "mobile_launch_app": 1,
+  "mobile_list_elements_on_screen": 14,
+  "mobile_click_on_screen_at_coordinates": 18,
+  "mobile_type_keys": 3,
+  "mobile_take_screenshot": 4,
+  "mobile_double_tap_on_screen": 1,
+  "mobile_press_button": 1,
+  "mobile_batch_commands": 3
+ },
+ "tool_errors": 2,
+ "answer": "The order is placed. The cart total was $91.98 (1 Bath Towel at $32.00 plus 2 Desk Lamps at $59.98), and the confirmation screen showed 3 items for $91.98.\n\nORDER #31.614",
+ "turns": 46,
+ "cost_usd": 0.22741940000000005,
+ "api_s": 77.039,
+ "tokens": {
+  "input": 46,
+  "cache_read": 600099,
+  "cache_write": 39531,
+  "output": 6849
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 74.507,
+ "median_call_s": 0.735,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.83 16.20 11.75",
+ "loadavg": "3.56 12.04 10.69",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T03:07:08+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}

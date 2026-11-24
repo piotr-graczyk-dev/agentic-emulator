@@ -1,0 +1,46 @@
+{
+ "wall_s": 73.817,
+ "startup_s": 0.665,
+ "tool_s": 25.121,
+ "tool_calls": 44,
+ "messages": 15,
+ "tools": {
+  "mobile_launch_app": 1,
+  "mobile_list_elements_on_screen": 14,
+  "mobile_click_on_screen_at_coordinates": 21,
+  "mobile_type_keys": 7,
+  "mobile_swipe_on_screen": 1
+ },
+ "tool_errors": 3,
+ "answer": "I signed in, added one Bath Towel and two Desk Lamps, and placed the order. The cart total was $91.98 before checkout, and the confirmation screen shows 3 items for $91.98. I added the lamps before the towel, which changes nothing in the cart.\n\nORDER #31.614",
+ "turns": 45,
+ "cost_usd": 0.17106430000000003,
+ "api_s": 52.986,
+ "tokens": {
+  "input": 30,
+  "cache_read": 337568,
+  "cache_write": 33947,
+  "output": 5238
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 48.031,
+ "median_call_s": 0.847,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.90 4.60 4.20",
+ "loadavg": "3.29 4.23 4.09",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:57:33+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}

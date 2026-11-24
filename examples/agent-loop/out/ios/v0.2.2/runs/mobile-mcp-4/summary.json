@@ -1,0 +1,45 @@
+{
+ "wall_s": 68.055,
+ "startup_s": 1.11,
+ "tool_s": 29.013,
+ "tool_calls": 19,
+ "messages": 14,
+ "tools": {
+  "mobile_launch_app": 1,
+  "mobile_list_elements_on_screen": 8,
+  "mobile_batch_commands": 5,
+  "mobile_click_on_screen_at_coordinates": 5
+ },
+ "tool_errors": 0,
+ "answer": "I signed in, added one Bath Towel and two Desk Lamps, and the cart total was $91.98 as expected. I then placed the order with the Ada Lovelace address. The confirmation screen shows 3 items for $91.98.\n\nThe first tap on Checkout didn't register, so I tapped it a second time. That only opened the checkout form once, and the order was placed once.\n\nORDER #31.614",
+ "turns": 20,
+ "cost_usd": 0.11419930000000002,
+ "api_s": 37.935,
+ "tokens": {
+  "input": 28,
+  "cache_read": 311208,
+  "cache_write": 20465,
+  "output": 3186
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 37.932,
+ "median_call_s": 0.868,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "4.75 4.32 4.66",
+ "loadavg": "5.79 4.69 4.77",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:07:04+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}

@@ -1,0 +1,47 @@
+{
+ "wall_s": 90.354,
+ "startup_s": 0.346,
+ "tool_s": 16.828,
+ "tool_calls": 60,
+ "messages": 25,
+ "tools": {
+  "launch": 2,
+  "tap": 20,
+  "type_text": 8,
+  "wait_for": 2,
+  "ui_tree": 8,
+  "press_key": 20
+ },
+ "tool_errors": 2,
+ "answer": "I signed in, added the items, checked the cart total ($91.98, as expected) and placed the order. The confirmation screen shows \"Order #31.614\" for 3 items at $91.98.\n\nThe dot in 31.614 is how the app displays the number. I copied it as shown.\n\nORDER 31.614",
+ "turns": 61,
+ "cost_usd": 0.1925539,
+ "api_s": 74.981,
+ "tokens": {
+  "input": 50,
+  "cache_read": 480414,
+  "cache_write": 29561,
+  "output": 7051
+ },
+ "servers": {
+  "agemu": "connected"
+ },
+ "tool_count": 31,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 73.18,
+ "median_call_s": 0.114,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "2.96 3.50 4.06",
+ "loadavg": "4.31 3.81 4.12",
+ "platform": "ios",
+ "arm": "agemu",
+ "device": "3CD850F2-7437-4716-868F-CAEFBCCA5FEC",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T02:20:47+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "agemu": "v0.2.2-6-g31b5481"
+ }
+}

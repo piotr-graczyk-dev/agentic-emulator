@@ -1,0 +1,48 @@
+{
+ "wall_s": 106.847,
+ "startup_s": 0.674,
+ "tool_s": 35.98,
+ "tool_calls": 40,
+ "messages": 24,
+ "tools": {
+  "mobile_launch_app": 1,
+  "mobile_list_elements_on_screen": 15,
+  "mobile_batch_commands": 4,
+  "mobile_click_on_screen_at_coordinates": 15,
+  "mobile_take_screenshot": 3,
+  "mobile_triple_tap_placeholder": 1,
+  "mobile_type_keys": 1
+ },
+ "tool_errors": 1,
+ "answer": "I signed in, added the items and checked the cart total, which was $91.98 as expected. I then placed the order with the Ada Lovelace shipping address. The confirmation screen showed \"Order #31.614\", \"3 items \u00b7 $91.98\" and a thank-you addressed to Ada Lovelace.\n\nORDER 31.614",
+ "turns": 41,
+ "cost_usd": 0.22088580000000005,
+ "api_s": 72.262,
+ "tokens": {
+  "input": 48,
+  "cache_read": 631348,
+  "cache_write": 39734,
+  "output": 5832
+ },
+ "servers": {
+  "mobile-mcp": "connected"
+ },
+ "tool_count": 34,
+ "error": "",
+ "claude_code": "2.1.329",
+ "model_s": 70.193,
+ "median_call_s": 0.717,
+ "order": "31614",
+ "ok": true,
+ "loadavg_before": "2.81 3.38 5.35",
+ "loadavg": "2.96 3.36 5.11",
+ "platform": "ios",
+ "arm": "mobile-mcp",
+ "device": "F07C779E-4D10-454D-8DC2-5E7D658A387B",
+ "model": "claude-sonnet-5-5",
+ "date": "2026-11-24T01:55:21+0100",
+ "versions": {
+  "claude-code": "2.1.329 (Claude Code)",
+  "mobile-mcp": "1.0.17"
+ }
+}
