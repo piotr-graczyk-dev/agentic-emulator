@@ -159,6 +159,10 @@ func TestLogsAndCrashesCommands(t *testing.T) {
 		{[]string{"logs", "--limit", "many"}, `--limit must be a whole number, got "many"`},
 		{[]string{"logs", "--max-bytes", "1.5"}, "--max-bytes must be a whole number"},
 		{[]string{"crashes", "--limit", "x"}, "--limit must be a whole number"},
+		{[]string{"key", "delete", "--count", "2.5"}, `--count must be a whole number, got "2.5"`},
+		{[]string{"key", "delete", "--count", "abc"}, "--count must be a whole number"},
+		{[]string{"key", "delete", "--count"}, "--count must be a whole number"}, // no value
+		{[]string{"key", "delete", "--count", "0"}, "--count must be at least 1, got 0"},
 		{[]string{"crashes", "--app", "com.app", "--level", "error"}, "crashes does not take --level"}, // a logs-only flag
 	} {
 		if _, _, err := req(t, "", c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -231,6 +235,11 @@ func TestValidCommandLinesStillParse(t *testing.T) {
 		{"tap", "--id", "log-levels", "--wait-contains", "levels tok"},
 		{"swipe", "10", "20", "10", "80", "--ms", "500", "--ui"},
 		{"type", "--keys", "wifi"},
+		{"type", "--clear", "lamp"},
+		{"type", "Ada Lovelace", "--into", "Full name", "--clear", "--ui"},
+		{"type", "lamp", "--into-contains", "Search", "--into-id", "search-field"},
+		{"type", "--clear"}, // only empties the field
+		{"key", "delete", "--count", "5"},
 		{"type", "hello", "--wait-contains", "hello"},
 		{"key", "back", "--wait-text", "Settings"},
 		{"profile", "--width", "900", "--height", "1800", "--density", "360"},

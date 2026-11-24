@@ -15,6 +15,7 @@ import (
 
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/api"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/backend"
+	"github.com/piotr-graczyk-dev/agentic-emulator/internal/outline"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/profiles"
 	"github.com/piotr-graczyk-dev/agentic-emulator/internal/toolchain"
 )
@@ -49,6 +50,12 @@ type Params struct {
 	// Keys types with one key event per character (the IME path) instead of the platform's
 	// fast text entry, on backends that have both (Android).
 	Keys bool `json:"keys,omitempty"`
+	// Clear makes type replace what the focused field holds, instead of inserting at its cursor.
+	Clear bool `json:"clear,omitempty"`
+	// Into makes type tap the field matching this selector first, so one call fills a field.
+	Into *api.Selector `json:"into,omitempty"`
+	// Count presses the key this many times (default 1, at most maxKeyCount).
+	Count int `json:"count,omitempty"`
 
 	// apps
 	App      string            `json:"app,omitempty"`
@@ -208,7 +215,7 @@ func (s *Service) resolve(ctx context.Context, ref string) (string, error) {
 			}
 			return "", fmt.Errorf("no booted device; boot one with `agemu boot <device>`")
 		default:
-			return "", fmt.Errorf("several devices are booted, pass one with -d: %s", strings.Join(booted, ", "))
+			return "", fmt.Errorf("several devices are booted, name one (-d on the command line, the device argument of a tool call): %s", strings.Join(booted, ", "))
 		}
 	}
 	for _, d := range devs {
@@ -252,6 +259,13 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	p.start = start
 	if p.Selector != nil && p.Selector.Index < 0 {
 		return nil, nil, fmt.Errorf("selector index must be >= 0, got %d", p.Selector.Index)
+	}
+	if p.Into != nil && p.Into.Index < 0 {
+		return nil, nil, fmt.Errorf("into index must be >= 0, got %d", p.Into.Index)
+	}
+	if p.Into != nil && p.Into.Empty() {
+		// Typing without the tap would put the text into whatever has the focus, or nowhere.
+		return nil, nil, fmt.Errorf("type: into needs text, contains, id or role to find the field")
 	}
 	switch method {
 	case "ping":
@@ -471,11 +485,21 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 	if method == "launch" {
 		s.launching(id, appOf(p.App), p.start) // a crash during the launch counts
 	}
+	compound := p.WaitFor != nil && !p.WaitFor.Empty()
+	// An action that returns its screen without naming what to wait for returns it once it has
+	// stopped changing (settledTree); the screen before the action tells a change from none.
+	var before *api.UITree
+	if p.ReturnUI && !compound {
+		// Bounded, so a read that hangs does not hold the action back; without it the screen
+		// counts as changed from the first read on.
+		bctx, cancel := context.WithTimeout(ctx, settleBeforeRead)
+		before, _ = b.UITree(bctx, id)
+		cancel()
+	}
 	res, err := s.act(ctx, b, id, method, p)
 	if err == nil {
 		s.track(id, method, p, res)
 	}
-	compound := p.WaitFor != nil && !p.WaitFor.Empty()
 	if err != nil || (!compound && !p.ReturnUI) {
 		return res, err
 	}
@@ -490,7 +514,17 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 		out["waited"] = waited
 	}
 	if p.ReturnUI {
-		t, terr := b.UITree(ctx, id)
+		var t *api.UITree
+		var terr error
+		if compound {
+			t, terr = b.UITree(ctx, id) // the wait above found the screen
+		} else {
+			quiet := settleGap
+			if method == "type" {
+				quiet = settleTypeQuiet
+			}
+			t, terr = settledTree(ctx, b, id, before, quiet)
+		}
 		if terr != nil {
 			return nil, fmt.Errorf("%s done, but reading the screen failed: %w", method, terr)
 		}
@@ -553,12 +587,36 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		}
 		return ok(b.Swipe(ctx, id, *p.X, *p.Y, p.X2, p.Y2, d))
 	case "type":
+		if p.Into != nil {
+			if _, err := s.act(ctx, b, id, "tap", Params{Selector: p.Into, start: p.start}); err != nil {
+				return nil, fmt.Errorf("type: tapping the field: %w", err)
+			}
+		}
+		if p.Clear {
+			tr, isTR := b.(textReplacer)
+			if !isTR {
+				return nil, api.NotImplemented(b.Platform(), "type --clear", "this backend cannot clear a text field")
+			}
+			return ok(tr.ReplaceText(ctx, id, p.Text, p.Keys))
+		}
 		if kt, isKT := b.(keyTyper); isKT && p.Keys {
 			return ok(kt.TypeKeys(ctx, id, p.Text))
 		}
 		return ok(b.TypeText(ctx, id, p.Text))
 	case "key":
-		return ok(b.Key(ctx, id, strings.ToLower(p.Key)))
+		n := p.Count
+		if n == 0 {
+			n = 1
+		}
+		if n < 1 || n > maxKeyCount {
+			return nil, fmt.Errorf("key: count must be between 1 and %d", maxKeyCount)
+		}
+		for i := 0; i < n; i++ {
+			if err := b.Key(ctx, id, strings.ToLower(p.Key)); err != nil {
+				return nil, err
+			}
+		}
+		return ok(nil)
 	case "install":
 		return ok(b.Install(ctx, id, p.Path))
 	case "launch":
@@ -579,11 +637,110 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 	return nil, fmt.Errorf("unknown method %q", method)
 }
 
+// How settledTree decides that the screen an action ends on has stopped changing.
+var (
+	// settleGap: the time between two reads; after a tap, a key or a launch, two reads in a row
+	// that show the same screen mean it is still.
+	settleGap = 120 * time.Millisecond
+	// settleTypeQuiet: after typing, the screen must stay the same this long. A search field
+	// filters its list a moment after the last character (a debounce of 300 ms is common), and
+	// the field itself shows the text at once: without the longer wait the returned screen had
+	// the new text over the old list.
+	settleTypeQuiet = 450 * time.Millisecond
+	// settleChangeWait: how long an action's first effect may take to show (a tap that starts a
+	// request changes nothing until the answer comes). After it, the unchanged screen is returned.
+	settleChangeWait = 1500 * time.Millisecond
+	// settleMax: a screen that never stops changing (a spinner, a countdown) is returned as it
+	// is after this long.
+	settleMax = 3 * time.Second
+	// settleBeforeRead bounds the read of the screen before the action.
+	settleBeforeRead = time.Second
+	// settleLastRead bounds the one read made when none came back while the screen settled.
+	settleLastRead = 10 * time.Second
+)
+
+// settledTree reads the screen an action ends on once it has stopped changing: the first read
+// that differs from before (the screen read just before the action; nil: unknown) and has shown
+// the same screen for quiet. An agent that asks for the screen after a tap then gets the next
+// screen, not a transition's middle, without having to know what to wait for. Screens are
+// compared as the outlines the agent sees (texts, roles, ids and frames).
+//
+// All waits are bounded (settleChangeWait, settleMax), and so is every read: one that hangs
+// (Android waits 5 s for a dying app's window) ends with the settling and does not hold the
+// call, and the device lock, past settleMax. A read that fails counts as a screen still
+// changing: the quiet time starts again after it. When the time is up, the latest screen read
+// is returned. When no read came back at all, one more is made with settleLastRead to answer:
+// a device that is slow still returns its screen, as it did before screens were settled, and
+// one that does not answer fails the call, at most settleMax + settleLastRead after the action.
+func settledTree(ctx context.Context, b backend.Backend, id string, before *api.UITree, quiet time.Duration) (*api.UITree, error) {
+	start := time.Now()
+	deadline := start.Add(settleMax)
+	beforeSig, changed := "", before == nil
+	if before != nil {
+		beforeSig = outline.Render(before)
+	}
+	var latest *api.UITree // the latest screen read
+	var prevSig string     // the previous read's screen, when havePrev
+	havePrev := false      // false at the start and after a read that failed
+	var stableSince time.Time
+	for ctx.Err() == nil {
+		rctx, cancel := context.WithDeadline(ctx, deadline)
+		t, err := b.UITree(rctx, id)
+		cancel()
+		if err != nil {
+			havePrev = false
+		} else {
+			sig := outline.Render(t)
+			changed = changed || sig != beforeSig
+			if !havePrev || sig != prevSig {
+				stableSince = time.Now()
+			}
+			if changed && havePrev && sig == prevSig && time.Since(stableSince) >= quiet {
+				return t, nil
+			}
+			if !changed && time.Since(start) >= settleChangeWait {
+				return t, nil
+			}
+			latest, prevSig, havePrev = t, sig, true
+		}
+		wait := min(settleGap, time.Until(deadline))
+		if wait <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(wait):
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+	}
+	if latest != nil {
+		return latest, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lctx, cancel := context.WithTimeout(ctx, settleLastRead)
+	defer cancel()
+	return b.UITree(lctx, id)
+}
+
 // keyTyper is implemented by backends whose TypeText does not send key events (Android sets
 // the field's text); TypeKeys types one key event per character instead.
 type keyTyper interface {
 	TypeKeys(ctx context.Context, id, text string) error
 }
+
+// textReplacer is implemented by backends that can replace what the focused field holds by
+// text (typed with key events when keys is set). An empty text only empties the field.
+type textReplacer interface {
+	ReplaceText(ctx context.Context, id, text string, keys bool) error
+}
+
+// maxKeyCount bounds one key call's repeats: enough to walk a list or delete a word, and short
+// enough that a mistaken count ends at once.
+const maxKeyCount = 50
 
 func ok2(err error) (any, error) { return ok(err) }
 

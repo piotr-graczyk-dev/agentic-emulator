@@ -206,6 +206,11 @@ func pressKey(_ d: AGDevice, _ name: String) throws {
         try d.key(25, down: true)  // v
         try d.key(25, down: false)
         try d.key(leftGUI, down: false)
+    case "selectall":
+        try d.key(leftGUI, down: true)
+        try d.key(4, down: true)  // a
+        try d.key(4, down: false)
+        try d.key(leftGUI, down: false)
     case "back":
         // iOS has no back key: an edge swipe from the left edge triggers the interactive pop
         // gesture of navigation controllers, like a user's thumb.
@@ -215,7 +220,7 @@ func pressKey(_ d: AGDevice, _ name: String) throws {
         return
     default:
         guard let u = usages[name] else {
-            throw HelperError("unknown key \(name) (home, lock, back, enter, delete, tab, escape, space, up, down, left, right, volumeup, volumedown, paste)")
+            throw HelperError("unknown key \(name) (home, lock, back, enter, delete, tab, escape, space, up, down, left, right, volumeup, volumedown, paste, selectall)")
         }
         try d.key(u, down: true)
         try d.key(u, down: false)
@@ -919,7 +924,8 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "key":
         let d = try device(req)
         let key = try req.string("key").lowercased()
-        if key == "paste" && tapSettle { _ = d.wait(forStillQuiet: 40, max: 600) }
+        // Select-all waits like a paste: it is the first key after the tap that focused the field.
+        if (key == "paste" || key == "selectall") && tapSettle { _ = d.wait(forStillQuiet: 40, max: 600) }
         let mark = key == "paste" ? d.inputFrameMark() : UInt.max
         try inputQueue(d.udid).sync { try pressKey(d, key) }
         if key == "paste" {

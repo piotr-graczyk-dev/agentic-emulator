@@ -51,8 +51,11 @@ Device commands (-d <device> optional when exactly one device is booted):
   find --text T | --contains T | --id I | --role R
   tap <x> <y> | tap --text T | --contains T | --id I [--index N]
   swipe <x1> <y1> <x2> <y2> [--ms 300]
-  type <text> [--keys]                      type into the focused field (--keys: per-key events)
-  key home|back|enter|delete|tab|escape|lock
+  type <text> [--into T] [--clear] [--keys] type into the focused field, at its cursor (--into: tap
+                                            the field with this label first, or --into-contains T,
+                                            --into-id I; --clear: replace what it holds; --keys:
+                                            per-key events)
+  key home|back|enter|delete|tab|escape|lock [--count N]
   install <path.apk|path.app>  terminate <app-id>
   launch <app-id> [--relaunch] [-- <process args...>]   (args/relaunch: iOS)
   wait --text T|--contains T|--id I [--gone] [--timeout-ms 10000]
@@ -82,7 +85,8 @@ Logs and crashes (docs/CAPABILITIES.md):
 
 Actions (tap, swipe, type, key, launch, open, push) also wait for their effect in the same call:
   --wait-text T | --wait-contains T | --wait-id I | --wait-role R  [--wait-gone] [--wait-timeout-ms N]
-  --ui prints the screen the action ends on (outline), so one call acts, waits and observes
+  --ui prints the screen the action ends on (outline), read once it has stopped changing, so
+  one call acts, waits and observes
   e.g. agemu tap --text "Log in" --wait-id home-screen --ui
 
 Exit status: 0 ok, 1 error, 2 usage (also a flag the command does not take), 3 not implemented on the device's platform,
@@ -231,7 +235,7 @@ type usageError struct{ msg string }
 
 func (e usageError) Error() string { return e.msg }
 
-var boolFlags = map[string]bool{"cold": true, "no-wait": true, "json": true, "gone": true, "keys": true, "relaunch": true, "wait-gone": true, "ui": true}
+var boolFlags = map[string]bool{"cold": true, "no-wait": true, "json": true, "gone": true, "keys": true, "clear": true, "relaunch": true, "wait-gone": true, "ui": true}
 
 func parse(args []string) cli {
 	c := cli{flags: map[string]string{}, spelled: map[string]string{}}
@@ -433,8 +437,8 @@ var commandFlags = map[string][]string{
 	"wait":       flagSet(selectorFlags, []string{"gone", "timeout-ms"}),
 	"tap":        flagSet(selectorFlags, actionFlags),
 	"swipe":      flagSet([]string{"ms"}, actionFlags),
-	"type":       flagSet([]string{"keys"}, actionFlags),
-	"key":        actionFlags,
+	"type":       flagSet([]string{"keys", "clear", "into", "into-contains", "into-id"}, actionFlags),
+	"key":        flagSet([]string{"count"}, actionFlags),
 	"install":    nil,
 	"launch":     flagSet([]string{"relaunch"}, actionFlags),
 	"terminate":  nil,
@@ -573,11 +577,23 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 	case "type":
 		p.Text = strings.Join(c.pos, " ")
 		p.Keys = c.flags["keys"] == "true"
+		p.Clear = c.flags["clear"] == "true"
+		if into := (api.Selector{Text: c.flags["into"], Contains: c.flags["into-contains"], ID: c.flags["into-id"]}); !into.Empty() {
+			p.Into = &into
+		}
 	case "key":
 		if len(c.pos) == 0 {
 			return "", fmt.Errorf("key needs a key name")
 		}
 		p.Key = c.pos[0]
+		count, err := c.number("count")
+		if err != nil {
+			return "", err
+		}
+		if _, given := c.flags["count"]; given && count < 1 {
+			return "", fmt.Errorf("--count must be at least 1, got %d", count)
+		}
+		p.Count = count
 	case "install":
 		if len(c.pos) == 0 {
 			return "", fmt.Errorf("install needs a path")

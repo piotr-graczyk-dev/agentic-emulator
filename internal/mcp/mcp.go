@@ -72,11 +72,11 @@ var (
 // waitProps are the optional "wait for the next screen in the same call" arguments of actions.
 var waitProps = map[string]any{
 	"waitFor": map[string]any{"type": "object", "description": "After the action, wait for an element matching this selector (fields: text, contains, id, role) in the same call", "properties": map[string]any{
-		"text": str("Exact text or label"), "contains": str("Substring of text or label"), "id": str("Identifier"), "role": str("Role"),
+		"text": str("Exact text or label (label is another name for this field)"), "contains": str("Substring of text or label"), "id": str("Identifier"), "role": str("Role"),
 	}},
 	"waitGone":      boolT("Wait for waitFor to disappear instead"),
 	"waitTimeoutMs": num("Timeout for waitFor, default 10000"),
-	"returnUi":      boolT("Also return the UI outline of the screen the action ends on (act, wait and observe in one call)"),
+	"returnUi":      boolT("Also return the UI outline of the screen the action ends on, read once it has stopped changing (act, wait and observe in one call)"),
 }
 
 func enum(d string, values ...string) map[string]any {
@@ -93,7 +93,7 @@ func withWait(props map[string]any) map[string]any {
 func selectorProps(extra map[string]any) map[string]any {
 	m := map[string]any{
 		"device":   device,
-		"text":     str("Exact text or accessibility label"),
+		"text":     str("Exact text or accessibility label (label is another name for this argument)"),
 		"contains": str("Case-insensitive substring of text or label"),
 		"id":       str("resource-id (Android) or accessibilityIdentifier (iOS)"),
 		"role":     str("Normalized role: button, text, textfield, switch, image, cell..."),
@@ -120,8 +120,10 @@ var tools = []tool{
 	{Name: "find", method: "find", selector: true, Description: "Find elements by text/label/id/role.", InputSchema: obj(selectorProps(nil))},
 	{Name: "tap", method: "tap", selector: true, Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")})))},
 	{Name: "swipe", method: "swipe", Description: "Swipe from (x,y) to (x2,y2) in screenshot pixels.", InputSchema: obj(withWait(map[string]any{"device": device, "x": num("start x"), "y": num("start y"), "x2": num("end x"), "y2": num("end y"), "durationMs": num("duration, default 300")}), "x", "y", "x2", "y2")},
-	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
-	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name")}), "key")},
+	{Name: "type_text", method: "type", Description: "Type text into a field. With into, the field matching that selector is tapped first, so one call fills a field; without it the text goes to the focused field. The text is added at the cursor: what the field already holds stays. With clear=true the text replaces what the field holds (an empty text then just empties it).", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "into": map[string]any{"type": "object", "description": "Tap this field first: a selector, usually {\"text\": \"<the field's label or hint>\"}", "properties": map[string]any{
+		"text": str("Exact text or label (label is another name for this field)"), "contains": str("Substring of text or label"), "id": str("Identifier"), "role": str("Role, e.g. textfield"), "index": num("Pick the n-th match (0-based)"),
+	}}, "clear": boolT("Replace what the field holds instead of adding to it"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
+	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown. To empty a text field use type_text with clear=true, not delete.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name"), "count": num("Press it this many times (default 1, at most 50)")}), "key")},
 	{Name: "install", method: "install", Description: "Install an app (.apk for Android, .app for iOS Simulator).", InputSchema: obj(map[string]any{"device": device, "path": str("Absolute path")}, "path")},
 	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id. iOS also takes process arguments (e.g. an Expo dev client's --initialUrl), environment and relaunch.", InputSchema: obj(withWait(map[string]any{
 		"device":   device,
@@ -431,7 +433,7 @@ func handle(req rpcReq, pool *clientPool) (any, *rpcErr) {
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agemu", "version": daemon.Version},
-			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
+			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Fewer calls: tap by text, contains or id rather than by coordinates. An action with returnUi returns the screen it ends on once that screen has stopped changing, so no ui_tree call is needed after it. Give waitFor only a text or id you know the next screen has; do not guess one, because a waitFor that matches nothing runs to its timeout (10 s). Fill a field in one call: type_text with into, e.g. {\"text\": \"E-mail\"} for the field labelled E-mail, and clear=true to replace what it holds. When several devices are booted, pass device in every call. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil
@@ -492,6 +494,9 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 	if t == nil {
 		return toolError(fmt.Errorf("unknown tool %q", name)), nil
 	}
+	if err := normalizeSelectors(t, args); err != nil {
+		return toolError(err), nil
+	}
 	if err := checkArgs(t, args); err != nil {
 		return toolError(err), nil
 	}
@@ -551,6 +556,62 @@ func callToolConn(cl *client.Client, name string, args map[string]json.RawMessag
 		}
 	}
 	return res, nil
+}
+
+// normalizeSelectors checks the selectors among a tool's arguments, and takes "label" as another
+// name for "text" in them: the outline prints a field as `textfield label="E-mail"`, and agents
+// ask for it by that word. A field a selector does not have is refused. Unmarshalling would
+// drop it, and the call would then tap nothing before it types (into) or wait for nothing
+// (waitFor), and say it succeeded.
+func normalizeSelectors(t *tool, args map[string]json.RawMessage) error {
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	if t.selector {
+		if err := labelAsText(t.Name, args); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{"into", "waitFor"} {
+		raw, given := args[name]
+		schema, _ := props[name].(map[string]any)
+		if !given || schema == nil {
+			continue
+		}
+		fields, _ := schema["properties"].(map[string]any)
+		var sel map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &sel); err != nil || sel == nil {
+			return fmt.Errorf("%s: %s must be an object with %s", t.Name, name, strings.Join(slices.Sorted(maps.Keys(fields)), ", "))
+		}
+		if err := labelAsText(t.Name+": "+name, sel); err != nil {
+			return err
+		}
+		for _, f := range slices.Sorted(maps.Keys(sel)) {
+			if _, ok := fields[f]; !ok {
+				return fmt.Errorf("%s: %s does not take %q; its fields are %s (text matches an element's text or its label)", t.Name, name, f, strings.Join(slices.Sorted(maps.Keys(fields)), ", "))
+			}
+		}
+		if name == "into" {
+			var s api.Selector
+			if b, _ := json.Marshal(sel); json.Unmarshal(b, &s) != nil || s.Empty() {
+				return fmt.Errorf("%s: into needs text, contains, id or role to find the field", t.Name)
+			}
+		}
+		args[name], _ = json.Marshal(sel)
+	}
+	return nil
+}
+
+// labelAsText renames a selector's "label" to "text" (which matches a text or a label).
+func labelAsText(where string, sel map[string]json.RawMessage) error {
+	label, ok := sel["label"]
+	if !ok {
+		return nil
+	}
+	if _, both := sel["text"]; both {
+		return fmt.Errorf("%s: give text or label, not both (they are two names for one field)", where)
+	}
+	sel["text"] = label
+	delete(sel, "label")
+	return nil
 }
 
 // checkArgs refuses an argument that is not in the tool's input schema. Arguments are unmarshalled

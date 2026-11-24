@@ -934,6 +934,66 @@ func (b *Backend) TypeText(ctx context.Context, id, text string) error {
 	return b.paste(ctx, d.UDID, text)
 }
 
+// emptyField is what focusedFieldValue returns for a field with no text and no value.
+const emptyField = "\x00"
+
+const (
+	// clearConfirm: how long ReplaceText waits for the field to show the delete.
+	clearConfirm = 1500 * time.Millisecond
+	// clearSettle: what it waits instead when the field cannot be read (a secure field).
+	clearSettle = 150 * time.Millisecond
+)
+
+// ReplaceText empties the focused field (Cmd-A, then Delete, as on a hardware keyboard) and
+// types text into it; an empty text only empties the field. The field is emptied before the
+// paste, not replaced by it: a paste is confirmed by the field's value changing (paste.go), and
+// replacing a text by the same text would look like a lost paste and be sent again.
+func (b *Backend) ReplaceText(ctx context.Context, id, text string, keys bool) error {
+	d, err := b.target(ctx, id)
+	if err != nil {
+		return err
+	}
+	b.noteInput(d.UDID)
+	key := func(name string) error {
+		return b.call(ctx, "key", map[string]any{"udid": d.UDID, "key": name}, nil)
+	}
+	// Select-all first: like a paste it waits for a still screen, so a field that was tapped
+	// just now has the focus by the time its text is read.
+	if err := key("selectall"); err != nil {
+		return err
+	}
+	before, readable := b.focusedFieldValue(ctx, d.UDID)
+	if err := key("delete"); err != nil {
+		return err
+	}
+	// The keys are acknowledged before the app has handled them. A paste sent now would be
+	// confirmed against the old text (replacing "lamp" by "lamp" then looked like a lost paste
+	// and was sent twice), so wait until the field shows the delete.
+	switch {
+	case !readable: // a secure field, or no field read as text: nothing to compare
+		time.Sleep(clearSettle)
+	case before != emptyField:
+		deadline := time.Now().Add(clearConfirm)
+		for {
+			now, ok := b.focusedFieldValue(ctx, d.UDID)
+			if !ok || now != before {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("type --clear: the field still holds its text %s after select-all and delete", clearConfirm)
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	if keys {
+		return b.TypeKeys(ctx, id, text)
+	}
+	return b.TypeText(ctx, id, text)
+}
+
 // TypeKeys types one hardware key event per character (US layout, paced); characters the US
 // keyboard cannot produce make it paste the whole text instead.
 func (b *Backend) TypeKeys(ctx context.Context, id, text string) error {

@@ -557,3 +557,400 @@ func TestExitMethodWithoutServe(t *testing.T) {
 		t.Fatalf("exit without Serve: %s", line)
 	}
 }
+
+// typingBackend records typing and key presses; like both real backends it can replace a
+// field's text.
+type typingBackend struct {
+	fakeBackend
+	calls []string
+}
+
+func (b *typingBackend) TypeText(ctx context.Context, id, text string) error {
+	b.calls = append(b.calls, "type "+text)
+	return nil
+}
+
+func (b *typingBackend) ReplaceText(ctx context.Context, id, text string, keys bool) error {
+	b.calls = append(b.calls, fmt.Sprintf("replace %q keys=%v", text, keys))
+	return nil
+}
+
+func (b *typingBackend) Key(ctx context.Context, id, key string) error {
+	b.calls = append(b.calls, "key "+key)
+	return nil
+}
+
+// plainTyper types but cannot replace a field's text.
+type plainTyper struct {
+	fakeBackend
+	typed []string
+}
+
+func (b *plainTyper) TypeText(ctx context.Context, id, text string) error {
+	b.typed = append(b.typed, text)
+	return nil
+}
+
+func TestTypeWithClearReplacesTheFieldsText(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	for _, raw := range []string{
+		`{"device":"android:x","text":"towel"}`,
+		`{"device":"android:x","text":"lamp","clear":true}`,
+		`{"device":"android:x","text":"wifi","clear":true,"keys":true}`,
+		`{"device":"android:x","clear":true}`, // only empties the field
+	} {
+		if _, err := svc.Call(context.Background(), "type", json.RawMessage(raw)); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
+	want := []string{"type towel", `replace "lamp" keys=false`, `replace "wifi" keys=true`, `replace "" keys=false`}
+	if strings.Join(tb.calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls %q, want %q", tb.calls, want)
+	}
+
+	pt := &plainTyper{}
+	svc = NewService(t.TempDir(), pt)
+	_, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"lamp","clear":true}`))
+	if !errors.Is(err, api.ErrNotImplemented) || len(pt.typed) != 0 {
+		t.Fatalf("clear on a backend that cannot: err = %v, typed %q; want not implemented and nothing typed", err, pt.typed)
+	}
+}
+
+func TestKeyCountRepeatsTheKey(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	for _, raw := range []string{`{"device":"android:x","key":"Delete","count":3}`, `{"device":"android:x","key":"enter"}`} {
+		if _, err := svc.Call(context.Background(), "key", json.RawMessage(raw)); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
+	if got, want := strings.Join(tb.calls, "|"), "key delete|key delete|key delete|key enter"; got != want {
+		t.Fatalf("calls %q, want %q", got, want)
+	}
+	for _, raw := range []string{`{"device":"android:x","key":"delete","count":-1}`, `{"device":"android:x","key":"delete","count":51}`} {
+		if _, err := svc.Call(context.Background(), "key", json.RawMessage(raw)); err == nil || !strings.Contains(err.Error(), "count must be between 1 and 50") {
+			t.Fatalf("%s: err = %v, want the count's range", raw, err)
+		}
+	}
+	if len(tb.calls) != 4 {
+		t.Fatalf("a refused count pressed keys: %q", tb.calls)
+	}
+}
+
+func TestTypeIntoTapsTheFieldFirst(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	if _, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"ada","into":{"text":"Log in"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if tb.taps != 1 || strings.Join(tb.calls, "|") != "type ada" {
+		t.Fatalf("taps %d, calls %q; want one tap, then the text", tb.taps, tb.calls)
+	}
+	_, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"ada","into":{"text":"no such field"}}`))
+	if err == nil || !strings.Contains(err.Error(), "tapping the field") || len(tb.calls) != 1 {
+		t.Fatalf("a field that is not there: err = %v, calls %q; want an error and nothing typed", err, tb.calls)
+	}
+}
+
+// movingBackend shows a screen in transition for its first reads after a tap (an element that
+// moves between reads), then the next screen, still.
+type movingBackend struct {
+	fakeBackend
+	tapped    bool
+	readsLeft int // reads after the tap that still show the transition
+	reads     int
+}
+
+func (m *movingBackend) Tap(ctx context.Context, id string, x, y int) error {
+	m.tapped, m.readsLeft = true, 3
+	return nil
+}
+
+func (m *movingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	m.reads++
+	screen := func(text string, x int) *api.UITree {
+		return &api.UITree{Width: 100, Height: 100, Root: &api.Element{Role: "window", Frame: api.Rect{W: 100, H: 100}, Children: []*api.Element{
+			{Role: "text", Text: text, Frame: api.Rect{X: x, Y: 10, W: 50, H: 10}, Enabled: true},
+		}}}
+	}
+	if !m.tapped {
+		return screen("Sign in", 10), nil
+	}
+	if m.readsLeft > 0 {
+		m.readsLeft--
+		return screen("Catalog", 60+10*m.readsLeft), nil // sliding in
+	}
+	return screen("Catalog", 10), nil
+}
+
+func withSettle(t *testing.T, gap, changeWait, max time.Duration) {
+	g, c, m, q, r, l := settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead
+	settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead = gap, changeWait, max, 8*gap, 10*gap, 20*gap
+	t.Cleanup(func() {
+		settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead = g, c, m, q, r, l
+	})
+}
+
+// debouncedBackend shows typed text at once and its effect (a filtered list) a moment later,
+// as a search field with a debounce does.
+type debouncedBackend struct {
+	fakeBackend
+	typedAt time.Time
+	delay   time.Duration
+}
+
+func (d *debouncedBackend) TypeText(ctx context.Context, id, text string) error {
+	d.typedAt = time.Now()
+	return nil
+}
+
+func (d *debouncedBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	field, list := "", "36 products"
+	if !d.typedAt.IsZero() {
+		field = "lamp"
+		if time.Since(d.typedAt) >= d.delay {
+			list = "2 products"
+		}
+	}
+	return &api.UITree{Width: 100, Height: 100, Root: &api.Element{Role: "window", Frame: api.Rect{W: 100, H: 100}, Children: []*api.Element{
+		{Role: "text", Text: list, Frame: api.Rect{X: 10, Y: 10, W: 50, H: 10}, Enabled: true},
+		{Role: "textfield", Text: field, Frame: api.Rect{X: 10, Y: 30, W: 50, H: 10}, Enabled: true},
+	}}}, nil
+}
+
+func TestReturnedScreenAfterTypingWaitsOutADebounce(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 400*time.Millisecond, 2*time.Second) // typing: quiet for 40 ms
+	db := &debouncedBackend{delay: 25 * time.Millisecond}
+	svc := NewService(t.TempDir(), db)
+	res, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"lamp","returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uiOf(t, res); got != "2 products@10" {
+		t.Fatalf("returned screen %s, want the filtered list (2 products), not the new text over the old list", got)
+	}
+}
+
+func uiOf(t *testing.T, res any) string {
+	t.Helper()
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("result %T, want a map with ui", res)
+	}
+	tree, ok := m["ui"].(*api.UITree)
+	if !ok {
+		t.Fatalf("ui is %T", m["ui"])
+	}
+	return fmt.Sprintf("%s@%d", tree.Root.Children[0].Text, tree.Root.Children[0].Frame.X)
+}
+
+func TestReturnedScreenIsTheOneTheActionEndsOnOnceStill(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 400*time.Millisecond, 2*time.Second)
+	mb := &movingBackend{}
+	svc := NewService(t.TempDir(), mb)
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uiOf(t, res); got != "Catalog@10" {
+		t.Fatalf("returned screen %s, want the next screen at rest (Catalog@10), not the transition", got)
+	}
+}
+
+func TestReturnedScreenOfAnActionThatChangesNothing(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 60*time.Millisecond, 2*time.Second)
+	fb := &fakeBackend{} // the same screen at every read
+	svc := NewService(t.TempDir(), fb)
+	start := time.Now()
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := res.(map[string]any); !ok || m["ui"] == nil {
+		t.Fatalf("result %v, want the unchanged screen", res)
+	}
+	if took := time.Since(start); took < 60*time.Millisecond || took > time.Second {
+		t.Fatalf("took %v, want about the wait for a first change (60 ms)", took)
+	}
+}
+
+// restlessBackend never shows the same screen twice (a countdown).
+type restlessBackend struct {
+	fakeBackend
+	n int
+}
+
+func (r *restlessBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	r.n++
+	return &api.UITree{Width: 100, Height: 100, Root: &api.Element{Role: "window", Frame: api.Rect{W: 100, H: 100}, Children: []*api.Element{
+		{Role: "text", Text: fmt.Sprintf("%d s left", r.n), Frame: api.Rect{X: 10, Y: 10, W: 50, H: 10}, Enabled: true},
+	}}}, nil
+}
+
+func TestReturnedScreenOfAScreenThatNeverStopsChanging(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 50*time.Millisecond, 150*time.Millisecond)
+	rb := &restlessBackend{}
+	svc := NewService(t.TempDir(), rb)
+	start := time.Now()
+	res, err := svc.Call(context.Background(), "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := res.(map[string]any); !ok || m["ui"] == nil {
+		t.Fatalf("result %v, want the latest screen", res)
+	}
+	if took := time.Since(start); took < 150*time.Millisecond || took > time.Second {
+		t.Fatalf("took %v, want about the longest settle (150 ms)", took)
+	}
+}
+
+func TestTypeIntoWithoutASelectorIsRefused(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	for _, into := range []string{`{}`, `{"index":2}`} {
+		_, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"ada","into":`+into+`}`))
+		if err == nil || !strings.Contains(err.Error(), "into needs text, contains, id or role") {
+			t.Fatalf("into %s: err = %v, want it refused", into, err)
+		}
+	}
+	if tb.taps != 0 || len(tb.calls) != 0 {
+		t.Fatalf("taps %d, calls %q; want nothing typed without the tap", tb.taps, tb.calls)
+	}
+}
+
+func TestTypeIntoRejectsANegativeIndex(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	_, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"ada","into":{"text":"Log in","index":-1}}`))
+	if err == nil || !strings.Contains(err.Error(), "into index must be >= 0") {
+		t.Fatalf("err = %v, want the index refused", err)
+	}
+	if tb.taps != 0 || len(tb.calls) != 0 {
+		t.Fatalf("taps %d, calls %q; want nothing done", tb.taps, tb.calls)
+	}
+}
+
+// flakyBackend shows the next screen after typing, then fails some reads, then shows the same
+// screen again.
+type flakyBackend struct {
+	fakeBackend
+	typed     bool
+	reads     int // reads since the typing
+	failFrom  int // these reads fail: failFrom <= n < failTo
+	failTo    int
+	lastError time.Time
+}
+
+func (f *flakyBackend) TypeText(ctx context.Context, id, text string) error {
+	f.typed = true
+	return nil
+}
+
+func (f *flakyBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	text := "before"
+	if f.typed {
+		text = "after"
+		f.reads++
+		if f.reads >= f.failFrom && f.reads < f.failTo {
+			f.lastError = time.Now()
+			return nil, errors.New("the accessibility service did not answer in time")
+		}
+	}
+	return &api.UITree{Width: 100, Height: 100, Root: &api.Element{Role: "window", Frame: api.Rect{W: 100, H: 100}, Children: []*api.Element{
+		{Role: "text", Text: text, Frame: api.Rect{X: 10, Y: 10, W: 50, H: 10}, Enabled: true},
+	}}}, nil
+}
+
+func TestFailedReadsDoNotCountAsAQuietScreen(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 400*time.Millisecond, 2*time.Second) // typing: quiet for 40 ms
+	// One good read, then failures for longer than the quiet time, then the same screen.
+	fb := &flakyBackend{failFrom: 2, failTo: 14}
+	svc := NewService(t.TempDir(), fb)
+	res, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"x","returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uiOf(t, res); got != "after@10" {
+		t.Fatalf("returned screen %s, want after@10", got)
+	}
+	if quiet := time.Since(fb.lastError); quiet < settleTypeQuiet {
+		t.Fatalf("returned %v after the last failed read, want the screen quiet for %v first", quiet, settleTypeQuiet)
+	}
+}
+
+// hangingBackend's reads hang until their context ends, except the reads numbered in ok
+// (counted from 1, the read before the action included).
+type hangingBackend struct {
+	fakeBackend
+	n  int
+	ok map[int]bool
+}
+
+func (h *hangingBackend) UITree(ctx context.Context, id string) (*api.UITree, error) {
+	h.n++
+	if !h.ok[h.n] {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &api.UITree{Width: 100, Height: 100, Root: &api.Element{Role: "window", Frame: api.Rect{W: 100, H: 100}, Children: []*api.Element{
+		{Role: "text", Text: fmt.Sprintf("read %d", h.n), Frame: api.Rect{X: 10, Y: 10, W: 50, H: 10}, Enabled: true},
+	}}}, nil
+}
+
+func TestAHangingReadEndsWithTheSettling(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 50*time.Millisecond, 150*time.Millisecond)
+	// The read before the tap and the first one after it answer; every later read hangs.
+	hb := &hangingBackend{ok: map[int]bool{1: true, 2: true}}
+	svc := NewService(t.TempDir(), hb)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := svc.Call(ctx, "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uiOf(t, res); got != "read 2@10" {
+		t.Fatalf("returned screen %s, want the latest one read (read 2@10)", got)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("took %v, want about the longest settle (150 ms): a hanging read held the call", took)
+	}
+}
+
+func TestWhenNoReadComesBackInTimeOnePlainReadIsMade(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 50*time.Millisecond, 100*time.Millisecond)
+	// The read before the tap hangs (50 ms), the settling's only read hangs (100 ms); the plain
+	// read after them answers.
+	hb := &hangingBackend{ok: map[int]bool{3: true}}
+	svc := NewService(t.TempDir(), hb)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := svc.Call(ctx, "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uiOf(t, res); got != "read 3@10" {
+		t.Fatalf("returned screen %s, want the plain read's (read 3@10)", got)
+	}
+}
+
+func TestWhenNoReadEverComesBackTheCallFailsInBoundedTime(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 50*time.Millisecond, 100*time.Millisecond) // the last read: 100 ms
+	hb := &hangingBackend{}                                                      // every read hangs until its context ends
+	svc := NewService(t.TempDir(), hb)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := svc.Call(ctx, "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err == nil || !strings.Contains(err.Error(), "tap done, but reading the screen failed") {
+		t.Fatalf("err = %v, want the tap done and the read failed", err)
+	}
+	// 50 ms before the tap, 100 ms settling, 100 ms for the last read.
+	if took := time.Since(start); took < 200*time.Millisecond || took > 3*time.Second {
+		t.Fatalf("took %v, want about 250 ms: the last read must end by its own limit, not the caller's", took)
+	}
+	if hb.taps != 1 || hb.n != 3 {
+		t.Fatalf("taps %d, reads %d; want one tap and three reads (before, settling, last)", hb.taps, hb.n)
+	}
+}

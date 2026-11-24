@@ -70,6 +70,14 @@ func (r *recorder) TypeText(ctx context.Context, id, text string) error {
 	r.add("type %q", text)
 	return nil
 }
+func (r *recorder) ReplaceText(ctx context.Context, id, text string, keys bool) error {
+	r.add("replace %q keys=%v", text, keys)
+	return nil
+}
+func (r *recorder) Key(ctx context.Context, id, key string) error {
+	r.add("key %s", key)
+	return nil
+}
 func (r *recorder) OpenURL(ctx context.Context, id, url string) (string, error) {
 	r.add("open %s", url)
 	return "", nil
@@ -134,6 +142,13 @@ func resultText(res map[string]any) string {
 func TestToolArgumentsReachTheBackend(t *testing.T) {
 	cases := []struct{ tool, args, call string }{
 		{"type_text", `{"text":"hello"}`, `type "hello"`},
+		{"type_text", `{"text":"lamp","clear":true}`, `replace "lamp" keys=false`},
+		{"type_text", `{"text":"","clear":true}`, `replace "" keys=false`}, // only empties the field
+		{"press_key", `{"key":"delete","count":3}`, "key delete|key delete|key delete"},
+		{"type_text", `{"text":"x","into":{"text":"Log in"}}`, `tap 25,25|type "x"`}, // taps the field, then types
+		{"type_text", `{"text":"x","into":{"contains":"log"},"clear":true}`, `tap 25,25|replace "x" keys=false`},
+		{"type_text", `{"text":"x","into":{"label":"Log in"}}`, `tap 25,25|type "x"`}, // label: another name for text
+		{"tap", `{"label":"Log in"}`, "tap 25,25"},
 		{"tap", `{"text":"Log in"}`, "tap 25,25"},
 		{"clipboard", `{"text":"otp 1234"}`, `setclip "otp 1234"`},
 		{"clipboard", `{"action":"set","text":""}`, `setclip ""`},
@@ -155,8 +170,8 @@ func TestToolArgumentsReachTheBackend(t *testing.T) {
 		if res["isError"] == true {
 			t.Fatalf("%s %s: %s", c.tool, c.args, resultText(res))
 		}
-		if len(r.calls) != 1 || r.calls[0] != c.call {
-			t.Fatalf("%s %s: backend calls %q, want %q", c.tool, c.args, r.calls, c.call)
+		if got := strings.Join(r.calls, "|"); got != c.call {
+			t.Fatalf("%s %s: backend calls %q, want %q", c.tool, c.args, got, c.call)
 		}
 	}
 }
@@ -172,6 +187,16 @@ func TestArgumentsTheToolDoesNotTake(t *testing.T) {
 		{"type_text", `{"text":"hi","timeoutMs":5}`, `(did you mean "waitTimeoutMs"?)`},
 		{"find", `{"text":"X","gone":true}`, `find does not take the argument "gone"; its arguments are contains, device, id, index, role, text`},
 		{"screenshot", `{"path":"/tmp/x.png"}`, `screenshot does not take the argument "path"`},
+		// A selector's field that does not exist used to be dropped: the call then typed without
+		// tapping the field, or did not wait, and said ok.
+		{"type_text", `{"text":"x","into":{"placeholder":"E-mail"}}`, `type_text: into does not take "placeholder"; its fields are contains, id, index, role, text`},
+		{"type_text", `{"text":"x","into":{}}`, "into needs text, contains, id or role"},
+		{"type_text", `{"text":"x","into":{"index":1}}`, "into needs text, contains, id or role"},
+		{"type_text", `{"text":"x","into":"E-mail"}`, "into must be an object with contains, id, index, role, text"},
+		{"type_text", `{"text":"x","into":{"text":"a","label":"b"}}`, "give text or label, not both"},
+		{"tap", `{"x":1,"y":1,"waitFor":{"name":"Welcome"}}`, `tap: waitFor does not take "name"`},
+		{"tap", `{"text":"a","label":"b"}`, "tap: give text or label, not both"},
+		{"type_text", `{"text":"x","label":"E-mail"}`, `type_text does not take the argument "label"`}, // not a selector tool
 	}
 	for _, c := range cases {
 		r := &recorder{}
