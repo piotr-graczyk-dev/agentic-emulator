@@ -651,6 +651,8 @@ var (
 	settleMax = 3 * time.Second
 	// settleBeforeRead bounds the read of the screen before the action.
 	settleBeforeRead = time.Second
+	// settleLastRead bounds the one read made when none came back while the screen settled.
+	settleLastRead = 10 * time.Second
 )
 
 // settledTree reads the screen an action ends on once it has stopped changing: the first read
@@ -663,8 +665,9 @@ var (
 // (Android waits 5 s for a dying app's window) ends with the settling and does not hold the
 // call, and the device lock, past settleMax. A read that fails counts as a screen still
 // changing: the quiet time starts again after it. When the time is up, the latest screen read
-// is returned; when no read came back at all, one plain read is made, as an action that does
-// not settle makes.
+// is returned. When no read came back at all, one more is made with settleLastRead to answer:
+// a device that is slow still returns its screen, as it did before screens were settled, and
+// one that does not answer fails the call, at most settleMax + settleLastRead after the action.
 func settledTree(ctx context.Context, b backend.Backend, id string, before *api.UITree, quiet time.Duration) (*api.UITree, error) {
 	start := time.Now()
 	deadline := start.Add(settleMax)
@@ -714,7 +717,9 @@ func settledTree(ctx context.Context, b backend.Backend, id string, before *api.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return b.UITree(ctx, id)
+	lctx, cancel := context.WithTimeout(ctx, settleLastRead)
+	defer cancel()
+	return b.UITree(lctx, id)
 }
 
 // keyTyper is implemented by backends whose TypeText does not send key events (Android sets

@@ -685,9 +685,11 @@ func (m *movingBackend) UITree(ctx context.Context, id string) (*api.UITree, err
 }
 
 func withSettle(t *testing.T, gap, changeWait, max time.Duration) {
-	g, c, m, q, r := settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead
-	settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead = gap, changeWait, max, 8*gap, 10*gap
-	t.Cleanup(func() { settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead = g, c, m, q, r })
+	g, c, m, q, r, l := settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead
+	settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead = gap, changeWait, max, 8*gap, 10*gap, 20*gap
+	t.Cleanup(func() {
+		settleGap, settleChangeWait, settleMax, settleTypeQuiet, settleBeforeRead, settleLastRead = g, c, m, q, r, l
+	})
 }
 
 // debouncedBackend shows typed text at once and its effect (a filtered list) a moment later,
@@ -916,5 +918,25 @@ func TestWhenNoReadComesBackInTimeOnePlainReadIsMade(t *testing.T) {
 	}
 	if got := uiOf(t, res); got != "read 3@10" {
 		t.Fatalf("returned screen %s, want the plain read's (read 3@10)", got)
+	}
+}
+
+func TestWhenNoReadEverComesBackTheCallFailsInBoundedTime(t *testing.T) {
+	withSettle(t, 5*time.Millisecond, 50*time.Millisecond, 100*time.Millisecond) // the last read: 100 ms
+	hb := &hangingBackend{}                                                      // every read hangs until its context ends
+	svc := NewService(t.TempDir(), hb)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := svc.Call(ctx, "tap", json.RawMessage(`{"device":"android:x","x":5,"y":5,"returnUi":true}`))
+	if err == nil || !strings.Contains(err.Error(), "tap done, but reading the screen failed") {
+		t.Fatalf("err = %v, want the tap done and the read failed", err)
+	}
+	// 50 ms before the tap, 100 ms settling, 100 ms for the last read.
+	if took := time.Since(start); took < 200*time.Millisecond || took > 3*time.Second {
+		t.Fatalf("took %v, want about 250 ms: the last read must end by its own limit, not the caller's", took)
+	}
+	if hb.taps != 1 || hb.n != 3 {
+		t.Fatalf("taps %d, reads %d; want one tap and three reads (before, settling, last)", hb.taps, hb.n)
 	}
 }
