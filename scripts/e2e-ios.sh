@@ -142,6 +142,12 @@ if [[ -n "$TESTAPP" ]]; then
   if wait_focused; then ok "name field focused"; else bad "name field never got focus"; fi
   expect "type agemu" type agemu
   expect "greeting shows the typed text" wait --text "Hello, agemu!" --timeout-ms 5000
+  expect "type --clear Ada (replaces the field's text)" type --clear Ada
+  expect "greeting shows only the new text" wait --text "Hello, Ada!" --timeout-ms 5000
+  expect "key delete --count 2" key delete --count 2
+  expect "two characters are gone" wait --text "Hello, A!" --timeout-ms 5000
+  expect "type --clear agemu" type --clear agemu
+  expect "greeting is back" wait --text "Hello, agemu!" --timeout-ms 5000
   expect "screenshot test app" screenshot -o "$OUT/testapp.png"
 
   step "logs and crashes: the test app's lines, a crash notice, the crash report"

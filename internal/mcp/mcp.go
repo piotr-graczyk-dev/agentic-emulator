@@ -76,7 +76,7 @@ var waitProps = map[string]any{
 	}},
 	"waitGone":      boolT("Wait for waitFor to disappear instead"),
 	"waitTimeoutMs": num("Timeout for waitFor, default 10000"),
-	"returnUi":      boolT("Also return the UI outline of the screen the action ends on (act, wait and observe in one call)"),
+	"returnUi":      boolT("Also return the UI outline of the screen the action ends on, read once it has stopped changing (act, wait and observe in one call)"),
 }
 
 func enum(d string, values ...string) map[string]any {
@@ -120,8 +120,10 @@ var tools = []tool{
 	{Name: "find", method: "find", selector: true, Description: "Find elements by text/label/id/role.", InputSchema: obj(selectorProps(nil))},
 	{Name: "tap", method: "tap", selector: true, Description: "Tap at x,y (screenshot pixels) or at the center of the element matching a selector. With waitFor it also waits for the next screen.", InputSchema: obj(withWait(selectorProps(map[string]any{"x": num("X in screenshot pixels"), "y": num("Y in screenshot pixels")})))},
 	{Name: "swipe", method: "swipe", Description: "Swipe from (x,y) to (x2,y2) in screenshot pixels.", InputSchema: obj(withWait(map[string]any{"device": device, "x": num("start x"), "y": num("start y"), "x2": num("end x"), "y2": num("end y"), "durationMs": num("duration, default 300")}), "x", "y", "x2", "y2")},
-	{Name: "type_text", method: "type", Description: "Type text into the focused field.", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
-	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name")}), "key")},
+	{Name: "type_text", method: "type", Description: "Type text into a field. With into, the field matching that selector is tapped first, so one call fills a field; without it the text goes to the focused field. The text is added at the cursor: what the field already holds stays. With clear=true the text replaces what the field holds (an empty text then just empties it).", InputSchema: obj(withWait(map[string]any{"device": device, "text": str("Text to type"), "into": map[string]any{"type": "object", "description": "Tap this field first: a selector, usually text with the field's label or hint", "properties": map[string]any{
+		"text": str("Exact text or label"), "contains": str("Substring of text or label"), "id": str("Identifier"), "role": str("Role, e.g. textfield"), "index": num("Pick the n-th match (0-based)"),
+	}}, "clear": boolT("Replace what the field holds instead of adding to it"), "keys": boolT("Send one key event per character (slower) instead of setting the field's text (Android) or pasting it (iOS)")}), "text")},
+	{Name: "press_key", method: "key", Description: "Press a key: home, back, enter, delete, tab, escape, lock, volumeup, volumedown. To empty a text field use type_text with clear=true, not delete.", InputSchema: obj(withWait(map[string]any{"device": device, "key": str("Key name"), "count": num("Press it this many times (default 1, at most 50)")}), "key")},
 	{Name: "install", method: "install", Description: "Install an app (.apk for Android, .app for iOS Simulator).", InputSchema: obj(map[string]any{"device": device, "path": str("Absolute path")}, "path")},
 	{Name: "launch", method: "launch", Description: "Launch an app by package name / bundle id. iOS also takes process arguments (e.g. an Expo dev client's --initialUrl), environment and relaunch.", InputSchema: obj(withWait(map[string]any{
 		"device":   device,
@@ -431,7 +433,7 @@ func handle(req rpcReq, pool *clientPool) (any, *rpcErr) {
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "agemu", "version": daemon.Version},
-			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
+			"instructions":    "Drive Android emulators and iOS Simulators. Typical loop: devices -> boot -> launch -> ui_tree -> tap/type_text -> wait_for -> screenshot. Coordinates are screenshot pixels. Fewer calls: tap by text, contains or id rather than by coordinates. An action with returnUi returns the screen it ends on once that screen has stopped changing, so no ui_tree call is needed after it; add waitFor when the next screen comes after a request (a sign-in, a payment). Fill a field in one call: type_text with into (the field's label) and, to replace what it holds, clear=true. When several devices are booted, pass device in every call. Test setup: permission, location, appearance, clipboard, open_url, push, clear_app_data; reset restores appearance, location, clipboard and permissions. Debugging: logs, crashes; when the app you launched crashes, the next result starts with a NOTE line and errors say so. A new Android device's first boot returns state preparing (usually 7-8 min, at most 20, once): poll devices until booted; if devices shows noBaseline, call boot again.",
 		}, nil
 	case "ping":
 		return map[string]any{}, nil

@@ -279,7 +279,7 @@ public final class Agent {
             case "text": {
                 tFind = tFocus = tSet = tSel = 0;
                 long t0 = SystemClock.uptimeMillis();
-                String mode = typeText(req.getString("text"), req.optBoolean("keys", false));
+                String mode = typeText(req.getString("text"), req.optBoolean("keys", false), req.optBoolean("clear", false));
                 sb.append("{\"mode\":"); str(sb, mode);
                 sb.append(",\"ms\":").append(SystemClock.uptimeMillis() - t0);
                 sb.append(",\"selMs\":").append(tSel).append(",\"sel\":"); str(sb, lastSel);
@@ -925,7 +925,15 @@ public final class Agent {
      * Tab keys. With keys=true, or when no editable node has input focus, every character is a
      * key event through the IME path, like `adb shell input text`.
      */
-    static String typeText(String text, boolean keys) {
+    static String typeText(String text, boolean keys, boolean clear) {
+        if (clear) {
+            // The whole text is set in one action when that is all there is to do; with key
+            // events, a newline or a tab in the text, the field is emptied first.
+            boolean whole = !keys && !text.isEmpty() && text.indexOf('\n') < 0 && text.indexOf('\r') < 0 && text.indexOf('\t') < 0;
+            if (!replaceText(whole ? text : "", 1000)) throw new IllegalStateException("no text field has the input focus, so there is nothing to clear");
+            if (whole) return "settext";
+            if (text.isEmpty()) return "cleared";
+        }
         if (keys) {
             injectText(text);
             return "keys";
@@ -1055,6 +1063,20 @@ public final class Agent {
             tSel += SystemClock.uptimeMillis() - t2;
         }
         return true;
+    }
+
+    /**
+     * Sets the whole text of the focused editable node, whatever it held (a password field's
+     * masked text cannot be read, but it can be replaced). False: no editable node has the focus.
+     */
+    static boolean replaceText(String text, long focusWaitMs) {
+        AccessibilityNodeInfo f = focusedEditable(focusWaitMs);
+        if (f == null) return false;
+        f = fresh(f);
+        lastEdit = f;
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        return f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
     }
 
     /** Types text with virtual-keyboard key events (like `input text`); characters with no key use ACTION_MULTIPLE. */

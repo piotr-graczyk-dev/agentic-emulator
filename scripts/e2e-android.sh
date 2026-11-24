@@ -136,6 +136,24 @@ ag find --id open_search_view_edit_text --json >"$OUT/field-keys.json"
 grep -q '"text":"wifi"' "$OUT/field-keys.json" || fail "type --keys: field is $(cat "$OUT/field-keys.json")"
 answer=$(search_ran) || fail "Settings search did not answer the query \"wifi\""
 ok "type --keys typed \"wifi\" and Settings answered ($answer)"
+
+step "type --clear (replaces what the field holds), key --count"
+timed ag type --clear "net" >/dev/null
+ag find --id open_search_view_edit_text --json >"$OUT/field-clear.json"
+grep -q '"text":"net"' "$OUT/field-clear.json" || fail "type --clear: field is $(cat "$OUT/field-clear.json") (want \"net\": the old text replaced)"
+ok "type --clear replaced \"wifi\" with \"net\""
+timed ag key delete --count 2 >/dev/null
+for _ in $(seq 20); do # key returns once queued
+  ag find --id open_search_view_edit_text --json >"$OUT/field-count.json"
+  grep -q '"text":"n"' "$OUT/field-count.json" && break
+  sleep 0.25
+done
+grep -q '"text":"n"' "$OUT/field-count.json" || fail "key delete --count 2: field is $(cat "$OUT/field-count.json") (want \"n\")"
+ok "key delete --count 2 left \"n\""
+timed ag type --clear >/dev/null
+ag find --id open_search_view_edit_text --json >"$OUT/field-empty.json"
+grep -q '"text":"n"' "$OUT/field-empty.json" && fail "type --clear with no text: field is $(cat "$OUT/field-empty.json") (want it empty)"
+ok "type --clear with no text emptied the field"
 ag key back >/dev/null
 ag key back >/dev/null
 ag wait --text "Search Settings" --timeout-ms 8000 >/dev/null || ag key back >/dev/null

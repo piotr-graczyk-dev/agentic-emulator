@@ -1834,17 +1834,24 @@ func (b *Backend) Swipe(ctx context.Context, id string, x1, y1, x2, y2, duration
 // and tabs are sent as Enter / Tab keys. With no focused editable node it falls back to key
 // events (TypeKeys).
 func (b *Backend) TypeText(ctx context.Context, id string, text string) error {
-	return b.typeText(ctx, id, text, false)
+	return b.typeText(ctx, id, text, false, false)
+}
+
+// ReplaceText sets the focused field's whole text to text (one ACTION_SET_TEXT, also for a
+// password field, whose masked text cannot be read); with keys it empties the field and types
+// text as key events. An empty text only empties the field.
+func (b *Backend) ReplaceText(ctx context.Context, id string, text string, keys bool) error {
+	return b.typeText(ctx, id, text, keys, true)
 }
 
 // TypeKeys types text as one key event per character through the IME path, like
 // `adb shell input text`, waiting until the app has handled each key. Slower; use it to
 // exercise an app's key handling or the soft keyboard.
 func (b *Backend) TypeKeys(ctx context.Context, id string, text string) error {
-	return b.typeText(ctx, id, text, true)
+	return b.typeText(ctx, id, text, true, false)
 }
 
-func (b *Backend) typeText(ctx context.Context, id string, text string, keys bool) error {
+func (b *Backend) typeText(ctx context.Context, id string, text string, keys, clear bool) error {
 	d, err := b.devFor(id)
 	if err != nil {
 		return err
@@ -1853,7 +1860,7 @@ func (b *Backend) typeText(ctx context.Context, id string, text string, keys boo
 	if err != nil {
 		return err
 	}
-	if text == "" {
+	if text == "" && !clear {
 		return nil
 	}
 	// The field a tap just hit may not have the focus yet (focus.go). The tree is read past the
@@ -1870,7 +1877,11 @@ func (b *Backend) typeText(ctx context.Context, id string, text string, keys boo
 	var res struct {
 		Mode string `json:"mode"`
 	}
-	return d.call(ctx, map[string]any{"cmd": "text", "text": text, "keys": keys}, &res)
+	req := map[string]any{"cmd": "text", "text": text, "keys": keys}
+	if clear {
+		req["clear"] = true
+	}
+	return d.call(ctx, req, &res)
 }
 
 // Android KeyEvent key codes for the named keys.

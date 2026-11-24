@@ -79,7 +79,9 @@ method, sample sizes and every other measurement are in [docs/ANDROID.md](docs/A
 ## What the agent gets
 
 - **One call per step.** `tap --text "Sign in" --wait-text Welcome --ui` taps, waits for the
-  result and returns the new screen. Fewer calls means fewer agent turns.
+  result and returns the new screen. With `--ui` alone the screen comes back once it has stopped
+  changing, so the agent does not have to know what to wait for. `type --into "E-mail"` taps the
+  field and types into it. Fewer calls means fewer agent turns.
 - **Taps that land.** A tap by selector waits until the element can take the touch: after a screen
   transition, or when an alert or sheet has just appeared. A flow doesn't fail because a tap came
   too early. `--contains` prefers an element whose whole text is the given text, and a switch is
@@ -169,7 +171,8 @@ agemu boot agemu-iphone
 agemu install MyApp.app && agemu launch com.example.app
 agemu ui                                               # compact outline: [ref] role "text" id=... @(x,y wxh)
 agemu tap --text "Sign in" --wait-text Welcome --ui    # act, wait and observe in one call
-agemu type "hello"                                     # into the focused field
+agemu type "hello"                                     # into the focused field, at its cursor
+agemu type --into "Search" --clear "lamp"              # tap the field, replace what it holds
 agemu key back                                         # home, back, enter, delete, tab, escape, ...
 agemu screenshot -o shot.png
 agemu logs com.example.app --since launch --level warn

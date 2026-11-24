@@ -231,6 +231,11 @@ func TestValidCommandLinesStillParse(t *testing.T) {
 		{"tap", "--id", "log-levels", "--wait-contains", "levels tok"},
 		{"swipe", "10", "20", "10", "80", "--ms", "500", "--ui"},
 		{"type", "--keys", "wifi"},
+		{"type", "--clear", "lamp"},
+		{"type", "Ada Lovelace", "--into", "Full name", "--clear", "--ui"},
+		{"type", "lamp", "--into-contains", "Search", "--into-id", "search-field"},
+		{"type", "--clear"}, // only empties the field
+		{"key", "delete", "--count", "5"},
 		{"type", "hello", "--wait-contains", "hello"},
 		{"key", "back", "--wait-text", "Settings"},
 		{"profile", "--width", "900", "--height", "1800", "--density", "360"},
