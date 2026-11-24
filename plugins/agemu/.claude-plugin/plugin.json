@@ -1,0 +1,39 @@
+{
+  "name": "agemu",
+  "displayName": "agemu",
+  "version": "0.1.0",
+  "description": "Drive the Android emulator and the iOS Simulator from Claude Code: millisecond screenshots and screen reads, taps that wait for the next screen, logs and crash reports. Adds the agemu MCP server and a skill for the build, run and check loop.",
+  "author": {
+    "name": "Piotr Graczyk",
+    "url": "https://github.com/piotr-graczyk-dev"
+  },
+  "homepage": "https://github.com/piotr-graczyk-dev/agentic-emulator",
+  "repository": "https://github.com/piotr-graczyk-dev/agentic-emulator",
+  "license": "MIT",
+  "keywords": [
+    "android",
+    "ios",
+    "emulator",
+    "simulator",
+    "mobile",
+    "react-native",
+    "expo",
+    "testing",
+    "mcp"
+  ],
+  "mcpServers": {
+    "agemu": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "agentic-emulator@latest",
+        "mcp"
+      ]
+    }
+  },
+  "network": {
+    "hosts": [
+      "registry.npmjs.org"
+    ]
+  }
+}

@@ -154,6 +154,15 @@ What is different from the Mac:
 | Codex CLI | `codex mcp add agemu -- npx -y agentic-emulator@latest mcp` |
 | Cursor, Claude Desktop, other JSON configs | `{"mcpServers": {"agemu": {"command": "npx", "args": ["-y", "agentic-emulator@latest", "mcp"]}}}` |
 
+Claude Code can install agemu as a plugin instead of the first row: the same MCP server plus the
+`check-on-device` skill ([plugins/agemu](../plugins/agemu)). Use one of the two, or the tools are
+listed twice.
+
+```sh
+claude plugin marketplace add piotr-graczyk-dev/agentic-emulator
+claude plugin install agemu@agemu
+```
+
 Apps started from the Dock do not see your shell's `PATH`. If one cannot find `npx`, put the path
 `which npx` prints in `command`, or install `agemu` and use the absolute path `agemu doctor`
 prints.
