@@ -263,6 +263,10 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if p.Into != nil && p.Into.Index < 0 {
 		return nil, nil, fmt.Errorf("into index must be >= 0, got %d", p.Into.Index)
 	}
+	if p.Into != nil && p.Into.Empty() {
+		// Typing without the tap would put the text into whatever has the focus, or nowhere.
+		return nil, nil, fmt.Errorf("type: into needs text, contains, id or role to find the field")
+	}
 	switch method {
 	case "ping":
 		ping := Ping{OK: true, PID: os.Getpid(), Version: Version, Exe: exePath, Started: started, AndroidSDK: toolchain.AndroidSDK()}
@@ -583,7 +587,7 @@ func (s *Service) act(ctx context.Context, b backend.Backend, id, method string,
 		}
 		return ok(b.Swipe(ctx, id, *p.X, *p.Y, p.X2, p.Y2, d))
 	case "type":
-		if p.Into != nil && !p.Into.Empty() {
+		if p.Into != nil {
 			if _, err := s.act(ctx, b, id, "tap", Params{Selector: p.Into, start: p.start}); err != nil {
 				return nil, fmt.Errorf("type: tapping the field: %w", err)
 			}

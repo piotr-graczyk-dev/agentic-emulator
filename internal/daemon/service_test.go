@@ -805,6 +805,20 @@ func TestReturnedScreenOfAScreenThatNeverStopsChanging(t *testing.T) {
 	}
 }
 
+func TestTypeIntoWithoutASelectorIsRefused(t *testing.T) {
+	tb := &typingBackend{}
+	svc := NewService(t.TempDir(), tb)
+	for _, into := range []string{`{}`, `{"index":2}`} {
+		_, err := svc.Call(context.Background(), "type", json.RawMessage(`{"device":"android:x","text":"ada","into":`+into+`}`))
+		if err == nil || !strings.Contains(err.Error(), "into needs text, contains, id or role") {
+			t.Fatalf("into %s: err = %v, want it refused", into, err)
+		}
+	}
+	if tb.taps != 0 || len(tb.calls) != 0 {
+		t.Fatalf("taps %d, calls %q; want nothing typed without the tap", tb.taps, tb.calls)
+	}
+}
+
 func TestTypeIntoRejectsANegativeIndex(t *testing.T) {
 	tb := &typingBackend{}
 	svc := NewService(t.TempDir(), tb)
