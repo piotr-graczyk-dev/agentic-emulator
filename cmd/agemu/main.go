@@ -586,7 +586,14 @@ func params(cmd string, c cli, stdin io.Reader, p *daemon.Params) (string, error
 			return "", fmt.Errorf("key needs a key name")
 		}
 		p.Key = c.pos[0]
-		p.Count = c.int("count")
+		count, err := c.number("count")
+		if err != nil {
+			return "", err
+		}
+		if _, given := c.flags["count"]; given && count < 1 {
+			return "", fmt.Errorf("--count must be at least 1, got %d", count)
+		}
+		p.Count = count
 	case "install":
 		if len(c.pos) == 0 {
 			return "", fmt.Errorf("install needs a path")

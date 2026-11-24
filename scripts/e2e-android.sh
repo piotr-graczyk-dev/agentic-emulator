@@ -152,7 +152,9 @@ grep -q '"text":"n"' "$OUT/field-count.json" || fail "key delete --count 2: fiel
 ok "key delete --count 2 left \"n\""
 timed ag type --clear >/dev/null
 ag find --id open_search_view_edit_text --json >"$OUT/field-empty.json"
-grep -q '"text":"n"' "$OUT/field-empty.json" && fail "type --clear with no text: field is $(cat "$OUT/field-empty.json") (want it empty)"
+# An empty field has no text (its hint is the label), so any text at all is a failure.
+grep -Eq '"text":"[^"]' "$OUT/field-empty.json" && fail "type --clear with no text: field is $(cat "$OUT/field-empty.json") (want it empty)"
+grep -q '"id":"[^"]*open_search_view_edit_text"' "$OUT/field-empty.json" || fail "type --clear with no text: the search field is not in $(cat "$OUT/field-empty.json")"
 ok "type --clear with no text emptied the field"
 ag key back >/dev/null
 ag key back >/dev/null

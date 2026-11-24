@@ -260,6 +260,9 @@ func (s *Service) Handle(ctx context.Context, method string, raw json.RawMessage
 	if p.Selector != nil && p.Selector.Index < 0 {
 		return nil, nil, fmt.Errorf("selector index must be >= 0, got %d", p.Selector.Index)
 	}
+	if p.Into != nil && p.Into.Index < 0 {
+		return nil, nil, fmt.Errorf("into index must be >= 0, got %d", p.Into.Index)
+	}
 	switch method {
 	case "ping":
 		ping := Ping{OK: true, PID: os.Getpid(), Version: Version, Exe: exePath, Started: started, AndroidSDK: toolchain.AndroidSDK()}
@@ -483,7 +486,11 @@ func (s *Service) onDevice(ctx context.Context, b backend.Backend, id, method st
 	// stopped changing (settledTree); the screen before the action tells a change from none.
 	var before *api.UITree
 	if p.ReturnUI && !compound {
-		before, _ = b.UITree(ctx, id)
+		// Bounded, so a read that hangs does not hold the action back; without it the screen
+		// counts as changed from the first read on.
+		bctx, cancel := context.WithTimeout(ctx, settleBeforeRead)
+		before, _ = b.UITree(bctx, id)
+		cancel()
 	}
 	res, err := s.act(ctx, b, id, method, p)
 	if err == nil {
@@ -642,57 +649,72 @@ var (
 	// settleMax: a screen that never stops changing (a spinner, a countdown) is returned as it
 	// is after this long.
 	settleMax = 3 * time.Second
+	// settleBeforeRead bounds the read of the screen before the action.
+	settleBeforeRead = time.Second
 )
 
 // settledTree reads the screen an action ends on once it has stopped changing: the first read
 // that differs from before (the screen read just before the action; nil: unknown) and has shown
 // the same screen for quiet. An agent that asks for the screen after a tap then gets the next
 // screen, not a transition's middle, without having to know what to wait for. Screens are
-// compared as the outlines the agent sees (texts, roles, ids and frames). All waits are bounded:
-// see settleChangeWait and settleMax. A read that fails counts as a screen still changing.
+// compared as the outlines the agent sees (texts, roles, ids and frames).
+//
+// All waits are bounded (settleChangeWait, settleMax), and so is every read: one that hangs
+// (Android waits 5 s for a dying app's window) ends with the settling and does not hold the
+// call, and the device lock, past settleMax. A read that fails counts as a screen still
+// changing: the quiet time starts again after it. When the time is up, the latest screen read
+// is returned; when no read came back at all, one plain read is made, as an action that does
+// not settle makes.
 func settledTree(ctx context.Context, b backend.Backend, id string, before *api.UITree, quiet time.Duration) (*api.UITree, error) {
 	start := time.Now()
-	var stableSince time.Time
+	deadline := start.Add(settleMax)
 	beforeSig, changed := "", before == nil
 	if before != nil {
 		beforeSig = outline.Render(before)
 	}
-	var last *api.UITree
-	var lastSig string
-	var lastErr error
-	for {
-		t, err := b.UITree(ctx, id)
+	var latest *api.UITree // the latest screen read
+	var prevSig string     // the previous read's screen, when havePrev
+	havePrev := false      // false at the start and after a read that failed
+	var stableSince time.Time
+	for ctx.Err() == nil {
+		rctx, cancel := context.WithDeadline(ctx, deadline)
+		t, err := b.UITree(rctx, id)
+		cancel()
 		if err != nil {
-			lastErr = err
+			havePrev = false
 		} else {
 			sig := outline.Render(t)
 			changed = changed || sig != beforeSig
-			if last == nil || sig != lastSig {
+			if !havePrev || sig != prevSig {
 				stableSince = time.Now()
 			}
-			if changed && last != nil && sig == lastSig && time.Since(stableSince) >= quiet {
+			if changed && havePrev && sig == prevSig && time.Since(stableSince) >= quiet {
 				return t, nil
 			}
 			if !changed && time.Since(start) >= settleChangeWait {
 				return t, nil
 			}
-			last, lastSig = t, sig
+			latest, prevSig, havePrev = t, sig, true
 		}
-		if time.Since(start) >= settleMax {
-			if last != nil {
-				return last, nil
-			}
-			return nil, lastErr
+		wait := min(settleGap, time.Until(deadline))
+		if wait <= 0 {
+			break
 		}
 		select {
 		case <-ctx.Done():
-			if last != nil {
-				return last, nil
-			}
-			return nil, ctx.Err()
-		case <-time.After(settleGap):
+		case <-time.After(wait):
+		}
+		if !time.Now().Before(deadline) {
+			break
 		}
 	}
+	if latest != nil {
+		return latest, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return b.UITree(ctx, id)
 }
 
 // keyTyper is implemented by backends whose TypeText does not send key events (Android sets
