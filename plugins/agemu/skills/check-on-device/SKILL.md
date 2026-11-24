@@ -43,8 +43,8 @@ Prefer the project's own build command. The usual ones:
   element can take the touch.
 - Give the action `returnUi: true`. The call then acts and returns the screen it ends on, read
   once it has stopped changing. Do not call `ui_tree` after it.
-- When the next screen comes after a request (a sign-in, a payment), also give `waitFor` with
-  something that screen shows.
+- Give `waitFor` only a text or id you know the next screen has. Do not guess one: a `waitFor`
+  that matches nothing runs to its 10 s timeout.
 - Fill a field in one call: `type_text` with `into: {"text": "<the field's label>"}`. The text
   is added to what the field holds; `clear: true` replaces it. Do not delete character by
   character.
