@@ -1,0 +1,16 @@
+{
+  "name": "agemu",
+  "owner": {
+    "name": "Piotr Graczyk",
+    "url": "https://github.com/piotr-graczyk-dev"
+  },
+  "description": "agemu: a fast Android emulator and iOS Simulator runtime for coding agents.",
+  "plugins": [
+    {
+      "name": "agemu",
+      "source": "./plugins/agemu",
+      "description": "Drive the Android emulator and the iOS Simulator from Claude Code: millisecond screenshots and screen reads, taps that wait for the next screen, logs and crash reports. Adds the agemu MCP server and a skill for the build, run and check loop.",
+      "category": "development"
+    }
+  ]
+}

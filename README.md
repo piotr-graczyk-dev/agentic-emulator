@@ -137,6 +137,15 @@ clients that read an `mcpServers` config:
 {"mcpServers": {"agemu": {"command": "npx", "args": ["-y", "agentic-emulator@latest", "mcp"]}}}
 ```
 
+Claude Code can take agemu as a plugin instead. It adds the same MCP server and a skill,
+`check-on-device`, that teaches the build, run and check loop
+([plugins/agemu](plugins/agemu)):
+
+```sh
+claude plugin marketplace add piotr-graczyk-dev/agentic-emulator
+claude plugin install agemu@agemu
+```
+
 `agemu doctor` checks each platform separately. One is enough: an iOS-only or Android-only Mac is
 fine.
 
